@@ -17,7 +17,8 @@ public class MagicMeleeService(
     private const float AreaReach = 6f;
     private const short AreaStruckFlag = 1;
 
-    public async Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data)
+    public async Task ExecuteAsync(
+        UserSession caster, MagicData magic, int skillId, int targetId, int[] data, MagicCharge charge)
     {
         if (!MagicTypeLookup.TryResolve(gameDataService.MagicType1Table, magic, skillId, out var type1Data))
         {
@@ -30,7 +31,7 @@ public class MagicMeleeService(
         int finalDamage;
         if (targetId == AreaTarget)
         {
-            if (type1Data.HitType != 0)
+            if (type1Data.HitType != 0 || !await charge.TryPayAsync())
             {
                 await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
                 return;
@@ -45,7 +46,7 @@ public class MagicMeleeService(
             var target = sessionManager.GetByCharacterId(targetId);
             if (target != null)
             {
-                if (!PvpRules.CanAttackPlayer(caster, target))
+                if (!PvpRules.CanAttackPlayer(caster, target) || !await charge.TryPayAsync())
                 {
                     await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
                     return;
@@ -62,6 +63,12 @@ public class MagicMeleeService(
                     logger.LogWarning("Type1 NPC target fail: {Name} skill={SkillId} targetId={TargetId} found={Found} alive={Alive} attackable={Attackable}",
                         caster.Name, skillId, targetId,
                         npcTarget != null, npcTarget?.IsAlive, npcTarget?.IsAttackable);
+                    await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
+                    return;
+                }
+
+                if (!await charge.TryPayAsync())
+                {
                     await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
                     return;
                 }
@@ -130,18 +137,18 @@ public class MagicMeleeService(
         if (!target.BlockPhysical)
             finalDamage += PlayerBonusDamage(type1Data.AddDamage, caster.ZoneId);
 
-        finalDamage = GmMode.Taken(target, GmMode.Dealt(caster, target.Hp,
-            Math.Min(finalDamage, CombatUtils.MaxDamage)));
-        if (finalDamage > 0)
+        var outcome = target.ApplyDamage(GmMode.Taken(target, GmMode.Dealt(caster, target.Hp,
+            Math.Min(finalDamage, CombatUtils.MaxDamage))));
+        if (outcome.Dealt > 0)
         {
-            target.Hp = (short)Math.Max(0, target.Hp - finalDamage);
             await combatLifecycleService.SendHpChangeAsync(target);
-            await combatLifecycleService.SendPlayerTargetHpAsync(caster, target, finalDamage);
-            if (target.Hp <= 0)
-                await combatLifecycleService.HandlePlayerDeathAsync(target, caster);
+            await combatLifecycleService.SendPlayerTargetHpAsync(caster, target, outcome.Dealt);
         }
 
-        return finalDamage;
+        if (outcome.Killed)
+            await combatLifecycleService.HandlePlayerDeathAsync(target, caster);
+
+        return outcome.Dealt;
     }
 
     private async Task<int> StrikeNpcAsync(UserSession caster, MagicType1Data type1Data, NpcInstance npcTarget)
@@ -154,17 +161,18 @@ public class MagicMeleeService(
             Math.Max(1f, npcTarget.EvadeRate),
             isPlayerTarget: false);
         finalDamage += type1Data.AddDamage;
-        finalDamage = GmMode.Dealt(caster, npcTarget.Hp, Math.Min(finalDamage, CombatUtils.MaxDamage));
-        if (finalDamage > 0)
+        var outcome = npcTarget.ApplyDamage(
+            GmMode.Dealt(caster, npcTarget.Hp, Math.Min(finalDamage, CombatUtils.MaxDamage)));
+        if (outcome.Dealt > 0)
         {
-            npcTarget.Hp = Math.Max(0, npcTarget.Hp - finalDamage);
-            npcTarget.RecordDamage(caster.CharacterId, finalDamage, caster, id => sessionManager.GetByCharacterId(id));
-            await combatLifecycleService.SendNpcTargetHpAsync(caster, npcTarget, finalDamage);
-            if (npcTarget.Hp <= 0)
-                await combatLifecycleService.HandleNpcDeathAsync(npcTarget, caster);
+            npcTarget.RecordDamage(caster.CharacterId, outcome.Dealt, caster, id => sessionManager.GetByCharacterId(id));
+            await combatLifecycleService.SendNpcTargetHpAsync(caster, npcTarget, outcome.Dealt);
         }
 
-        return finalDamage;
+        if (outcome.Killed)
+            await combatLifecycleService.HandleNpcDeathAsync(npcTarget, caster);
+
+        return outcome.Dealt;
     }
 
     private const int WarZoneBonusDivisor = 2;

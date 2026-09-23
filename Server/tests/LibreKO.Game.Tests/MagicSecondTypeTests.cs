@@ -20,13 +20,13 @@ public class MagicSecondTypeTests
         var (execution, combat, status, movement) = CreateExecutionService();
         var magic = new MagicData { Id = SkillId, Type1 = 3, Type2 = 4 };
 
-        await execution.ExecuteAsync(null!, magic, SkillId, TargetId, new int[7]);
+        await execution.ExecuteAsync(null!, magic, SkillId, TargetId, new int[7], MagicCharge.Prepaid);
 
         await combat.Received(1).ExecuteAsync(
-            Arg.Any<UserSession>(), magic, MagicSkillType.OverTime, SkillId, TargetId, Arg.Any<int[]>());
+            Arg.Any<UserSession>(), magic, MagicSkillType.OverTime, SkillId, TargetId, Arg.Any<int[]>(), Arg.Any<MagicCharge>());
         await status.Received(1).ExecuteAsync(
-            Arg.Any<UserSession>(), magic, MagicSkillType.Buff, SkillId, TargetId, Arg.Any<int[]>());
-        await movement.DidNotReceiveWithAnyArgs().ExecuteAsync(default!, default!, 0, 0, default!);
+            Arg.Any<UserSession>(), magic, MagicSkillType.Buff, SkillId, TargetId, Arg.Any<int[]>(), Arg.Any<MagicCharge>());
+        await movement.DidNotReceiveWithAnyArgs().ExecuteAsync(default!, default!, 0, 0, default!, default!);
     }
 
     [Fact]
@@ -35,11 +35,11 @@ public class MagicSecondTypeTests
         var (execution, combat, status, _) = CreateExecutionService();
         var magic = new MagicData { Id = SkillId, Type1 = 1, Type2 = 0 };
 
-        await execution.ExecuteAsync(null!, magic, SkillId, TargetId, new int[7]);
+        await execution.ExecuteAsync(null!, magic, SkillId, TargetId, new int[7], MagicCharge.Prepaid);
 
         await combat.Received(1).ExecuteAsync(
-            Arg.Any<UserSession>(), magic, MagicSkillType.Melee, SkillId, TargetId, Arg.Any<int[]>());
-        await status.DidNotReceiveWithAnyArgs().ExecuteAsync(default!, default!, 0, 0, 0, default!);
+            Arg.Any<UserSession>(), magic, MagicSkillType.Melee, SkillId, TargetId, Arg.Any<int[]>(), Arg.Any<MagicCharge>());
+        await status.DidNotReceiveWithAnyArgs().ExecuteAsync(default!, default!, 0, 0, 0, default!, default!);
     }
 
     [Fact]
@@ -48,13 +48,13 @@ public class MagicSecondTypeTests
         var (execution, combat, status, _) = CreateExecutionService();
         var magic = new MagicData { Id = SkillId, Type1 = 6, Type2 = 4 };
 
-        await execution.ExecuteAsync(null!, magic, SkillId, TargetId, new int[7]);
+        await execution.ExecuteAsync(null!, magic, SkillId, TargetId, new int[7], MagicCharge.Prepaid);
 
         await status.Received(1).ExecuteAsync(
-            Arg.Any<UserSession>(), magic, MagicSkillType.Transform, SkillId, TargetId, Arg.Any<int[]>());
+            Arg.Any<UserSession>(), magic, MagicSkillType.Transform, SkillId, TargetId, Arg.Any<int[]>(), Arg.Any<MagicCharge>());
         await status.Received(1).ExecuteAsync(
-            Arg.Any<UserSession>(), magic, MagicSkillType.Buff, SkillId, TargetId, Arg.Any<int[]>());
-        await combat.DidNotReceiveWithAnyArgs().ExecuteAsync(default!, default!, 0, 0, 0, default!);
+            Arg.Any<UserSession>(), magic, MagicSkillType.Buff, SkillId, TargetId, Arg.Any<int[]>(), Arg.Any<MagicCharge>());
+        await combat.DidNotReceiveWithAnyArgs().ExecuteAsync(default!, default!, 0, 0, 0, default!, default!);
     }
 
     private static (IMagicExecutionService Execution,

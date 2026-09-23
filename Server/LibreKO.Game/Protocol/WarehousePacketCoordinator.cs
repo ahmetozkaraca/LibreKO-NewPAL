@@ -18,8 +18,6 @@ public class WarehousePacketCoordinator(
     IUserNotificationService userNotificationService,
     ILogger<WarehousePacketCoordinator> logger) : IWarehousePacketCoordinator
 {
-    private const int ItemNoTrade = 900000001;
-    private const int CoinMax = 2_100_000_000;
     private const int WarehousePageSize = 24;
 
     public async Task HandleAsync(IClient client, Packet packet)
@@ -67,243 +65,203 @@ public class WarehousePacketCoordinator(
 
     private async Task InputAsync(UserSession session, Packet packet)
     {
-        _ = packet.ReadInt(); // NPC unique ID (unused, validated via quest event NPC)
+        var npcId = packet.ReadInt();
         var itemId = packet.ReadInt();
         var page = packet.ReadByte();
         var srcPos = packet.ReadByte();
         var dstPos = packet.ReadByte();
         var count = packet.ReadInt();
 
+        if (!CanUseWarehouse(session, npcId))
+        {
+            await SendResultAsync(session, WarehouseSubOpcode.Input, false);
+            return;
+        }
 
         if (itemId == InventoryConstants.ItemGold)
         {
             var goldOk = session.WithLock(s =>
             {
-                if (count <= 0 || count > s.Money || s.WarehouseMoney > CoinMax - count)
+                if (count <= 0 || count > s.Money || !Coins.CanCredit(s.WarehouseMoney, count))
                     return false;
                 s.Money -= count;
                 s.WarehouseMoney += count;
                 return true;
             });
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Input, goldOk ? WarehousePacketWriter.Succeeded : WarehousePacketWriter.Failed));
+            await SendResultAsync(session, WarehouseSubOpcode.Input, goldOk);
             return;
         }
 
         var itemData = gameDataService.GetItem(itemId);
+        var realDst = page * WarehousePageSize + dstPos;
         if (itemData == null
             || srcPos >= InventoryConstants.HaveMax
             || dstPos >= WarehousePageSize
-            || itemId >= ItemNoTrade
-            || count <= 0
-            || (itemData.Countable == 0 && count != 1))
+            || realDst >= UserSession.WarehouseMax
+            || !IsTransferableCount(itemData, count))
         {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Input, WarehousePacketWriter.Failed));
+            await SendResultAsync(session, WarehouseSubOpcode.Input, false);
             return;
         }
 
-        var absSrc = InventoryConstants.SlotMax + srcPos;
-        var realDst = page * WarehousePageSize + dstPos;
-        if (realDst >= UserSession.WarehouseMax)
-        {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Input, WarehousePacketWriter.Failed));
-            return;
-        }
-
+        var absSrc = InventoryConstants.InventoryStart + srcPos;
         var success = session.WithLock(s =>
         {
             var source = s.Inventory[absSrc];
-            if (source.ItemId != itemId || source.Count < count)
+            if (!Holds(source, itemId, itemData, count) || !ItemTransfer.CanLeaveOwner(source, itemData))
                 return false;
 
-            var destination = s.Warehouse[realDst];
-            if (!CanMergeOrPlace(itemData, destination, itemId, count))
+            if (!Transfer(source, s.Warehouse[realDst], itemData, count))
                 return false;
 
-            var destinationWasEmpty = destination.IsEmpty;
-            destination.ItemId = itemId;
-            destination.Count += (ushort)count;
-            destination.Flag = source.Flag;
-            if (destinationWasEmpty)
-                destination.Durability = source.Durability;
-
-            source.Count -= (ushort)count;
-            if (source.Count == 0)
-                source.Clear();
-
-            var coefficient = gameDataService.GetCoefficient(s.Class);
-            if (coefficient != null)
-                s.RecalculateStats(coefficient, gameDataService);
+            s.RecalculateStatsWithBuffs(gameDataService);
             return true;
         });
 
-        await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Input, success ? WarehousePacketWriter.Succeeded : WarehousePacketWriter.Failed));
+        await SendResultAsync(session, WarehouseSubOpcode.Input, success);
         if (success)
             await userNotificationService.SendWeightChangeAsync(session);
     }
 
     private async Task OutputAsync(UserSession session, Packet packet)
     {
-        _ = packet.ReadInt(); // NPC unique ID (unused, validated via quest event NPC)
+        var npcId = packet.ReadInt();
         var itemId = packet.ReadInt();
         var page = packet.ReadByte();
         var srcPos = packet.ReadByte();
         var dstPos = packet.ReadByte();
         var count = packet.ReadInt();
 
+        if (!CanUseWarehouse(session, npcId))
+        {
+            await SendResultAsync(session, WarehouseSubOpcode.Output, false);
+            return;
+        }
 
         if (itemId == InventoryConstants.ItemGold)
         {
             var goldOk = session.WithLock(s =>
             {
-                if (count <= 0 || count > s.WarehouseMoney || s.Money > CoinMax - count)
+                if (count <= 0 || count > s.WarehouseMoney || !Coins.CanCredit(s.Money, count))
                     return false;
                 s.WarehouseMoney -= count;
                 s.Money += count;
                 return true;
             });
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Output, goldOk ? WarehousePacketWriter.Succeeded : WarehousePacketWriter.Failed));
-            return;
-        }
-
-        if (srcPos >= WarehousePageSize || dstPos >= InventoryConstants.HaveMax || count <= 0)
-        {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Output, WarehousePacketWriter.Failed));
-            return;
-        }
-
-        var realSrc = page * WarehousePageSize + srcPos;
-        if (realSrc >= UserSession.WarehouseMax)
-        {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Output, WarehousePacketWriter.Failed));
+            await SendResultAsync(session, WarehouseSubOpcode.Output, goldOk);
             return;
         }
 
         var itemData = gameDataService.GetItem(itemId);
-        if (itemData == null)
+        var realSrc = page * WarehousePageSize + srcPos;
+        if (itemData == null
+            || srcPos >= WarehousePageSize
+            || realSrc >= UserSession.WarehouseMax
+            || dstPos >= InventoryConstants.HaveMax
+            || !IsTransferableCount(itemData, count))
         {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Output, WarehousePacketWriter.Failed));
+            await SendResultAsync(session, WarehouseSubOpcode.Output, false);
             return;
         }
 
-        var absDst = InventoryConstants.SlotMax + dstPos;
-
+        var absDst = InventoryConstants.InventoryStart + dstPos;
         var success = session.WithLock(s =>
         {
             var source = s.Warehouse[realSrc];
-            if (source.ItemId != itemId || source.Count < count || (itemData.Countable == 0 && count != 1))
+            if (!Holds(source, itemId, itemData, count) || !Transfer(source, s.Inventory[absDst], itemData, count))
                 return false;
 
-            var destination = s.Inventory[absDst];
-            if (!CanMergeOrPlace(itemData, destination, itemId, count))
-                return false;
-
-            var destinationWasEmpty = destination.IsEmpty;
-            destination.ItemId = itemId;
-            destination.Count += (ushort)count;
-            destination.Flag = source.Flag;
-            if (destinationWasEmpty)
-                destination.Durability = source.Durability;
-
-            source.Count -= (ushort)count;
-            if (source.Count == 0)
-                source.Clear();
-
-            var coefficient = gameDataService.GetCoefficient(s.Class);
-            if (coefficient != null)
-                s.RecalculateStats(coefficient, gameDataService);
+            s.RecalculateStatsWithBuffs(gameDataService);
             return true;
         });
 
-        await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Output, success ? WarehousePacketWriter.Succeeded : WarehousePacketWriter.Failed));
+        await SendResultAsync(session, WarehouseSubOpcode.Output, success);
         if (success)
             await userNotificationService.SendWeightChangeAsync(session);
     }
 
-    private static async Task MoveAsync(UserSession session, Packet packet)
+    private async Task MoveAsync(UserSession session, Packet packet)
     {
-        _ = packet.ReadInt(); // NPC unique ID (unused, validated via quest event NPC)
+        var npcId = packet.ReadInt();
         var itemId = packet.ReadInt();
         var page = packet.ReadByte();
         var srcPos = packet.ReadByte();
         var dstPos = packet.ReadByte();
 
-
-        if (srcPos >= WarehousePageSize || dstPos >= WarehousePageSize)
-        {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Move, WarehousePacketWriter.Failed));
-            return;
-        }
-
         var realSrc = page * WarehousePageSize + srcPos;
         var realDst = page * WarehousePageSize + dstPos;
-        if (realSrc >= UserSession.WarehouseMax || realDst >= UserSession.WarehouseMax)
+        if (!CanUseWarehouse(session, npcId)
+            || srcPos >= WarehousePageSize
+            || dstPos >= WarehousePageSize
+            || realSrc >= UserSession.WarehouseMax
+            || realDst >= UserSession.WarehouseMax)
         {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Move, WarehousePacketWriter.Failed));
+            await SendResultAsync(session, WarehouseSubOpcode.Move, false);
             return;
         }
 
-        var moved = session.WithLock(s =>
-        {
-            var source = s.Warehouse[realSrc];
-            var destination = s.Warehouse[realDst];
-            if (source.ItemId != itemId || !destination.IsEmpty)
-                return false;
+        var moved = session.WithLock(s => TryMove(s.Warehouse[realSrc], s.Warehouse[realDst], itemId));
 
-            destination.ItemId = source.ItemId;
-            destination.Durability = source.Durability;
-            destination.Count = source.Count;
-            destination.Flag = source.Flag;
-            source.Clear();
-            return true;
-        });
-
-        await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.Move, moved ? WarehousePacketWriter.Succeeded : WarehousePacketWriter.Failed));
+        await SendResultAsync(session, WarehouseSubOpcode.Move, moved);
     }
 
-    private static async Task InventoryMoveAsync(UserSession session, Packet packet)
+    private async Task InventoryMoveAsync(UserSession session, Packet packet)
     {
-        _ = packet.ReadInt(); // NPC unique ID (unused, validated via quest event NPC)
+        var npcId = packet.ReadInt();
         var itemId = packet.ReadInt();
         _ = packet.ReadByte();
         var srcPos = packet.ReadByte();
         var dstPos = packet.ReadByte();
 
-
-        if (srcPos >= InventoryConstants.HaveMax || dstPos >= InventoryConstants.HaveMax)
+        if (!CanUseWarehouse(session, npcId)
+            || srcPos >= InventoryConstants.HaveMax
+            || dstPos >= InventoryConstants.HaveMax)
         {
-            await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.InventoryMove, WarehousePacketWriter.Failed));
+            await SendResultAsync(session, WarehouseSubOpcode.InventoryMove, false);
             return;
         }
 
-        var absSrc = InventoryConstants.SlotMax + srcPos;
-        var absDst = InventoryConstants.SlotMax + dstPos;
+        var absSrc = InventoryConstants.InventoryStart + srcPos;
+        var absDst = InventoryConstants.InventoryStart + dstPos;
+        var moved = session.WithLock(s => TryMove(s.Inventory[absSrc], s.Inventory[absDst], itemId));
 
-        var moved = session.WithLock(s =>
-        {
-            var source = s.Inventory[absSrc];
-            var destination = s.Inventory[absDst];
-            if (source.ItemId != itemId || !destination.IsEmpty)
-                return false;
-
-            destination.ItemId = source.ItemId;
-            destination.Durability = source.Durability;
-            destination.Count = source.Count;
-            destination.Flag = source.Flag;
-            source.Clear();
-            return true;
-        });
-
-        await session.Client.SendPacket(WarehousePacketWriter.Result(WarehouseSubOpcode.InventoryMove, moved ? WarehousePacketWriter.Succeeded : WarehousePacketWriter.Failed));
+        await SendResultAsync(session, WarehouseSubOpcode.InventoryMove, moved);
     }
 
-    private static bool CanMergeOrPlace(ItemData itemData, ItemSlot destination, int itemId, int count)
-    {
-        if (destination.IsEmpty)
-            return true;
+    private bool CanUseWarehouse(UserSession session, int npcId) =>
+        !ItemTransfer.IsInventoryLocked(session)
+        && sessionManager.Regions.GetNpc(npcId) is { IsAlive: true, NpcType: NpcData.TypeWarehouse } npc
+        && Reach.CanInteract(session, npc);
 
-        if (destination.ItemId != itemId || itemData.Countable == 0)
+    private static bool IsTransferableCount(ItemData itemData, int count) =>
+        count > 0
+        && count <= InventoryConstants.MaxStackCount
+        && (itemData.Countable != 0 || count == 1);
+
+    private static bool Holds(ItemSlot source, int itemId, ItemData itemData, int count) =>
+        source.ItemId == itemId
+        && source.Count >= count
+        && (itemData.Countable != 0 || source.Count == count);
+
+    private static bool Transfer(ItemSlot source, ItemSlot destination, ItemData itemData, int count)
+    {
+        var moving = ItemStack.Of(source) with { Count = (ushort)count };
+        if (!ItemTransfer.CanPut(destination, moving, itemData.Countable != 0))
             return false;
 
-        return destination.Count + count <= 9999;
+        ItemTransfer.Put(destination, ItemTransfer.Take(source, (ushort)count));
+        return true;
     }
+
+    private static bool TryMove(ItemSlot source, ItemSlot destination, int itemId)
+    {
+        if (source.IsEmpty || source.ItemId != itemId || !destination.IsEmpty)
+            return false;
+
+        ItemTransfer.Move(source, destination);
+        return true;
+    }
+
+    private static Task SendResultAsync(UserSession session, WarehouseSubOpcode sub, bool succeeded) =>
+        session.Client.SendPacket(WarehousePacketWriter.Result(sub, succeeded));
 }

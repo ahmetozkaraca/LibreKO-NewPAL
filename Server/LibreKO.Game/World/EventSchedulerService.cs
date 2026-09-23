@@ -148,20 +148,27 @@ public class EventSchedulerService(
         if (!_banishPending || DateTime.UtcNow < _banishTime) return;
 
         _banishPending = false;
+        await BanishFromBattleZonesAsync();
+    }
+
+    public async Task BanishFromBattleZonesAsync()
+    {
         logger.LogInformation("Banishing players from battle zones");
 
-        // Warp all players in battle zones back to their nation's start position
-        foreach (var session in sessionManager.GetAll())
-        {
-            if (!BattleZoneManager.IsBattleZone(session.ZoneId)) continue;
+        var banishPkt = BattleEventPacketWriter.Banished(BattleZoneManager.DECLARE_BAN);
+        var banished = sessionManager.GetAll()
+            .Where(session => BattleZoneManager.IsBattleZone(session.ZoneId))
+            .ToList();
 
-            // Send banish notification
-            var banishPkt = BattleEventPacketWriter.Banished(BattleZoneManager.DECLARE_BAN);
+        foreach (var session in banished)
+        {
             await session.Client.SendPacket(banishPkt);
 
-            // Zone change back to nation zone
-            byte homeZone = session.Nation == AccountNation.Karus ? (byte)1 : (byte)2;
-            await session.Client.SendPacket(ZoneChangePacketWriter.Loading(homeZone, 0, 0, 0));
+            var homeZone = session.Nation == AccountNation.Karus
+                ? BattleZoneManager.ZONE_KARUS
+                : BattleZoneManager.ZONE_ELMORAD;
+            if (!await zoneTransitionService.ChangeZoneAsync(session, homeZone, 0f, 0f))
+                logger.LogWarning("Could not banish {Name} from battle zone {Zone}", session.Name, session.ZoneId);
         }
     }
 

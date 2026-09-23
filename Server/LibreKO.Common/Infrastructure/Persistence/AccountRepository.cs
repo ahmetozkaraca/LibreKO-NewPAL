@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using Microsoft.EntityFrameworkCore;
 
@@ -22,9 +22,35 @@ public class AccountRepository(AppDbContext context) : IAccountRepository
         await context.SaveChangesAsync();
     }
 
+    public async Task<bool> TryCreateAsync(Account account)
+    {
+        context.Accounts.Add(account);
+        try
+        {
+            await context.SaveChangesAsync();
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            context.Entry(account).State = EntityState.Detached;
+            return false;
+        }
+    }
+
     public async Task UpdateAsync(Account account)
     {
         context.Accounts.Update(account);
+        await context.SaveChangesAsync();
+    }
+
+    public async Task UpdatePasswordAsync(Account account, string passwordHash)
+    {
+        var entry = context.Entry(account);
+        if (entry.State == EntityState.Detached)
+            context.Accounts.Attach(account);
+
+        account.Password = passwordHash;
+        entry.Property(a => a.Password).IsModified = true;
         await context.SaveChangesAsync();
     }
 

@@ -52,6 +52,7 @@ public class Account : Entity
             builder.HasKey(a => a.Id);
 
             builder.Property(a => a.Login).IsRequired().HasMaxLength(50);
+            builder.HasIndex(a => a.Login).IsUnique();
             builder.Property(a => a.Password).IsRequired().HasMaxLength(255);
             builder.Property(a => a.Authority).IsRequired().HasConversion<string>();
             builder.Property(a => a.Nation).IsRequired().HasConversion<string>();

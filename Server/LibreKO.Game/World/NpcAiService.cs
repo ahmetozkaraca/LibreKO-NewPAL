@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using LibreKO.Game.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -96,12 +96,15 @@ public class NpcAiService(
     {
         if (npc.Hp >= npc.MaxHp
             || npc.Hp <= 0
-            || nowTicks - npc.LastRegenTicks <= TimeSpan.TicksPerSecond * 10)
+            || nowTicks - npc.LastRegenTicks <= RegenInterval.Ticks)
         {
             return;
         }
 
-        npc.Hp = Math.Min(npc.MaxHp, npc.Hp + npc.MaxHp / 20);
+        npc.Heal(npc.MaxHp / RegenShareDivisor);
         npc.LastRegenTicks = nowTicks;
     }
+
+    private const int RegenShareDivisor = 20;
+    private static readonly TimeSpan RegenInterval = TimeSpan.FromSeconds(10);
 }

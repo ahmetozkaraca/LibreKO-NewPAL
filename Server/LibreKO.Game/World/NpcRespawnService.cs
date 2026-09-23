@@ -1,4 +1,4 @@
-using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Enums;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -35,6 +35,9 @@ public class NpcRespawnService(SessionManager sessionManager, ILogger<NpcRespawn
 
                 if (npcsToRespawn.Count > 0)
                     logger.LogDebug("Respawned {Count} NPCs", npcsToRespawn.Count);
+
+                foreach (var corpse in sessionManager.Regions.GetDeadNpcsReadyToRetire(now).ToList())
+                    sessionManager.Regions.RemoveNpc(corpse);
 
                 // Cleanup expired loot bundles
                 sessionManager.Regions.CleanupExpiredBundles();

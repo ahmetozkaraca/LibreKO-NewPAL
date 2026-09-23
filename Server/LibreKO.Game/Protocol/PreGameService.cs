@@ -2,14 +2,22 @@
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
+using LibreKO.Common.Infrastructure.Logging;
 using LibreKO.Common.Infrastructure.Network;
+using LibreKO.Game.Configuration;
 using LibreKO.Game.World;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using LibreKO.Game.Protocol.Writers;
 
 namespace LibreKO.Game.Protocol;
 
-public record GameLoginResult(int AccountId, AccountNation Nation, bool Success);
+public record GameLoginResult(int AccountId, AccountNation Nation, bool Success)
+{
+    public static GameLoginResult Denied { get; } = new(0, AccountNation.None, false);
+}
+
 public record CharacterSelectResult(Packet Packet, int CharacterId);
 
 public interface IPreGameService
@@ -31,13 +39,14 @@ public class PreGameService(
     IAccountRepository accountRepository,
     ICharacterRepository characterRepository,
     IKnightsRepository knightsRepository,
+    IKingElectionRepository kingElectionRepository,
     IGameDataService gameData,
     SessionManager sessionManager,
     TimeWeatherBroadcastService timeWeather,
+    IOptions<GameServerSettings> settings,
     ILogger<PreGameService> logger) : IPreGameService
 {
     private const byte NewCharacterStartZone = (byte)ZoneId.Moradon;
-    private const int MaxCharacterNameLength = 20;
     private const int MaxSocialNumberLength = 15;
 
     private const byte ChangeHairSucceeded = 0;
@@ -45,20 +54,34 @@ public class PreGameService(
 
     public async Task<GameLoginResult> LoginAsync(string login, string password)
     {
-        var account = await accountRepository.GetByLogin(login);
-        if (account == null || !PasswordHasher.Verify(password, account.Password))
+        var loggedLogin = LogSanitizer.Clean(login);
+        if (!AccountCredentialRules.IsAcceptableLogin(login) || !AccountCredentialRules.IsAcceptablePassword(password))
         {
-            logger.LogWarning("Login failed for {Login}: invalid credentials", login);
-            return new(0, 0, false);
+            logger.LogWarning("Login failed for {Login}: malformed credentials", loggedLogin);
+            return GameLoginResult.Denied;
+        }
+
+        var account = await accountRepository.GetByLogin(login);
+        var verified = PasswordHasher.Verify(password, account?.Password);
+        if (account == null || !verified)
+        {
+            logger.LogWarning("Login failed for {Login}: invalid credentials", loggedLogin);
+            return GameLoginResult.Denied;
+        }
+
+        if (PasswordHasher.NeedsRehash(account.Password))
+        {
+            await accountRepository.UpdatePasswordAsync(account, PasswordHasher.Hash(password));
+            logger.LogInformation("Upgraded the stored password of account {AccountId}", account.Id);
         }
 
         if (account.Authority == AccountAuthority.Banned)
         {
-            logger.LogWarning("Login rejected for {Login}: account banned", login);
-            return new(0, 0, false);
+            logger.LogWarning("Login rejected for {Login}: account banned", loggedLogin);
+            return GameLoginResult.Denied;
         }
 
-        logger.LogDebug("Login succeeded for {Login} (accountId={AccountId})", login, account.Id);
+        logger.LogDebug("Login succeeded for {Login} (accountId={AccountId})", loggedLogin, account.Id);
         return new(account.Id, account.Nation, true);
     }
 
@@ -89,25 +112,63 @@ public class PreGameService(
         _ = charRanking;
 
         if (string.IsNullOrWhiteSpace(oldCharacterName)
-            || string.IsNullOrWhiteSpace(newCharacterName)
-            || oldCharacterName.Length > MaxCharacterNameLength
-            || newCharacterName.Length > MaxCharacterNameLength
+            || oldCharacterName.Length > CharacterRules.MaxNameLength
+            || !CharacterRules.IsValidName(newCharacterName, CharacterRules.MinRenameLength, settings.Value.Player.NamePattern)
             || string.Equals(oldCharacterName, newCharacterName, StringComparison.OrdinalIgnoreCase))
         {
             return PreGamePacketWriter.NameChangeRefused();
         }
 
+        var account = await accountRepository.GetById(accountId);
         var character = await characterRepository.GetByName(oldCharacterName);
-        if (character == null || character.AccountId != accountId || await characterRepository.IsNameTaken(newCharacterName))
+        if (account == null
+            || character == null
+            || character.AccountId != accountId
+            || character.DeletionTime != null
+            || await HoldsNameBoundOfficeAsync(character, account.Nation)
+            || await characterRepository.IsNameTaken(newCharacterName))
         {
             return PreGamePacketWriter.NameChangeRefused();
         }
 
-        character.Name = newCharacterName;
-        await characterRepository.UpdateAsync(character);
+        var inventory = DeserializeInventory(character.Items);
+        var scrollSlot = CharacterRules.FindRenameScroll(inventory);
+        if (scrollSlot == CharacterRules.NoSlot)
+            return PreGamePacketWriter.NameChangeRefused();
 
+        inventory[scrollSlot].Count--;
+        if (inventory[scrollSlot].Count == 0)
+            inventory[scrollSlot].Clear();
+
+        var oldName = character.Name;
+        character.Items = UserSessionBinaryState.SerializeItems(inventory);
+        character.Name = newCharacterName;
+        try
+        {
+            await characterRepository.UpdateAsync(character);
+        }
+        catch (DbUpdateException)
+        {
+            return PreGamePacketWriter.NameChangeRefused();
+        }
+
+        logger.LogInformation("Character {OldName} renamed to {NewName} at character select", oldName, newCharacterName);
         return PreGamePacketWriter.NameChanged((ushort)character.Slot, newCharacterName);
     }
+
+    private async Task<bool> HoldsNameBoundOfficeAsync(Character character, AccountNation nation)
+    {
+        if (character.KnightsId > 0
+            || sessionManager.Knights.GetAll().Any(clan => IsSameName(clan.Chief, character.Name))
+            || gameData.KingSystemTable.Values.Any(king => IsSameName(king.KingName?.Trim(), character.Name)))
+            return true;
+
+        return await kingElectionRepository.IsCandidateAsync(
+            (byte)nation, KingPacketConstants.ElectionListCandidate, character.Name);
+    }
+
+    private static bool IsSameName(string? left, string right) =>
+        string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
     public Task<Packet> LoadingLoginAsync(byte subOpcode)
     {
@@ -146,14 +207,17 @@ public class PreGameService(
             return CreateCharacterPacket(CreateCharacterResult.InvalidClass);
 
         var totalStatPoints = strength + stamina + dexterity + intelligence + magic;
-        if (totalStatPoints > 300)
+        if (totalStatPoints > CharacterRules.StarterStatTotal)
             return CreateCharacterPacket(CreateCharacterResult.StatError);
-        if (totalStatPoints < 300)
+        if (totalStatPoints < CharacterRules.StarterStatTotal)
             return CreateCharacterPacket(CreateCharacterResult.PointsRemaining);
-        if (strength < 50 || stamina < 50 || dexterity < 50 || intelligence < 50 || magic < 50)
+        if (!CharacterRules.MeetsClassBaseStats(@class, strength, stamina, dexterity, intelligence, magic))
             return CreateCharacterPacket(CreateCharacterResult.StatTooLow);
 
-        if (string.IsNullOrWhiteSpace(name) || name.Length > 20)
+        if (!CharacterRules.IsValidAppearance(face, hair))
+            return CreateCharacterPacket(CreateCharacterResult.ServerError);
+
+        if (!CharacterRules.IsValidName(name, CharacterRules.MinNameLength, settings.Value.Player.NamePattern))
             return CreateCharacterPacket(CreateCharacterResult.InvalidName);
 
         if (await characterRepository.IsNameTaken(name))
@@ -190,7 +254,14 @@ public class PreGameService(
             Items = StarterCharacterLoadout.CreateInitialItems(@class)
         };
 
-        await characterRepository.CreateAsync(character);
+        try
+        {
+            await characterRepository.CreateAsync(character);
+        }
+        catch (DbUpdateException)
+        {
+            return CreateCharacterPacket(CreateCharacterResult.NameAlreadyExists);
+        }
 
         return CreateCharacterPacket(CreateCharacterResult.Success);
     }
@@ -198,7 +269,7 @@ public class PreGameService(
     public async Task<Packet> DeleteCharacterAsync(int accountId, byte slot, string name, string socNo)
     {
         if (slot >= GameConstants.MaxAccountCharacters
-            || string.IsNullOrEmpty(name) || name.Length > MaxCharacterNameLength
+            || string.IsNullOrEmpty(name) || name.Length > CharacterRules.MaxNameLength
             || string.IsNullOrEmpty(socNo) || socNo.Length > MaxSocialNumberLength)
         {
             return DeleteRejected();
@@ -228,13 +299,19 @@ public class PreGameService(
     public async Task<CharacterSelectResult> SelectCharacterAsync(int accountId, string accountName, string characterName, byte init)
     {
         var account = await accountRepository.GetById(accountId);
-        if (account == null || account.Login != accountName)
+        if (account == null || !string.Equals(account.Login, accountName, StringComparison.OrdinalIgnoreCase))
         {
             return new CharacterSelectResult(SelectFailed(), 0);
         }
 
+        if (account.Authority == AccountAuthority.Banned)
+        {
+            logger.LogWarning("Refused character select for banned account {AccountId}", account.Id);
+            return new CharacterSelectResult(SelectFailed(), 0);
+        }
+
         var character = await characterRepository.GetByName(characterName);
-        if (character == null || character.AccountId != account.Id)
+        if (character == null || character.AccountId != account.Id || character.DeletionTime != null)
         {
             return new CharacterSelectResult(SelectFailed(), 0);
         }
@@ -250,13 +327,13 @@ public class PreGameService(
 
     public async Task<Packet> ChangeHairAsync(int accountId, byte subOpcode, string characterName, byte face, int hair)
     {
-        if (subOpcode is not 0 and not 1)
+        if (subOpcode is not 0 and not 1 || !CharacterRules.IsValidAppearance(face, hair))
         {
             return PreGamePacketWriter.ChangeHairResult(ChangeHairFailed);
         }
 
         var character = await characterRepository.GetByName(characterName);
-        if (character == null || character.AccountId != accountId)
+        if (character == null || character.AccountId != accountId || character.DeletionTime != null)
         {
             return PreGamePacketWriter.ChangeHairResult(ChangeHairFailed);
         }
@@ -272,7 +349,7 @@ public class PreGameService(
     {
         var packets = new List<Packet>();
 
-        if (subOpcode == 1)
+        if (subOpcode == (byte)GameStartSubOpcode.Load)
         {
             var myInfo = await BuildMyInfoPacket(characterId, accountId);
             if (myInfo != null)
@@ -290,7 +367,7 @@ public class PreGameService(
 
             packets.Add(PreGamePacketWriter.GameStart());
         }
-        else if (subOpcode == 2)
+        else if (subOpcode == (byte)GameStartSubOpcode.Ready)
         {
             var character = await characterRepository.GetById(characterId);
             if (character != null)

@@ -1,4 +1,4 @@
-using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
 using Microsoft.Extensions.Logging;
@@ -33,7 +33,7 @@ public class SessionTerminationService(
 
     public async Task SaveAsync(UserSession session, CancellationToken cancellationToken = default)
     {
-        await characterStatePersister.SaveAsync(session, cancellationToken);
+        await characterStatePersister.RequestSaveAsync(session);
     }
 
     public async Task LogoutAsync(IClient client, CancellationToken cancellationToken = default)
@@ -50,18 +50,7 @@ public class SessionTerminationService(
     public async Task EvictForTakeoverAsync(UserSession session)
     {
         session.Client.ExpectedClose = true;
-        await RemoveFromWorldAsync(session);
-
-        try
-        {
-            await ReleaseWorldStateAsync(session);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Error releasing world state for {Name}", session.Name);
-        }
-
-        sessionManager.RemoveSession(session);
+        await EndSessionAsync(session, CancellationToken.None);
     }
 
     private async Task TerminateAsync(IClient client, bool unexpectedDisconnect, CancellationToken cancellationToken)
@@ -77,21 +66,29 @@ public class SessionTerminationService(
         if (unexpectedDisconnect)
             logger.LogInformation("Client disconnected unexpectedly: {Name} (CharId={CharId})", session.Name, session.CharacterId);
 
-        await RemoveFromWorldAsync(session);
+        await EndSessionAsync(session, cancellationToken);
+        client.CharacterId = 0;
+    }
+
+    private async Task EndSessionAsync(UserSession session, CancellationToken cancellationToken)
+    {
+        if (!session.TryBeginClosing())
+        {
+            await session.Closed;
+            return;
+        }
 
         try
         {
-            await CleanupAsync(session, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Error cleaning up session for {Name}", session.Name);
+            await RemoveFromWorldAsync(session);
+            await ReleaseWorldStateSafelyAsync(session);
+            await SaveFinalStateAsync(session, cancellationToken);
         }
         finally
         {
             sessionManager.RemoveSession(session);
             await MarkOfflineAsync(session.CharacterId, cancellationToken);
-            client.CharacterId = 0;
+            session.MarkClosed();
         }
     }
 
@@ -112,18 +109,35 @@ public class SessionTerminationService(
         }
     }
 
-    private async Task CleanupAsync(UserSession session, CancellationToken cancellationToken)
+    private async Task ReleaseWorldStateSafelyAsync(UserSession session)
     {
-        await ReleaseWorldStateAsync(session);
-
-        await DisconnectDbGate.WaitAsync(cancellationToken);
         try
         {
-            await characterStatePersister.SaveAsync(session, cancellationToken);
+            await ReleaseWorldStateAsync(session);
         }
-        finally
+        catch (Exception ex)
         {
-            DisconnectDbGate.Release();
+            logger.LogWarning(ex, "Error releasing world state for {Name}", session.Name);
+        }
+    }
+
+    private async Task SaveFinalStateAsync(UserSession session, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await DisconnectDbGate.WaitAsync(cancellationToken);
+            try
+            {
+                await characterStatePersister.SaveFinalAsync(session, cancellationToken);
+            }
+            finally
+            {
+                DisconnectDbGate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Final save failed for {Name} (CharId={CharId})", session.Name, session.CharacterId);
         }
     }
 

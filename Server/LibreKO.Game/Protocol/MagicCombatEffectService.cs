@@ -1,5 +1,4 @@
-using LibreKO.Common.Domain.Entities.GameData;
-using LibreKO.Common.Domain.Services;
+﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Enums;
 using LibreKO.Game.World;
 
@@ -9,7 +8,7 @@ public interface IMagicCombatEffectService
 {
     Task ExecuteAsync(
         UserSession caster, MagicData magic, MagicSkillType skillType, int skillId, int targetId,
-        int[] data);
+        int[] data, MagicCharge charge);
     Task CancelAsync(UserSession target, int skillId);
 }
 
@@ -21,13 +20,13 @@ public class MagicCombatEffectService(
 {
     public Task ExecuteAsync(
         UserSession caster, MagicData magic, MagicSkillType skillType, int skillId, int targetId,
-        int[] data) =>
+        int[] data, MagicCharge charge) =>
         skillType switch
         {
-            MagicSkillType.Melee => meleeService.ExecuteAsync(caster, magic, skillId, targetId, data),
-            MagicSkillType.Ranged => rangedService.ExecuteAsync(caster, magic, skillId, targetId, data),
-            MagicSkillType.OverTime => overTimeService.ExecuteAsync(caster, magic, skillId, targetId, data),
-            MagicSkillType.Area => areaService.ExecuteAsync(caster, magic, skillId, targetId, data),
+            MagicSkillType.Melee => meleeService.ExecuteAsync(caster, magic, skillId, targetId, data, charge),
+            MagicSkillType.Ranged => rangedService.ExecuteAsync(caster, magic, skillId, targetId, data, charge),
+            MagicSkillType.OverTime => overTimeService.ExecuteAsync(caster, magic, skillId, targetId, data, charge),
+            MagicSkillType.Area => areaService.ExecuteAsync(caster, magic, skillId, targetId, data, charge),
             _ => Task.CompletedTask
         };
 

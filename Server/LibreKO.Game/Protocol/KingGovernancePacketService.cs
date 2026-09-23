@@ -120,7 +120,12 @@ public class KingGovernancePacketService(
         }
 
         var taxAmount = kingData.TerritoryTax;
-        session.Money += taxAmount;
+        if (!TryCredit(session, taxAmount))
+        {
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxCollect, 0));
+            return;
+        }
+
         kingData.TerritoryTax = 0;
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.TerritoryTax);
         await userNotificationService.SendGoldGainAsync(session, taxAmount);
@@ -167,18 +172,27 @@ public class KingGovernancePacketService(
             return;
         }
 
-        const int scepterItemId = 910074311;
-        var slot = session.FindSlotForItem(scepterItemId, gameDataService);
+        var slot = session.WithLock(king =>
+        {
+            if (HoldsScepter(king))
+                return -1;
+
+            var free = king.FindSlotForItem(KingScepterItem, gameDataService);
+            if (free < 0)
+                return -1;
+
+            king.Inventory[free].ItemId = KingScepterItem;
+            king.Inventory[free].Durability = 1;
+            king.Inventory[free].Count = 1;
+            return free;
+        });
         if (slot < 0)
         {
             await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 7, 0));
             return;
         }
 
-        session.Inventory[slot].ItemId = scepterItemId;
-        session.Inventory[slot].Durability = 1;
-        session.Inventory[slot].Count = 1;
-        await userNotificationService.SendStackChangeAsync(session, (byte)slot, scepterItemId, 1, 1, isNewItem: true);
+        await userNotificationService.SendStackChangeAsync(session, (byte)slot, KingScepterItem, 1, 1, isNewItem: true);
 
         await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 7, 1));
     }
@@ -266,14 +280,14 @@ public class KingGovernancePacketService(
 
         var amount = packet.ReadInt();
         var target = sessionManager.GetByName(targetName);
-        if (amount <= 0 || target == null || target.Nation != session.Nation || kingData.NationalTreasury < amount)
+        if (amount <= 0 || target == null || target.Nation != session.Nation || kingData.NationalTreasury < amount
+            || !TryCredit(target, amount))
         {
             await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, 0));
             return;
         }
 
         kingData.NationalTreasury -= amount;
-        target.Money += amount;
         await userNotificationService.SendGoldGainAsync(target, amount);
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.NationalTreasury);
 
@@ -333,6 +347,22 @@ public class KingGovernancePacketService(
 
     private const byte TaxCollect = 2;
     private const byte TaxTariffView = 3;
+    private const int KingScepterItem = 910074311;
+
+    private static bool TryCredit(UserSession player, int amount)
+        => player.WithLock(target =>
+        {
+            if ((long)target.Money + amount > ExchangePacketConstants.CoinMax)
+                return false;
+
+            target.Money += amount;
+            return true;
+        });
+
+    private static bool HoldsScepter(UserSession king)
+        => king.Inventory.Any(slot => slot.ItemId == KingScepterItem)
+            || king.Warehouse.Any(slot => slot.ItemId == KingScepterItem)
+            || king.VipWarehouse.Any(slot => slot.ItemId == KingScepterItem);
 
     private static Packet CreateTaxResponse(byte taxOpcode) =>
         KingPacketWriter.Election(taxOpcode, KingPacketConstants.Tax);

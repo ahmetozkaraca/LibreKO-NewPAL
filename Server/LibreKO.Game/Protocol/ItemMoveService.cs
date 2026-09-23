@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities.GameData;
+﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -28,6 +28,15 @@ public class ItemMoveService(
         ClientRefused = 3,
     }
 
+    private readonly record struct MoveOutcome(
+        bool Moved,
+        int SourceItemIdBeforeMove,
+        int DestinationItemIdBeforeMove,
+        int SourceItemId,
+        short SourceDurability,
+        int DestinationItemId,
+        short DestinationDurability);
+
     public async Task HandleAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
@@ -44,16 +53,24 @@ public class ItemMoveService(
 
         if (requestType == ItemMoveRequest.Arrange)
         {
-            if (IsBusy(session))
+            var arranged = session.WithLock(s =>
+            {
+                if (ItemTransfer.IsInventoryLocked(s))
+                    return null;
+
+                ArrangeBag(s);
+                return ItemMovePacketMapper.BuildArrangedResponse(s);
+            });
+
+            if (arranged == null)
             {
                 logger.LogDebug("Refused to arrange the bag for {Name}: busy", session.Name);
                 await session.Client.SendPacket(ItemMovePacketMapper.BuildArrangeRefusedResponse());
                 return;
             }
 
-            ArrangeBag(session);
             logger.LogDebug("Arranged the bag for {Name}", session.Name);
-            await session.Client.SendPacket(ItemMovePacketMapper.BuildArrangedResponse(session));
+            await session.Client.SendPacket(arranged);
             return;
         }
 
@@ -94,18 +111,6 @@ public class ItemMoveService(
             return;
         }
 
-        if (IsBusy(session))
-        {
-            logger.LogDebug(
-                "Rejected item move for {Name}: blocked state trading={Trading} merchanting={Merchanting} gathering={Gathering}",
-                session.Name,
-                session.Trade.IsTrading,
-                session.Trade.IsMerchanting,
-                session.IsGathering);
-            await SendItemMoveResponseAsync(session, 0);
-            return;
-        }
-
         var itemData = gameDataService.GetItem(itemId);
         if (itemData == null)
         {
@@ -114,55 +119,64 @@ public class ItemMoveService(
             return;
         }
 
-        if (!itemInventoryRuleService.TryResolveMoveIndices(
-                session,
-                itemData,
-                direction,
-                resolvedSourcePosition,
-                resolvedDestinationPosition,
-                out var sourceIndex,
-                out var destinationIndex))
+        var outcome = session.WithLock(s =>
+        {
+            if (ItemTransfer.IsInventoryLocked(s)
+                || !itemInventoryRuleService.TryResolveMoveIndices(
+                    s,
+                    itemData,
+                    direction,
+                    resolvedSourcePosition,
+                    resolvedDestinationPosition,
+                    out var sourceIndex,
+                    out var destinationIndex))
+                return default;
+
+            var sourceItem = s.Inventory[sourceIndex];
+            var destinationItem = s.Inventory[destinationIndex];
+            if (sourceItem.IsEmpty || sourceItem.ItemId != itemId)
+                return default;
+
+            var sourceItemIdBeforeMove = sourceItem.ItemId;
+            var destinationItemIdBeforeMove = destinationItem.ItemId;
+            if (destinationItem.IsEmpty)
+                ItemTransfer.Move(sourceItem, destinationItem);
+            else
+                ItemTransfer.Swap(sourceItem, destinationItem);
+
+            return new MoveOutcome(
+                true,
+                sourceItemIdBeforeMove,
+                destinationItemIdBeforeMove,
+                sourceItem.ItemId,
+                sourceItem.Durability,
+                destinationItem.ItemId,
+                destinationItem.Durability);
+        });
+
+        if (!outcome.Moved)
         {
             logger.LogDebug(
-                "Rejected item move for {Name}: move rule failure dir={Direction} item={ItemId} src={Source}->{ResolvedSource} dst={Destination}->{ResolvedDestination}",
+                "Rejected item move for {Name}: dir={Direction} item={ItemId} src={Source}->{ResolvedSource} dst={Destination}->{ResolvedDestination} trading={Trading} merchanting={Merchanting} gathering={Gathering}",
                 session.Name,
                 direction,
                 itemId,
                 sourcePosition,
                 resolvedSourcePosition,
                 destinationPosition,
-                resolvedDestinationPosition);
+                resolvedDestinationPosition,
+                session.Trade.IsTrading,
+                session.Trade.IsMerchanting,
+                session.IsGathering);
             await SendItemMoveResponseAsync(session, 0);
             return;
         }
-
-        var sourceItem = session.Inventory[sourceIndex];
-        var destinationItem = session.Inventory[destinationIndex];
-        if (sourceItem.ItemId != itemId)
-        {
-            logger.LogDebug(
-                "Rejected item move for {Name}: source slot {SourceIndex} contains {SourceItemId} instead of {ItemId}",
-                session.Name,
-                sourceIndex,
-                sourceItem.ItemId,
-                itemId);
-            await SendItemMoveResponseAsync(session, 0);
-            return;
-        }
-
-        var sourceItemIdBeforeMove = sourceItem.ItemId;
-        var destinationItemIdBeforeMove = destinationItem.ItemId;
-
-        if (!destinationItem.IsEmpty)
-            SwapItems(sourceItem, destinationItem);
-        else
-            MoveItem(sourceItem, destinationItem);
 
         await itemEquipmentEffectService.ApplyMoveEffectsAsync(
             session,
             direction,
-            sourceItemIdBeforeMove,
-            destinationItemIdBeforeMove);
+            outcome.SourceItemIdBeforeMove,
+            outcome.DestinationItemIdBeforeMove);
 
         await SendItemMoveResponseAsync(session, 1);
         await userNotificationService.SendWeightChangeAsync(session);
@@ -176,25 +190,29 @@ public class ItemMoveService(
                     await worldPacketCoordinator.BroadcastUserLookChangeAsync(
                         session,
                         resolvedDestinationPosition,
-                        destinationItem.ItemId,
-                        destinationItem.Durability);
+                        outcome.DestinationItemId,
+                        outcome.DestinationDurability);
                 break;
 
             case ItemMoveDirection.SlotToInventory:
-                await worldPacketCoordinator.BroadcastUserLookChangeAsync(session, resolvedSourcePosition, 0, 0);
+                await worldPacketCoordinator.BroadcastUserLookChangeAsync(
+                    session,
+                    resolvedSourcePosition,
+                    outcome.SourceItemId,
+                    outcome.SourceDurability);
                 break;
 
             case ItemMoveDirection.SlotToSlot:
                 await worldPacketCoordinator.BroadcastUserLookChangeAsync(
                     session,
                     resolvedSourcePosition,
-                    sourceItem.ItemId,
-                    sourceItem.Durability);
+                    outcome.SourceItemId,
+                    outcome.SourceDurability);
                 await worldPacketCoordinator.BroadcastUserLookChangeAsync(
                     session,
                     resolvedDestinationPosition,
-                    destinationItem.ItemId,
-                    destinationItem.Durability);
+                    outcome.DestinationItemId,
+                    outcome.DestinationDurability);
                 break;
 
             case ItemMoveDirection.InventoryToCospre:
@@ -203,56 +221,34 @@ public class ItemMoveService(
                     await worldPacketCoordinator.BroadcastUserLookChangeAsync(
                         session,
                         equippedLookSlot,
-                        destinationItem.ItemId,
-                        destinationItem.Durability);
+                        outcome.DestinationItemId,
+                        outcome.DestinationDurability);
                 }
 
                 break;
 
             case ItemMoveDirection.CospreToInventory:
                 if (itemInventoryRuleService.TryGetCospreVisualSlot(sourcePosition, out var removedLookSlot))
-                    await worldPacketCoordinator.BroadcastUserLookChangeAsync(session, removedLookSlot, 0, 0);
+                {
+                    await worldPacketCoordinator.BroadcastUserLookChangeAsync(
+                        session,
+                        removedLookSlot,
+                        outcome.SourceItemId,
+                        outcome.SourceDurability);
+                }
+
                 break;
         }
     }
 
-    private static bool IsBusy(UserSession session) =>
-        session.Trade.IsTrading || session.Trade.IsMerchanting || session.IsGathering;
-
     private static void ArrangeBag(UserSession session)
     {
-        var start = InventoryConstants.InventoryStart;
-        var arranged = Enumerable.Range(start, InventoryConstants.HaveMax)
-            .Select(slot => session.Inventory[slot])
-            .Select(item => (item.ItemId, item.Durability, item.Count, item.Flag))
+        var arranged = ItemTransfer.BagSnapshot(session.Inventory)
             .OrderByDescending(item => item.ItemId)
             .ToArray();
 
         for (var offset = 0; offset < arranged.Length; offset++)
-        {
-            var item = session.Inventory[start + offset];
-            item.ItemId = arranged[offset].ItemId;
-            item.Durability = arranged[offset].Durability;
-            item.Count = arranged[offset].Count;
-            item.Flag = arranged[offset].Flag;
-        }
-    }
-
-    private static void SwapItems(ItemSlot sourceItem, ItemSlot destinationItem)
-    {
-        (sourceItem.ItemId, destinationItem.ItemId) = (destinationItem.ItemId, sourceItem.ItemId);
-        (sourceItem.Durability, destinationItem.Durability) = (destinationItem.Durability, sourceItem.Durability);
-        (sourceItem.Count, destinationItem.Count) = (destinationItem.Count, sourceItem.Count);
-        (sourceItem.Flag, destinationItem.Flag) = (destinationItem.Flag, sourceItem.Flag);
-    }
-
-    private static void MoveItem(ItemSlot sourceItem, ItemSlot destinationItem)
-    {
-        destinationItem.ItemId = sourceItem.ItemId;
-        destinationItem.Durability = sourceItem.Durability;
-        destinationItem.Count = sourceItem.Count;
-        destinationItem.Flag = sourceItem.Flag;
-        sourceItem.Clear();
+            arranged[offset].WriteTo(session.Inventory[InventoryConstants.InventoryStart + offset]);
     }
 
     private static async Task SendItemMoveResponseAsync(UserSession session, byte subcommand)

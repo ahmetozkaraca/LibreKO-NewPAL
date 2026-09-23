@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Enums;
 
 namespace LibreKO.Common.Domain.Services;
@@ -18,8 +18,6 @@ public interface ICharacterRepository
     Task<IEnumerable<Character>> GetCharactersByAccount(int accountId);
     Task CreateAsync(Character character);
     Task UpdateAsync(Character character);
-
-    Task<int> UpdateQuestDataAsync(int characterId, byte[] questData);
 
     Task<bool> IsNameTaken(string name);
     Task<Character?> GetByName(string name);

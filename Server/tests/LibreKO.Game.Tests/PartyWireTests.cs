@@ -22,10 +22,8 @@ public class PartyWireTests : GameTestBase
         var leader = CreateMember(sessionManager, 500);
         var invitee = CreateMember(sessionManager, 501);
 
-        var party = sessionManager.Parties.CreateParty((short)leader.CharacterId);
-        leader.PartyIndex = party.Index;
-        leader.IsPartyLeader = true;
-        invitee.PartyIndex = party.Index;
+        await coordinator.HandleAsync(leader.Client, Invite(invitee));
+        var party = sessionManager.Parties.GetParty(leader.PartyIndex)!;
 
         var accept = new Packet(GameOpcodes.GS_PARTY);
         accept.WriteByte((byte)PartyRequest.Permit);
@@ -46,10 +44,8 @@ public class PartyWireTests : GameTestBase
         var leader = CreateMember(sessionManager, 502);
         var invitee = CreateMember(sessionManager, 503);
 
-        var party = sessionManager.Parties.CreateParty((short)leader.CharacterId);
-        leader.PartyIndex = party.Index;
-        leader.IsPartyLeader = true;
-        invitee.PartyIndex = party.Index;
+        await coordinator.HandleAsync(leader.Client, Invite(invitee));
+        var party = sessionManager.Parties.GetParty(leader.PartyIndex)!;
 
         var accept = new Packet(GameOpcodes.GS_PARTY);
         accept.WriteByte((byte)PartyRequest.Permit);
@@ -90,6 +86,14 @@ public class PartyWireTests : GameTestBase
 
         member.PartyIndex.Should().Be(-1);
         party.FindMember((short)member.CharacterId).Should().BeLessThan(0);
+    }
+
+    private static Packet Invite(UserSession invitee)
+    {
+        var invite = new Packet(GameOpcodes.GS_PARTY);
+        invite.WriteByte((byte)PartyRequest.Create);
+        invite.WriteString(invitee.Name);
+        return invite;
     }
 
     private static UserSession CreateMember(SessionManager sessionManager, int characterId)

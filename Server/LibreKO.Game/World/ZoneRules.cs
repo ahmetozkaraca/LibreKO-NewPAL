@@ -1,8 +1,19 @@
-using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Enums;
 
 namespace LibreKO.Game.World;
 
 public readonly record struct ZoneRule(ZoneAbilityType Ability, ZoneFlags Flags);
+
+public enum ZoneAccess : byte
+{
+    Open,
+    Nation,
+    Battlefield,
+    Managed,
+}
+
+public readonly record struct ZoneEntryRule(
+    ZoneAccess Access, AccountNation Owner, byte MinLevel, byte MaxLevel, bool NeedsNationalPoints);
 
 public static class ZoneRules
 {
@@ -93,4 +104,65 @@ public static class ZoneRules
         => Table.TryGetValue(zoneId, out var rule) ? rule : Unlisted;
 
     public static bool Allows(byte zoneId, ZoneFlags flag) => (For(zoneId).Flags & flag) == flag;
+
+    private const byte AnyLevel = byte.MinValue;
+    private const byte NoLevelCap = byte.MaxValue;
+    private const byte HomelandMinLevel = 35;
+    private const byte EslantMinLevel = 60;
+    private const byte ArdreamMinLevel = 35;
+    private const byte ArdreamMaxLevel = 59;
+    private const byte RonarkLandBaseMinLevel = 45;
+    private const byte RonarkLandBaseMaxLevel = 69;
+    private const byte RonarkLandMinLevel = 70;
+
+    private static readonly ZoneEntryRule OpenEntry =
+        new(ZoneAccess.Open, AccountNation.None, AnyLevel, NoLevelCap, NeedsNationalPoints: false);
+
+    private static readonly ZoneEntryRule BattlefieldEntry = OpenEntry with { Access = ZoneAccess.Battlefield };
+
+    private static readonly ZoneEntryRule ManagedEntry = OpenEntry with { Access = ZoneAccess.Managed };
+
+    private static readonly Dictionary<byte, ZoneEntryRule> Entries = new()
+    {
+        [(byte)ZoneId.KarusCamp1] = NationEntry(AccountNation.Karus, HomelandMinLevel),
+        [(byte)ZoneId.KarusCamp2] = NationEntry(AccountNation.Karus, HomelandMinLevel),
+        [(byte)ZoneId.ElMoradCamp1] = NationEntry(AccountNation.ElMorad, HomelandMinLevel),
+        [(byte)ZoneId.ElMoradCamp2] = NationEntry(AccountNation.ElMorad, HomelandMinLevel),
+
+        [(byte)ZoneId.KarusEslant1] = NationEntry(AccountNation.Karus, EslantMinLevel),
+        [(byte)ZoneId.KarusEslant2] = NationEntry(AccountNation.Karus, EslantMinLevel),
+        [(byte)ZoneId.ElMoradEslant1] = NationEntry(AccountNation.ElMorad, EslantMinLevel),
+        [(byte)ZoneId.ElMoradEslant2] = NationEntry(AccountNation.ElMorad, EslantMinLevel),
+
+        [(byte)ZoneId.RonarkLand] = FrontierEntry(RonarkLandMinLevel, NoLevelCap),
+        [(byte)ZoneId.Ardream] = FrontierEntry(ArdreamMinLevel, ArdreamMaxLevel),
+        [(byte)ZoneId.RonarkLandBase] = FrontierEntry(RonarkLandBaseMinLevel, RonarkLandBaseMaxLevel),
+
+        [(byte)ZoneId.NapiesGorge] = BattlefieldEntry,
+        [(byte)ZoneId.AlseidsPrairie] = BattlefieldEntry,
+        [(byte)ZoneId.NiedsTriangle] = BattlefieldEntry,
+        [(byte)ZoneId.NereidsIsland] = BattlefieldEntry,
+        [(byte)ZoneId.Zipang] = BattlefieldEntry,
+        [(byte)ZoneId.Oreads] = BattlefieldEntry,
+        [(byte)ZoneId.SnowBattle] = BattlefieldEntry,
+
+        [(byte)ZoneId.NationWar] = ManagedEntry,
+        [(byte)ZoneId.MonsterStone1] = ManagedEntry,
+        [(byte)ZoneId.MonsterStone2] = ManagedEntry,
+        [(byte)ZoneId.MonsterStone3] = ManagedEntry,
+        [(byte)ZoneId.BorderDefenseWar] = ManagedEntry,
+        [(byte)ZoneId.ChaosDungeon] = ManagedEntry,
+        [(byte)ZoneId.JuradMountain] = ManagedEntry,
+        [(byte)ZoneId.DungeonDefence] = ManagedEntry,
+        [(byte)ZoneId.Prison] = ManagedEntry,
+    };
+
+    public static ZoneEntryRule EntryFor(byte zoneId)
+        => Entries.TryGetValue(zoneId, out var entry) ? entry : OpenEntry;
+
+    private static ZoneEntryRule NationEntry(AccountNation owner, byte minLevel)
+        => OpenEntry with { Access = ZoneAccess.Nation, Owner = owner, MinLevel = minLevel };
+
+    private static ZoneEntryRule FrontierEntry(byte minLevel, byte maxLevel)
+        => OpenEntry with { MinLevel = minLevel, MaxLevel = maxLevel, NeedsNationalPoints = true };
 }

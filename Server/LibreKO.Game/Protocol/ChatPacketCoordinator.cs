@@ -1,4 +1,4 @@
-using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -56,8 +56,16 @@ public class ChatPacketCoordinator(
             case ChatType.Private:
             {
                 var target = sessionManager.GetByCharacterId(session.PrivateChatUser);
-                if (target != null)
-                    await target.Client.SendPacket(result);
+                if (target == null)
+                    break;
+
+                if (target.BlockPrivateChat && !session.IsGM)
+                {
+                    await session.Client.SendPacket(ChatTargetPacketWriter.WhisperTargetBlocked(target.Name));
+                    break;
+                }
+
+                await target.Client.SendPacket(result);
                 break;
             }
 
@@ -65,7 +73,7 @@ public class ChatPacketCoordinator(
                 if (session.IsInParty)
                 {
                     var party = sessionManager.Parties.GetParty(session.PartyIndex);
-                    if (party != null)
+                    if (party != null && party.FindMember((short)session.CharacterId) >= 0)
                         await combatNotificationService.SendToPartyAsync(party, result);
                 }
                 break;
@@ -76,10 +84,9 @@ public class ChatPacketCoordinator(
 
                 if (!session.IsGM && session.Level < ShoutMinLevel)
                 {
-                    if (session.Money < ShoutFee)
+                    if (!session.WithLock(TryPayShoutFee))
                         break;
 
-                    session.Money -= ShoutFee;
                     await userNotificationService.SendGoldLossAsync(session, ShoutFee);
                 }
 
@@ -167,4 +174,12 @@ public class ChatPacketCoordinator(
         }
     }
 
+    private static bool TryPayShoutFee(UserSession session)
+    {
+        if (session.Money < ShoutFee)
+            return false;
+
+        session.Money -= ShoutFee;
+        return true;
+    }
 }

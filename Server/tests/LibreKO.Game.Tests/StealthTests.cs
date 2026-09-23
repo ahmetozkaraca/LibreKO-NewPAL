@@ -32,7 +32,7 @@ public class StealthTests : GameTestBase
         session.Invisibility.Should().Be(InvisibilityType.DispelOnMove,
             "the skill's own description is 'invisible without moving'");
 
-        await MoveAsync(provider, session, x: 200, z: 200);
+        await MoveAsync(provider, session, x: 1010, z: 1000);
 
         session.Invisibility.Should().Be(InvisibilityType.None);
         session.ActiveBuffs.Should().NotContainKey(Hide);
@@ -255,7 +255,7 @@ public class StealthTests : GameTestBase
     {
         var magic = provider.GetRequiredService<IGameDataService>().GetMagic(skillId)!;
         return provider.GetRequiredService<IMagicExecutionService>()
-            .ExecuteAsync(session, magic, skillId, session.CharacterId, new int[7]);
+            .ExecuteAsync(session, magic, skillId, session.CharacterId, new int[7], MagicCharge.Prepaid);
     }
 
     private static Task MoveAsync(ServiceProvider provider, UserSession session, ushort x, ushort z)

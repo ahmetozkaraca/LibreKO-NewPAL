@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -21,6 +21,10 @@ public class AuctionPacketCoordinator(
     private const byte AuctionSubBuyout = 4;
     private const byte AuctionSubCancel = 5;
 
+    public const int MaxLotsPerSeller = 10;
+    public const int MaxLots = 500;
+    private const int NoAuction = 0;
+
     private sealed class AuctionLot
     {
         public int AuctionId;
@@ -35,9 +39,9 @@ public class AuctionPacketCoordinator(
     }
 
     // Single global lot book (in-memory; resets on server restart).
-    private static readonly List<AuctionLot> auctions = new();
-    private static int nextAuctionId = 1;
-    private static readonly object auctionLock = new();
+    private readonly List<AuctionLot> auctions = new();
+    private int nextAuctionId = 1;
+    private readonly Lock auctionLock = new();
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
@@ -66,7 +70,7 @@ public class AuctionPacketCoordinator(
         }
     }
 
-    private static Packet BuildAuctionListPacket()
+    private Packet BuildAuctionListPacket()
     {
         List<AuctionPacketWriter.Lot> lots;
         lock (auctionLock)
@@ -100,22 +104,33 @@ public class AuctionPacketCoordinator(
             return;
         }
 
-        int newId;
+        var newId = NoAuction;
         lock (auctionLock)
         {
-            newId = nextAuctionId++;
-            auctions.Add(new AuctionLot
+            if (auctions.Count < MaxLots
+                && auctions.Count(lot => lot.SellerId == session.CharacterId) < MaxLotsPerSeller)
             {
-                AuctionId = newId,
-                SellerId = session.CharacterId,
-                SellerName = session.Name,
-                ItemId = itemId,
-                Count = count,
-                CurrentBid = 0,
-                StartPrice = startPrice,
-                Buyout = buyout,
-                TopBidderId = 0,
-            });
+                newId = nextAuctionId++;
+                auctions.Add(new AuctionLot
+                {
+                    AuctionId = newId,
+                    SellerId = session.CharacterId,
+                    SellerName = session.Name,
+                    ItemId = itemId,
+                    Count = count,
+                    CurrentBid = 0,
+                    StartPrice = startPrice,
+                    Buyout = buyout,
+                    TopBidderId = 0,
+                });
+            }
+        }
+
+        if (newId == NoAuction)
+        {
+            await session.Client.SendPacket(AuctionPacketWriter.Registered(
+                AuctionSubRegister, AuctionPacketWriter.Failed, NoAuction));
+            return;
         }
 
         logger.LogDebug("{Name} registered auction {Id} item {Item}x{Count} start {Start} buyout {Buyout}",
@@ -139,7 +154,7 @@ public class AuctionPacketCoordinator(
             var lot = auctions.Find(a => a.AuctionId == auctionId);
             if (lot != null && lot.SellerId != session.CharacterId)
             {
-                int minBid = lot.CurrentBid > 0 ? lot.CurrentBid + 1 : lot.StartPrice;
+                long minBid = lot.CurrentBid > 0 ? (long)lot.CurrentBid + 1 : lot.StartPrice;
                 if (bid >= minBid && (lot.Buyout <= 0 || bid < lot.Buyout))
                 {
                     lot.CurrentBid = bid;

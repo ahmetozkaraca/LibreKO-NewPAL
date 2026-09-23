@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using Microsoft.EntityFrameworkCore;
 
@@ -30,7 +30,9 @@ public class KnightsRepository(AppDbContext context) : IKnightsRepository
 
     public async Task UpdateAsync(KnightsEntity clan)
     {
-        context.Set<KnightsEntity>().Update(clan);
+        var entry = context.Set<KnightsEntity>().Update(clan);
+        entry.Property(k => k.ClanWarehouseItems).IsModified = false;
+        entry.Property(k => k.ClanWarehouseGold).IsModified = false;
         await context.SaveChangesAsync();
     }
 

@@ -1,5 +1,7 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using System.Buffers;
+using System.Diagnostics;
+using System.Net;
 using System.Net.Sockets;
 using System.Numerics;
 using System.Threading.Channels;
@@ -10,6 +12,7 @@ public interface IClient
 {
     Guid Id { get; }
     Socket Socket { get; }
+    IPAddress? RemoteAddress { get; }
     uint PacketSequenceId { get; set; }
     uint SendSequenceId { get; set; }
     int AccountId { get; set; }
@@ -22,16 +25,19 @@ public interface IClient
     void EnableLoginCrypto(byte[] seedBytes);
     Task SendPacket(Packet packet, CancellationToken ct = default);
     Task<Packet> ReceivePacket(CancellationToken ct = default);
+    string? ExpiredDeadline();
     void Disconnect();
     PacketCipher? GetPacketCipher();
 }
 
 public enum ServerType { Login, Game }
 
-public class Client(Socket socket, ServerType serverType, ILogger<Client> logger) : IClient, IDisposable
+public class Client(Socket socket, ServerType serverType, ILogger<Client> logger, ConnectionLimitsSettings? limits = null)
+    : IClient, IDisposable
 {
     public Guid Id { get; } = Guid.NewGuid();
     public Socket Socket { get; } = socket;
+    public IPAddress? RemoteAddress { get; } = AddressOf(socket);
     public uint PacketSequenceId { get; set; }
     public uint SendSequenceId { get; set; }
     public int AccountId { get; set; } = 0;
@@ -84,6 +90,12 @@ public class Client(Socket socket, ServerType serverType, ILogger<Client> logger
     private int writerStarted;
     private int closeRequested;
     private int disposed;
+
+    private readonly ConnectionLimitsSettings connectionLimits = limits ?? new();
+    private readonly long connectedAt = Stopwatch.GetTimestamp();
+    private long lastPacketAt = Stopwatch.GetTimestamp();
+    private long frameStartedAt;
+    private Action? markFrameStarted;
 
     public void EnableCrypto(BigInteger publicKey)
     {
@@ -219,41 +231,84 @@ public class Client(Socket socket, ServerType serverType, ILogger<Client> logger
 
     public async Task<Packet> ReceivePacket(CancellationToken ct = default)
     {
-        var packet = await PacketProvider.ReadFromStream(readBuffer ??= new BufferedStream(stream, ReadBufferSize), ct);
+        Volatile.Write(ref frameStartedAt, 0);
+        var packet = await PacketProvider.ReadFromStream(
+            readBuffer ??= new BufferedStream(stream, ReadBufferSize),
+            markFrameStarted ??= MarkFrameStarted,
+            ct);
+        Volatile.Write(ref frameStartedAt, 0);
+        Volatile.Write(ref lastPacketAt, Stopwatch.GetTimestamp());
 
         if (serverType == ServerType.Login && loginSeedBytes != null)
         {
-            var rawPacket = packet.GetBytes();
-            if (LoginSeedCipher.LooksLikeProtectedPacket(rawPacket))
-            {
-                packet = PacketProvider.UnwrapLoginSeedPacket(packet, loginSeedBytes);
-            }
-            else
-            {
-                var previousSequenceId = PacketSequenceId;
-                (packet, PacketSequenceId) = PacketProvider.UnwrapPacket(packet, IsCryptoEnabled, packetCipher);
+            if (!LoginSeedCipher.LooksLikeProtectedPacket(packet.GetBytes()))
+                throw new InvalidDataException("Unprotected packet after the login handshake.");
 
-                if (packetCipher != null && PacketSequenceId != 0 && PacketSequenceId != previousSequenceId + 1)
-                    throw new InvalidDataException($"Invalid crypto sequence: expected {previousSequenceId + 1}, got {PacketSequenceId}");
-
-                if (rawPacket.Length > 1 && rawPacket[0] == LoginSeedCipher.SelectorByte)
-                    throw new InvalidDataException("Malformed seed-protected login packet.");
-            }
+            packet = PacketProvider.UnwrapLoginSeedPacket(packet, loginSeedBytes);
         }
         else
         {
             var previousSequenceId = PacketSequenceId;
             (packet, PacketSequenceId) = PacketProvider.UnwrapPacket(packet, IsCryptoEnabled, packetCipher);
 
-            if (packetCipher != null && PacketSequenceId != 0 && PacketSequenceId != previousSequenceId + 1)
+            if (packetCipher != null && PacketSequenceId != previousSequenceId + 1)
                 throw new InvalidDataException($"Invalid crypto sequence: expected {previousSequenceId + 1}, got {PacketSequenceId}");
         }
 
         if (logger.IsEnabled(LogLevel.Trace))
-            logger.LogTrace("Received packet 0x{Opcode:X2} ({OpcodeName}): {Packet}",
-                packet.GetOpcode(), ResolveOpcodeName(packet.GetOpcode(), outbound: false, packet.GetLength()), Convert.ToHexString(packet.GetBytes()));
+            LogReceived(packet);
 
         return packet;
+    }
+
+    public string? ExpiredDeadline()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var frameStarted = Volatile.Read(ref frameStartedAt);
+
+        if (frameStarted != 0 && Stopwatch.GetElapsedTime(frameStarted, now) > connectionLimits.PartialFrameTimeout)
+            return $"packet still incomplete after {connectionLimits.PartialFrameTimeoutSeconds}s";
+
+        if (AccountId == 0 && Stopwatch.GetElapsedTime(connectedAt, now) > connectionLimits.LoginTimeout)
+            return $"no login within {connectionLimits.LoginTimeoutSeconds}s";
+
+        if (Stopwatch.GetElapsedTime(Volatile.Read(ref lastPacketAt), now) > connectionLimits.IdleTimeout)
+            return $"no packet for {connectionLimits.IdleTimeoutSeconds}s";
+
+        return null;
+    }
+
+    private void MarkFrameStarted() => Volatile.Write(ref frameStartedAt, Stopwatch.GetTimestamp());
+
+    private void LogReceived(Packet packet)
+    {
+        var opcode = packet.GetOpcode();
+        var opcodeName = ResolveOpcodeName(opcode, outbound: false, packet.GetLength());
+
+        if (CarriesCredentials(opcode))
+            logger.LogTrace("Received packet 0x{Opcode:X2} ({OpcodeName}): {Length} bytes withheld",
+                opcode, opcodeName, packet.GetLength());
+        else
+            logger.LogTrace("Received packet 0x{Opcode:X2} ({OpcodeName}): {Packet}",
+                opcode, opcodeName, Convert.ToHexString(packet.GetBytes()));
+    }
+
+    private bool CarriesCredentials(byte opcode) => serverType == ServerType.Login
+        ? (LoginOpcodes)opcode is LoginOpcodes.LS_LOGIN or LoginOpcodes.LS_MGAME_LOGIN or LoginOpcodes.LS_OTP
+        : (GameOpcodes)opcode is GameOpcodes.GS_LOGIN or GameOpcodes.GS_KICKOUT or GameOpcodes.GS_VIP_WAREHOUSE;
+
+    private static IPAddress? AddressOf(Socket socket)
+    {
+        try
+        {
+            return socket.RemoteEndPoint is IPEndPoint endPoint
+                ? endPoint.Address.IsIPv4MappedToIPv6 ? endPoint.Address.MapToIPv4() : endPoint.Address
+                : null;
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            return null;
+        }
     }
 
     public void Disconnect()

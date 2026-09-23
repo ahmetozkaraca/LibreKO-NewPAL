@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Hosting;
@@ -21,6 +21,7 @@ public class SocketServer(
     private const int AcceptRetryMaxBackoffShift = 7;
     private const int RateEntryStaleWindowMultiplier = 6;
     private static readonly TimeSpan RateSweepInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan DeadlineSweepInterval = TimeSpan.FromSeconds(1);
 
     private readonly IPAddress _bindAddress = bindHost == "*" ? IPAddress.Any : IPAddress.Parse(bindHost);
     private readonly int _startPort = port;
@@ -30,6 +31,7 @@ public class SocketServer(
     private readonly ConcurrentDictionary<Guid, IClient> _clients = new();
     private CancellationTokenSource _cts = new();
     private Task? _sweepTask;
+    private Task? _deadlineTask;
 
     private readonly ConcurrentDictionary<IPAddress, int> _connectionsPerIp = new();
     private readonly ConcurrentDictionary<IPAddress, RateEntry> _connectionRate = new();
@@ -56,6 +58,7 @@ public class SocketServer(
         var actualEnd = _endPort ?? _startPort;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _sweepTask = SweepRateEntriesAsync(_cts.Token);
+        _deadlineTask = EnforceDeadlinesAsync(_cts.Token);
 
         try
         {
@@ -230,6 +233,30 @@ public class SocketServer(
         }
     }
 
+    private async Task EnforceDeadlinesAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(DeadlineSweepInterval);
+
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                foreach (var client in _clients.Values)
+                {
+                    var expired = client.ExpiredDeadline();
+                    if (expired == null)
+                        continue;
+
+                    logger.LogInformation("Closing client {Id}: {Reason}", client.Id, expired);
+                    client.Disconnect();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private bool IsRateLimited(IPAddress ip)
     {
         var now = Environment.TickCount64;
@@ -259,6 +286,13 @@ public class SocketServer(
             try { await _sweepTask; }
             catch (Exception ex) { logger.LogDebug(ex, "Rate-limit sweep ended with an error"); }
             _sweepTask = null;
+        }
+
+        if (_deadlineTask is not null)
+        {
+            try { await _deadlineTask; }
+            catch (Exception ex) { logger.LogDebug(ex, "Connection deadline sweep ended with an error"); }
+            _deadlineTask = null;
         }
 
         foreach (var client in _clients.Values)

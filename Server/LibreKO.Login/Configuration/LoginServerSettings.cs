@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Login.Configuration;
 
@@ -24,4 +24,6 @@ public class FtpSettings
 public class AccountSettings
 {
     public bool AutoCreate { get; set; }
+    public int MaxCreatedPerIp { get; set; } = 5;
+    public int CreationWindowSeconds { get; set; } = 3600;
 }

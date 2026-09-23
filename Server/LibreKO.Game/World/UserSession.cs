@@ -12,6 +12,16 @@ public class UserSession
     public const int SelectMessageEventCount = 12;
 
     private readonly Lock _sync = new();
+    private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _closing;
+
+    public bool IsClosing => Volatile.Read(ref _closing) != 0;
+
+    public Task Closed => _closed.Task;
+
+    public bool TryBeginClosing() => Interlocked.Exchange(ref _closing, 1) == 0;
+
+    public void MarkClosed() => _closed.TrySetResult();
 
     public void WithLock(Action<UserSession> mutator)
     {
@@ -111,9 +121,54 @@ public class UserSession
     public float SpeedLastX { get; set; }
     public float SpeedLastZ { get; set; }
 
+    public MovementCheckState MoveCheck { get; } = new();
+
+    public TravelState Travel { get; } = new();
+
+    private short _hp;
+    private int _deathHandled;
+
     // Derived stats
     public short MaxHp { get; set; }
-    public short Hp { get; set; }
+
+    public short Hp
+    {
+        get => _hp;
+        set
+        {
+            _hp = value;
+            if (value > 0)
+                Volatile.Write(ref _deathHandled, 0);
+        }
+    }
+
+    public bool TryBeginDeath() => Interlocked.CompareExchange(ref _deathHandled, 1, 0) == 0;
+
+    public DamageOutcome ApplyDamage(int amount)
+    {
+        using var scope = _sync.EnterScope();
+        if (_hp <= 0 || amount <= 0)
+            return DamageOutcome.None;
+
+        var dealt = Math.Min(amount, (int)_hp);
+        _hp = (short)(_hp - dealt);
+        return new DamageOutcome(dealt, _hp <= 0);
+    }
+
+    public int Heal(int amount)
+    {
+        using var scope = _sync.EnterScope();
+        if (_hp <= 0 || amount <= 0)
+            return 0;
+
+        var healed = Math.Min(amount, MaxHp - _hp);
+        if (healed <= 0)
+            return 0;
+
+        _hp = (short)(_hp + healed);
+        return healed;
+    }
+
     public short MaxMp { get; set; }
     public short Mp { get; set; }
 
@@ -131,6 +186,7 @@ public class UserSession
     public bool IsHidingHelmet { get; set; }
     public InvisibilityType Invisibility { get; set; }
     public bool IsInvisible => Invisibility != InvisibilityType.None;
+    public short SightRadius { get; set; }
     public short TransformId { get; set; } // 0=none, NPC model ID when transformed
     public bool IsTransformed => TransformId > 0;
 
@@ -228,8 +284,7 @@ public class UserSession
     // Active buffs: magicId -> ActiveBuff
     public ConcurrentDictionary<int, ActiveBuff> ActiveBuffs { get; } = new();
     public ConcurrentDictionary<int, ActiveOverTimeEffect> ActiveOverTimeEffects { get; } = new();
-    public PendingMagicExecution? PendingOverTimeExecution { get; set; }
-    public long PendingOverTimeToken { get; set; }
+    public CombatActionState CombatActions { get; } = new();
 
     public ConcurrentDictionary<int, long> SkillCooldowns { get; } = new();
     public int CastingSkillId { get; set; }
@@ -297,7 +352,9 @@ public class UserSession
 
     public string VipPassword { get; set; } = string.Empty;
 
-    public byte VipPasswordRequest { get; set; }
+    public DateTimeOffset VipUnlockedUntil { get; set; }
+
+    public int VipPinFailures { get; set; }
 
     public string SealCode { get; set; } = string.Empty;
 
@@ -389,6 +446,8 @@ public class UserSession
 
     public AchievementState Achievements { get; } = new();
 
+    public RewardState Rewards { get; } = new();
+
     public short DisplayTitleId { get; set; }
 
     private AchievementTitleData? _titleBonuses;
@@ -464,24 +523,46 @@ public class UserSession
         return -1;
     }
 
-    public void InitExchange(bool start)
+    public IReadOnlyList<ExchangeItem> InitExchange(bool start)
     {
-        // Restore items/gold from exchange list
+        var unreturned = new List<ExchangeItem>();
         foreach (var item in Trade.ExchangeItemList)
         {
-            if (item.ItemId == InventoryConstants.ItemGold)
-                Money += item.Count;
-            else if (item.SrcPos < Inventory.Length)
-                Inventory[item.SrcPos].Count += (ushort)item.Count;
+            if (item.IsGold)
+                Money = Coins.Credit(Money, item.Count);
+            else if (!TryReturnEscrow(item))
+                unreturned.Add(item);
         }
         Trade.ExchangeItemList.Clear();
+        Trade.ExchangeOk = false;
 
         if (!start)
         {
             Trade.ExchangeUser = -1;
-            Trade.ExchangeOk = false;
             Trade.AskedForExchange = false;
         }
+
+        return unreturned;
+    }
+
+    private bool TryReturnEscrow(ExchangeItem item)
+    {
+        var stack = item.Stack;
+        var index = ItemTransfer.IsBagIndex(item.SrcPos) && ItemTransfer.CanPut(Inventory[item.SrcPos], stack, item.Stackable)
+            ? item.SrcPos
+            : ItemTransfer.FindBagSlot(Inventory, stack, item.Stackable);
+        if (index != ItemTransfer.NoSlot)
+        {
+            ItemTransfer.Put(Inventory[index], stack);
+            return true;
+        }
+
+        var vault = Array.FindIndex(Warehouse, slot => slot.IsEmpty);
+        if (vault == ItemTransfer.NoSlot)
+            return false;
+
+        stack.WriteTo(Warehouse[vault]);
+        return true;
     }
 
     public void CompleteExchange()

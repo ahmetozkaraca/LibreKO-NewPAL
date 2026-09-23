@@ -1,0 +1,26 @@
+[
+  {
+    "Id": 1,
+    "QuestId": 3,
+    "ItemId": 379076000,
+    "Count": 10
+  },
+  {
+    "Id": 2,
+    "QuestId": 9002,
+    "ItemId": 810418000,
+    "Count": 10
+  },
+  {
+    "Id": 3,
+    "QuestId": 9005,
+    "ItemId": 379077000,
+    "Count": 5
+  },
+  {
+    "Id": 4,
+    "QuestId": 9008,
+    "ItemId": 910020000,
+    "Count": 10
+  }
+]

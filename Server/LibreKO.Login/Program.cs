@@ -1,4 +1,4 @@
-using LibreKO.Login;
+﻿using LibreKO.Login;
 using LibreKO.Login.Seed;
 using LibreKO.Login.Startup;
 using LibreKO.Common.Domain.Services;
@@ -60,14 +60,20 @@ var builder = Host.CreateDefaultBuilder(args)
             serverVersion,
             mysql => mysql.EnableRetryOnFailure(maxRetryCount: 3)));
         services.AddMemoryCache();
+        services.AddSingleton(TimeProvider.System);
         services.AddScoped<IAccountRepository, AccountRepository>();
         services.AddScoped<ILoginService, LoginService>();
+        services.AddSingleton(sp => new LoginAttemptLimiter(
+            sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections,
+            sp.GetRequiredService<TimeProvider>()));
+        services.AddSingleton<AccountCreationThrottle>();
 
         services.AddSingleton<IPatchRepository, PatchRepository>();
         services.AddSingleton<IServerRepository, ServerRepository>();
         services.AddSingleton<IKingRepository, KingRepository>();
         services.AddSingleton<IClientFactory>(sp =>
-            new ClientFactory(ServerType.Login, sp.GetRequiredService<ILogger<Client>>()));
+            new ClientFactory(ServerType.Login, sp.GetRequiredService<ILogger<Client>>(),
+                sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections));
         services.AddSingleton<IPacketHandler, LoginPacketHandler>();
 
         services.AddSingleton(sp =>

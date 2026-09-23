@@ -57,6 +57,7 @@ public class QuestScriptDespawnTests
             Substitute.For<IGameDataService>(),
             Substitute.For<ICharacterStatePersister>(),
             provider,
+            TimeProvider.System,
             Substitute.For<ILogger<ScriptEffectApplier>>());
         return applier.ApplyAsync(fixture.Session, fixture.Context, "despawn.quest");
     }

@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
@@ -144,7 +144,7 @@ public class ItemSealTests : GameTestBase
     }
 
     [Fact]
-    public async Task AnItemThatCostsNoStonesUnbindsForFree()
+    public async Task AnItemThatCostsNoStonesCannotBeUnbound()
     {
         var (provider, session, sent) = Open(bound: 0);
         using var _ = provider;
@@ -152,8 +152,8 @@ public class ItemSealTests : GameTestBase
 
         await Seal(provider, session, ItemSealType.Unbind, KrowazBoots, 0, string.Empty);
 
-        Read(sent).Result.Should().Be(ItemSealResult.Succeeded);
-        session.Inventory[InventoryConstants.InventoryStart].State.Should().Be(ItemFlag.NotBound);
+        Read(sent).Result.Should().Be(ItemSealResult.Failed);
+        session.Inventory[InventoryConstants.InventoryStart].State.Should().Be(ItemFlag.Bound);
     }
 
     [Fact]

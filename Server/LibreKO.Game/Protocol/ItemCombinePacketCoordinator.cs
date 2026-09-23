@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -29,7 +29,7 @@ public class ItemCombinePacketCoordinator(
     };
 
     // charId -> recipe ids this character has successfully combined (in-memory; resets on restart).
-    private static readonly Dictionary<int, HashSet<int>> itemCombineCrafted = new();
+    private readonly ConcurrentDictionary<int, HashSet<int>> itemCombineCrafted = new();
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
@@ -74,21 +74,13 @@ public class ItemCombinePacketCoordinator(
         }
 
         // NOTE: input-item consumption / output grant is stubbed until wired to the inventory path.
-        GetCrafted(session.CharacterId).Add(recipeId);
+        var crafted = itemCombineCrafted.GetOrAdd(session.CharacterId, _ => []);
+        lock (crafted)
+            crafted.Add(recipeId);
         logger.LogDebug("{Name} combined recipe {Recipe} -> item {Output}",
             session.Name, recipeId, entry.OutputItemId);
 
         await session.Client.SendPacket(ItemCombinePacketWriter.Result(
             ItemCombineSubCombine, ItemCombinePacketWriter.Succeeded, entry.OutputItemId));
-    }
-
-    private static HashSet<int> GetCrafted(int charId)
-    {
-        if (!itemCombineCrafted.TryGetValue(charId, out var set))
-        {
-            set = new HashSet<int>();
-            itemCombineCrafted[charId] = set;
-        }
-        return set;
     }
 }

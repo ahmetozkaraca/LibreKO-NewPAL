@@ -41,10 +41,6 @@ public class UserSessionCharacterMapper : IUserSessionCharacterMapper
         session.VipVaultExpiry = account.VipVaultExpiry;
         session.VipPassword = account.VipPassword ?? string.Empty;
         session.SealCode = account.SealCode ?? string.Empty;
-        // Password challenge fires once per login: when a PIN exists, the first
-        // VIP_Open must be preceded by VIP_EnterPassword. Cleared by a successful
-        // unlock for the rest of the session.
-        session.VipPasswordRequest = session.VipPassword.Length == 4 ? (byte)1 : (byte)0;
         session.Race = character.Race;
         session.Class = character.Class;
         session.Level = character.Level;

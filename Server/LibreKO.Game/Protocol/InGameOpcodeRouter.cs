@@ -230,9 +230,6 @@ public class InGameOpcodeRouter : IInGameOpcodeRouter
             // NOT NationTransfer. Sending real S2C nation-transfer packets makes the
             // client display title strings instead. Drop silently.
             [GameOpcodes.GS_NATION_TRANSFER] = NoOp,
-            // because there's no daily-quest DB table yet. Same posture here — accept
-            // the C2S to suppress unhandled-opcode warnings; S2C builders land when the
-            // table does.
             [GameOpcodes.GS_DAILY_QUEST] = dailyQuest.HandleAsync,
             [GameOpcodes.GS_COLLECTION_RACE] = collectionRace.HandleAsync,
             [GameOpcodes.GS_LOTTERY] = lottery.HandleAsync,

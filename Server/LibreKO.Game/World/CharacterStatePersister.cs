@@ -1,13 +1,29 @@
-using System.Collections.Concurrent;
-using LibreKO.Common.Domain.Services;
+﻿using System.Collections.Concurrent;
+using LibreKO.Common.Domain.Entities;
+using LibreKO.Common.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace LibreKO.Game.World;
 
+public interface ICharacterUnitOfWork
+{
+    AppDbContext Db { get; }
+
+    Task CommitAsync();
+}
+
 public interface ICharacterStatePersister
 {
     Task<bool> SaveAsync(UserSession session, CancellationToken cancellationToken = default);
+
+    Task<bool> SaveFinalAsync(UserSession session, CancellationToken cancellationToken = default);
+
+    Task<bool> RequestSaveAsync(UserSession session);
+
+    Task<TResult> RunAsync<TResult>(UserSession session, TResult refused, Func<ICharacterUnitOfWork, Task<TResult>> work);
+
     Task SetOnlineStateAsync(int characterId, bool isOnline, CancellationToken cancellationToken = default);
 
     Task SaveQuestStateAsync(UserSession session, CancellationToken cancellationToken = default);
@@ -15,124 +31,214 @@ public interface ICharacterStatePersister
 
 public class CharacterStatePersister(
     IServiceScopeFactory scopeFactory,
+    IUserSessionCharacterMapper mapper,
     ILogger<CharacterStatePersister> logger) : ICharacterStatePersister
 {
-    private readonly IServiceScopeFactory _scopeFactory = scopeFactory;
+    private const int MaxConcurrentRequestedSaves = 8;
 
-    // Quest-state saves are fired on every quest milestone, which a misbehaving or
-    // spamming client can trigger dozens of times per second. To stop that flooding
-    // the DB connection pool, saves are coalesced per character (repeated requests
-    // collapse into a single in-flight save plus one pending re-save) and the total
-    // number of concurrent quest writes is capped server-wide.
-    private const int MaxConcurrentQuestSaves = 8;
-    private readonly SemaphoreSlim _questSaveGate = new(MaxConcurrentQuestSaves);
-    private readonly ConcurrentDictionary<int, QuestSaveSlot> _questSaveSlots = new();
+    private readonly SemaphoreSlim _requestedSaveGate = new(MaxConcurrentRequestedSaves);
+    private readonly ConcurrentDictionary<int, CharacterSlot> _slots = new();
 
-    private sealed class QuestSaveSlot
+    public Task<bool> SaveAsync(UserSession session, CancellationToken cancellationToken = default) =>
+        ExclusiveAsync(session.CharacterId, () => WriteAsync(session, final: false, cancellationToken), cancellationToken);
+
+    public Task<bool> SaveFinalAsync(UserSession session, CancellationToken cancellationToken = default) =>
+        ExclusiveAsync(session.CharacterId, () => WriteAsync(session, final: true, cancellationToken), cancellationToken);
+
+    public Task SaveQuestStateAsync(UserSession session, CancellationToken cancellationToken = default) =>
+        RequestSaveAsync(session);
+
+    public Task<bool> RequestSaveAsync(UserSession session)
     {
-        public bool Running;
-        public bool Dirty;
-        public UserSession Session = null!;
+        var slot = Enter(session.CharacterId);
+        PendingSave pending;
+        using (slot.Sync.EnterScope())
+        {
+            if (slot.Pending is { } queued && ReferenceEquals(queued.Session, session))
+            {
+                slot.Users--;
+                return queued.Completion.Task;
+            }
+
+            pending = new PendingSave(session);
+            slot.Pending = pending;
+        }
+
+        _ = RunPendingAsync(slot, pending);
+        return pending.Completion.Task;
     }
 
-    public async Task<bool> SaveAsync(UserSession session, CancellationToken cancellationToken = default)
-    {
-        using var scope = _scopeFactory.CreateScope();
-        var characterRepository = scope.ServiceProvider.GetRequiredService<ICharacterRepository>();
-        var warehouseRepository = scope.ServiceProvider.GetRequiredService<IWarehouseRepository>();
-        var dailyOpRepository = scope.ServiceProvider.GetRequiredService<IUserDailyOpRepository>();
-        var accountRepository = scope.ServiceProvider.GetRequiredService<IAccountRepository>();
-        var userSessionCharacterMapper = scope.ServiceProvider.GetRequiredService<IUserSessionCharacterMapper>();
-        var character = await characterRepository.GetById(session.CharacterId);
-        if (character == null)
-            return false;
+    public Task<TResult> RunAsync<TResult>(UserSession session, TResult refused, Func<ICharacterUnitOfWork, Task<TResult>> work) =>
+        ExclusiveAsync(session.CharacterId, async () =>
+        {
+            if (session.IsClosing)
+                return refused;
 
-        var warehouse = await warehouseRepository.GetOrCreateByAccountId(session.AccountId);
-        var dailyOp = await dailyOpRepository.GetOrCreateByCharacterId(session.CharacterId);
-        var account = await accountRepository.GetById(session.AccountId);
-
-        userSessionCharacterMapper.ApplyToCharacter(session, character);
-        userSessionCharacterMapper.ApplyToWarehouse(session, warehouse);
-        userSessionCharacterMapper.ApplyToDailyOps(session, dailyOp);
-        if (account != null)
-            userSessionCharacterMapper.ApplyToAccount(session, account);
-        await characterRepository.UpdateAsync(character);
-        await warehouseRepository.UpdateAsync(warehouse);
-        await dailyOpRepository.UpdateAsync(dailyOp);
-        if (account != null)
-            await accountRepository.UpdateAsync(account);
-
-        return true;
-    }
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            return await work(new CharacterUnitOfWork(db, session, this));
+        }, CancellationToken.None);
 
     public async Task SetOnlineStateAsync(int characterId, bool isOnline, CancellationToken cancellationToken = default)
     {
-        using var scope = _scopeFactory.CreateScope();
-        var characterRepository = scope.ServiceProvider.GetRequiredService<ICharacterRepository>();
-        var character = await characterRepository.GetById(characterId);
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var character = await db.Characters.FindAsync([characterId], cancellationToken);
         if (character == null)
             return;
 
         character.IsOnline = isOnline;
         character.LastOnlineTime = DateTime.UtcNow;
-
-        await characterRepository.UpdateAsync(character);
+        await db.SaveChangesAsync(cancellationToken);
     }
 
-    public Task SaveQuestStateAsync(UserSession session, CancellationToken cancellationToken = default)
+    private async Task<bool> WriteAsync(UserSession session, bool final, CancellationToken cancellationToken)
     {
-        var slot = _questSaveSlots.GetOrAdd(session.CharacterId, static _ => new QuestSaveSlot());
-        lock (slot)
-        {
-            slot.Session = session;
-            slot.Dirty = true;
-            if (slot.Running)
-                return Task.CompletedTask;
-            slot.Running = true;
-        }
+        if (session.IsClosing && !final)
+            return false;
 
-        _ = DrainQuestSaveSlotAsync(session.CharacterId, slot);
-        return Task.CompletedTask;
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        if (!await StageAsync(db, session, cancellationToken))
+            return false;
+
+        await db.SaveChangesAsync(cancellationToken);
+        return true;
     }
 
-    private async Task DrainQuestSaveSlotAsync(int characterId, QuestSaveSlot slot)
+    private async Task<bool> StageAsync(AppDbContext db, UserSession session, CancellationToken cancellationToken)
     {
-        while (true)
+        var character = await db.Characters.FindAsync([session.CharacterId], cancellationToken);
+        if (character == null)
+            return false;
+
+        var warehouse = await db.Warehouses.SingleOrDefaultAsync(entry => entry.AccountId == session.AccountId, cancellationToken)
+            ?? db.Warehouses.Add(new Warehouse { AccountId = session.AccountId }).Entity;
+        var dailyOp = await db.UserDailyOps.FindAsync([session.CharacterId], cancellationToken)
+            ?? db.UserDailyOps.Add(new UserDailyOp { CharacterId = session.CharacterId }).Entity;
+        var account = await db.Accounts.FindAsync([session.AccountId], cancellationToken);
+
+        session.WithLock(s =>
         {
-            UserSession session;
-            lock (slot)
-            {
-                if (!slot.Dirty)
-                {
-                    slot.Running = false;
-                    return;
-                }
+            mapper.ApplyToCharacter(s, character);
+            mapper.ApplyToWarehouse(s, warehouse);
+            mapper.ApplyToDailyOps(s, dailyOp);
+            if (account != null)
+                mapper.ApplyToAccount(s, account);
+        });
+        return true;
+    }
 
-                slot.Dirty = false;
-                session = slot.Session;
-            }
-
-            await _questSaveGate.WaitAsync();
+    private async Task RunPendingAsync(CharacterSlot slot, PendingSave pending)
+    {
+        var session = pending.Session;
+        var saved = false;
+        try
+        {
+            await _requestedSaveGate.WaitAsync();
             try
             {
-                await PersistQuestBlobAsync(session);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Quest state persist failed for {CharacterId}", characterId);
+                await slot.Gate.WaitAsync();
+                try
+                {
+                    using (slot.Sync.EnterScope())
+                    {
+                        if (ReferenceEquals(slot.Pending, pending))
+                            slot.Pending = null;
+                    }
+
+                    saved = await WriteAsync(session, final: false, CancellationToken.None);
+                }
+                finally
+                {
+                    slot.Gate.Release();
+                }
             }
             finally
             {
-                _questSaveGate.Release();
+                _requestedSaveGate.Release();
             }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Requested save failed for character {CharacterId}", session.CharacterId);
+        }
+        finally
+        {
+            Leave(session.CharacterId, slot);
+            pending.Completion.TrySetResult(saved);
         }
     }
 
-    private async Task PersistQuestBlobAsync(UserSession session)
+    private async Task<T> ExclusiveAsync<T>(int characterId, Func<Task<T>> work, CancellationToken cancellationToken)
     {
-        using var scope = _scopeFactory.CreateScope();
-        var characterRepository = scope.ServiceProvider.GetRequiredService<ICharacterRepository>();
-        // Direct single-column UPDATE — no full character row read or rewrite.
-        await characterRepository.UpdateQuestDataAsync(session.CharacterId, session.SerializeQuestData());
+        var slot = Enter(characterId);
+        try
+        {
+            await slot.Gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await work();
+            }
+            finally
+            {
+                slot.Gate.Release();
+            }
+        }
+        finally
+        {
+            Leave(characterId, slot);
+        }
+    }
+
+    private CharacterSlot Enter(int characterId)
+    {
+        while (true)
+        {
+            var slot = _slots.GetOrAdd(characterId, static _ => new CharacterSlot());
+            using var scope = slot.Sync.EnterScope();
+            if (slot.Retired)
+                continue;
+
+            slot.Users++;
+            return slot;
+        }
+    }
+
+    private void Leave(int characterId, CharacterSlot slot)
+    {
+        using var scope = slot.Sync.EnterScope();
+        if (--slot.Users > 0)
+            return;
+
+        slot.Retired = true;
+        _slots.TryRemove(new KeyValuePair<int, CharacterSlot>(characterId, slot));
+    }
+
+    private sealed class CharacterSlot
+    {
+        public readonly SemaphoreSlim Gate = new(1, 1);
+        public readonly Lock Sync = new();
+        public int Users;
+        public bool Retired;
+        public PendingSave? Pending;
+    }
+
+    private sealed class PendingSave(UserSession session)
+    {
+        public UserSession Session { get; } = session;
+        public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class CharacterUnitOfWork(AppDbContext db, UserSession session, CharacterStatePersister persister)
+        : ICharacterUnitOfWork
+    {
+        public AppDbContext Db => db;
+
+        public async Task CommitAsync()
+        {
+            await persister.StageAsync(db, session, CancellationToken.None);
+            await db.SaveChangesAsync();
+        }
     }
 }

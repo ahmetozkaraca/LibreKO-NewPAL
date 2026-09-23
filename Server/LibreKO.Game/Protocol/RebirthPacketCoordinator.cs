@@ -36,16 +36,20 @@ public class RebirthPacketCoordinator(
         await HandleRequestAsync(client, session);
     }
 
-    private async Task HandleRequestAsync(IClient client, UserSession session)
+    public static bool MeetsRequirements(UserSession session, long levelExperience)
     {
-        var levelExp = gameDataService.GetMaxExpForLevel(session.Level);
-        var maxExp = RebirthBonus.RequiredExperience(levelExp, session.RebirthLevel);
-        var ready = session.Level >= ProgressionTable.MaxLevel
+        var maxExp = RebirthBonus.RequiredExperience(levelExperience, session.RebirthLevel);
+        return session.Level >= ProgressionTable.MaxLevel
             && maxExp > 0
             && session.Experience >= maxExp
             && session.Money >= RebirthGoldCost
             && session.Loyalty >= RebirthLoyaltyCost
             && session.RebirthLevel < RebirthBonus.MaxRebirthLevel;
+    }
+
+    private async Task HandleRequestAsync(IClient client, UserSession session)
+    {
+        var ready = MeetsRequirements(session, gameDataService.GetMaxExpForLevel(session.Level));
 
         if (!ready)
         {

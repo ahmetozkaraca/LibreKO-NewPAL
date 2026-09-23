@@ -1,9 +1,8 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using LibreKO.Game.Protocol.Writers;
 
@@ -19,25 +18,22 @@ public class ClanWarehousePacketCoordinator(
     IGameDataService gameDataService,
     IUserNotificationService userNotificationService,
     IKnightsRuntimeService knightsRuntime,
-    IServiceScopeFactory scopeFactory,
+    ICharacterStatePersister characterStatePersister,
     ILogger<ClanWarehousePacketCoordinator> logger) : IClanWarehousePacketCoordinator
 {
-
-
-    private const int ItemNoTradeMin = 900_000_001;
-    private const int ItemNoTradeMax = 999_999_999;
-    private const int CoinMax = 2_100_000_000;
     private const int WarehousePageSize = 24;
-    private const int ItemCountMax = 9999;
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null) return;
+        if (session == null || packet.RemainingBytes < 1) return;
 
         var sub = (WarehouseSubOpcode)packet.ReadByte();
 
-        if (session.KnightsId <= 0 || sessionManager.Knights.GetClan(session.KnightsId) == null)
+        if (session.KnightsId <= 0
+            || sessionManager.Knights.GetClan(session.KnightsId) == null
+            || session.Trade.LocksInventory
+            || !NpcDialogContext.IsTalkingTo(sessionManager, session, NpcData.TypeWarehouse))
         {
             await SendResult(session, sub, ClanWarehouseResult.Failed);
             return;
@@ -58,20 +54,16 @@ public class ClanWarehousePacketCoordinator(
 
     private async Task OpenAsync(UserSession session)
     {
-        var clan = sessionManager.Knights.GetClan(session.KnightsId)!;
-        var slots = sessionManager.Knights.GetClanWarehouse(session.KnightsId);
-        if (slots == null)
+        var view = sessionManager.Knights.WithClanWarehouse<ClanVaultView?>(session.KnightsId,
+            (clan, slots) => new ClanVaultView(clan.ClanWarehouseGold, [.. slots.Select(Copy)]), null);
+        if (view == null)
         {
             await SendResult(session, WarehouseSubOpcode.Open, ClanWarehouseResult.Failed);
             return;
         }
 
-        var contents = new List<ItemSlot>(KnightsManager.ClanWarehouseSlots);
-        for (var i = 0; i < KnightsManager.ClanWarehouseSlots; i++)
-            contents.Add(slots[i]);
-
         await session.Client.SendPacket(ClanWarehousePacketWriter.Contents(
-            WarehouseSubOpcode.Open, ClanWarehouseResult.Succeeded, clan.ClanWarehouseGold, contents));
+            WarehouseSubOpcode.Open, ClanWarehouseResult.Succeeded, view.Gold, view.Slots));
     }
 
     private async Task InputAsync(UserSession session, Packet packet)
@@ -85,27 +77,16 @@ public class ClanWarehousePacketCoordinator(
 
         if (itemId == InventoryConstants.ItemGold)
         {
-            KnightsEntity? clanRefGold = null;
-            var goldOk = sessionManager.Knights.WithClanWarehouse(session.KnightsId, (c, _) =>
+            var goldOk = await CommitAsync(session, (clan, _, s) =>
             {
-                clanRefGold = c;
-                return session.WithLock(s =>
-                {
-                    if (count <= 0 || count > s.Money || c.ClanWarehouseGold > CoinMax - count)
-                        return false;
-                    s.Money -= count;
-                    c.ClanWarehouseGold += count;
-                    return true;
-                });
-            }, false);
+                if (count <= 0 || count > s.Money || clan.ClanWarehouseGold > ExchangePacketConstants.CoinMax - count)
+                    return null;
+                s.Money -= count;
+                clan.ClanWarehouseGold += count;
+                return new ClanChange { ClanGoldDelta = count, MoneyDelta = -count };
+            });
 
-            if (!goldOk || clanRefGold == null)
-            {
-                await SendResult(session, WarehouseSubOpcode.Input, ClanWarehouseResult.Failed);
-                return;
-            }
-            await PersistClanAsync(clanRefGold, items: false);
-            await SendResult(session, WarehouseSubOpcode.Input, ClanWarehouseResult.Succeeded);
+            await SendResult(session, WarehouseSubOpcode.Input, goldOk ? ClanWarehouseResult.Succeeded : ClanWarehouseResult.Failed);
             return;
         }
 
@@ -113,8 +94,8 @@ public class ClanWarehousePacketCoordinator(
         if (itemData == null
             || srcPos >= InventoryConstants.HaveMax
             || dstPos >= WarehousePageSize
-            || (itemId >= ItemNoTradeMin && itemId <= ItemNoTradeMax)
             || count <= 0
+            || count > InventoryConstants.MaxStackCount
             || (itemData.Countable == 0 && count != 1))
         {
             await SendResult(session, WarehouseSubOpcode.Input, ClanWarehouseResult.Failed);
@@ -129,45 +110,29 @@ public class ClanWarehousePacketCoordinator(
             return;
         }
 
-        KnightsEntity? clanRef = null;
-        var success = sessionManager.Knights.WithClanWarehouse(session.KnightsId, (c, slots) =>
+        var success = await CommitAsync(session, (_, slots, s) =>
         {
-            clanRef = c;
-            return session.WithLock(s =>
-            {
-                var source = s.Inventory[absSrc];
-                if (source.ItemId != itemId || source.Count < count)
-                    return false;
+            var source = s.Inventory[absSrc];
+            var destination = slots[realDst];
+            if (source.ItemId != itemId
+                || source.Count < count
+                || !ItemTransfer.CanLeaveOwner(source, itemData)
+                || !VaultTransfer.Fits(itemData, source, destination, count))
+                return null;
 
-                var destination = slots[realDst];
-                if (!CanMergeOrPlace(itemData, destination, itemId, count))
-                    return false;
+            var change = new ClanChange().Touch(source).Touch(destination);
+            VaultTransfer.Move(source, destination, count);
+            s.RecalculateStatsWithBuffs(gameDataService);
+            return change;
+        });
 
-                var destinationWasEmpty = destination.IsEmpty;
-                destination.ItemId = itemId;
-                destination.Count += (ushort)count;
-                destination.Flag = source.Flag;
-                if (destinationWasEmpty) destination.Durability = source.Durability;
-                if (destination.Count > ItemCountMax) destination.Count = ItemCountMax;
-
-                source.Count -= (ushort)count;
-                if (source.Count == 0) source.Clear();
-
-                var coefficient = gameDataService.GetCoefficient(s.Class);
-                if (coefficient != null)
-                    s.RecalculateStats(coefficient, gameDataService);
-                return true;
-            });
-        }, false);
-
-        if (!success || clanRef == null)
+        if (!success)
         {
             await SendResult(session, WarehouseSubOpcode.Input, ClanWarehouseResult.Failed);
             return;
         }
 
-        await PersistClanAsync(clanRef, items: true);
-        await BroadcastDepositAsync(session, clanRef.Id, itemId, count, isDeposit: true);
+        await BroadcastDepositAsync(session, session.KnightsId, itemId, count, isDeposit: true);
         await SendResult(session, WarehouseSubOpcode.Input, ClanWarehouseResult.Succeeded);
         await userNotificationService.SendWeightChangeAsync(session);
     }
@@ -190,27 +155,16 @@ public class ClanWarehousePacketCoordinator(
 
         if (itemId == InventoryConstants.ItemGold)
         {
-            KnightsEntity? clanRefGold = null;
-            var goldOk = sessionManager.Knights.WithClanWarehouse(session.KnightsId, (c, _) =>
+            var goldOk = await CommitAsync(session, (clan, _, s) =>
             {
-                clanRefGold = c;
-                return session.WithLock(s =>
-                {
-                    if (count <= 0 || count > c.ClanWarehouseGold || s.Money > CoinMax - count)
-                        return false;
-                    c.ClanWarehouseGold -= count;
-                    s.Money += count;
-                    return true;
-                });
-            }, false);
+                if (count <= 0 || count > clan.ClanWarehouseGold || s.Money > ExchangePacketConstants.CoinMax - count)
+                    return null;
+                clan.ClanWarehouseGold -= count;
+                s.Money += count;
+                return new ClanChange { ClanGoldDelta = -count, MoneyDelta = count };
+            });
 
-            if (!goldOk || clanRefGold == null)
-            {
-                await SendResult(session, WarehouseSubOpcode.Output, ClanWarehouseResult.Failed);
-                return;
-            }
-            await PersistClanAsync(clanRefGold, items: false);
-            await SendResult(session, WarehouseSubOpcode.Output, ClanWarehouseResult.Succeeded);
+            await SendResult(session, WarehouseSubOpcode.Output, goldOk ? ClanWarehouseResult.Succeeded : ClanWarehouseResult.Failed);
             return;
         }
 
@@ -236,45 +190,29 @@ public class ClanWarehousePacketCoordinator(
 
         var absDst = InventoryConstants.SlotMax + dstPos;
 
-        KnightsEntity? clanRef = null;
-        var success = sessionManager.Knights.WithClanWarehouse(session.KnightsId, (c, slots) =>
+        var success = await CommitAsync(session, (_, slots, s) =>
         {
-            clanRef = c;
-            return session.WithLock(s =>
-            {
-                var source = slots[realSrc];
-                if (source.ItemId != itemId || source.Count < count
-                    || (itemData.Countable == 0 && count != 1))
-                    return false;
+            var source = slots[realSrc];
+            var destination = s.Inventory[absDst];
+            if (source.ItemId != itemId
+                || source.Count < count
+                || (itemData.Countable == 0 && count != 1)
+                || !VaultTransfer.Fits(itemData, source, destination, count))
+                return null;
 
-                var destination = s.Inventory[absDst];
-                if (!CanMergeOrPlace(itemData, destination, itemId, count))
-                    return false;
+            var change = new ClanChange().Touch(source).Touch(destination);
+            VaultTransfer.Move(source, destination, count);
+            s.RecalculateStatsWithBuffs(gameDataService);
+            return change;
+        });
 
-                var destinationWasEmpty = destination.IsEmpty;
-                destination.ItemId = itemId;
-                destination.Count += (ushort)count;
-                destination.Flag = source.Flag;
-                if (destinationWasEmpty) destination.Durability = source.Durability;
-
-                source.Count -= (ushort)count;
-                if (source.Count == 0) source.Clear();
-
-                var coefficient = gameDataService.GetCoefficient(s.Class);
-                if (coefficient != null)
-                    s.RecalculateStats(coefficient, gameDataService);
-                return true;
-            });
-        }, false);
-
-        if (!success || clanRef == null)
+        if (!success)
         {
             await SendResult(session, WarehouseSubOpcode.Output, ClanWarehouseResult.Failed);
             return;
         }
 
-        await PersistClanAsync(clanRef, items: true);
-        await BroadcastDepositAsync(session, clanRef.Id, itemId, count, isDeposit: false);
+        await BroadcastDepositAsync(session, session.KnightsId, itemId, count, isDeposit: false);
         await SendResult(session, WarehouseSubOpcode.Output, ClanWarehouseResult.Succeeded);
         await userNotificationService.SendWeightChangeAsync(session);
     }
@@ -308,31 +246,20 @@ public class ClanWarehousePacketCoordinator(
             return;
         }
 
-        KnightsEntity? clanRef = null;
-        var moved = sessionManager.Knights.WithClanWarehouse(session.KnightsId, (c, slots) =>
+        var moved = await CommitAsync(session, (_, slots, _) =>
         {
-            clanRef = c;
             var source = slots[realSrc];
             var destination = slots[realDst];
-            if (source.ItemId != itemId || !destination.IsEmpty)
-                return false;
+            if (source.ItemId != itemId || source.IsEmpty || !destination.IsEmpty)
+                return null;
 
-            destination.ItemId = source.ItemId;
-            destination.Durability = source.Durability;
-            destination.Count = source.Count;
-            destination.Flag = source.Flag;
+            var change = new ClanChange().Touch(source).Touch(destination);
+            ItemSlotState.Of(source).RestoreTo(destination);
             source.Clear();
-            return true;
-        }, false);
+            return change;
+        });
 
-        if (!moved || clanRef == null)
-        {
-            await SendResult(session, WarehouseSubOpcode.Move, ClanWarehouseResult.Failed);
-            return;
-        }
-
-        await PersistClanAsync(clanRef, items: true);
-        await SendResult(session, WarehouseSubOpcode.Move, ClanWarehouseResult.Succeeded);
+        await SendResult(session, WarehouseSubOpcode.Move, moved ? ClanWarehouseResult.Succeeded : ClanWarehouseResult.Failed);
     }
 
     private async Task InventoryMoveAsync(UserSession session, Packet packet)
@@ -363,18 +290,74 @@ public class ClanWarehousePacketCoordinator(
         {
             var source = s.Inventory[absSrc];
             var destination = s.Inventory[absDst];
-            if (source.ItemId != itemId || !destination.IsEmpty)
+            if (source.ItemId != itemId || source.IsEmpty || !destination.IsEmpty)
                 return false;
 
-            destination.ItemId = source.ItemId;
-            destination.Durability = source.Durability;
-            destination.Count = source.Count;
-            destination.Flag = source.Flag;
+            ItemSlotState.Of(source).RestoreTo(destination);
             source.Clear();
             return true;
         });
 
         await SendResult(session, WarehouseSubOpcode.InventoryMove, moved ? ClanWarehouseResult.Succeeded : ClanWarehouseResult.Failed);
+    }
+
+    private Task<bool> CommitAsync(UserSession session, Func<KnightsEntity, ItemSlot[], UserSession, ClanChange?> mutate)
+    {
+        var clanId = session.KnightsId;
+        return sessionManager.Knights.WithClanWarehouseGateAsync(clanId, () =>
+            characterStatePersister.RunAsync(session, false, async unit =>
+            {
+                var change = sessionManager.Knights.WithClanWarehouse<ClanChange?>(clanId,
+                    (clan, slots) => session.WithLock(s => Apply(clan, slots, s, mutate)), null);
+                if (change == null)
+                    return false;
+
+                var row = await unit.Db.Knights.FindAsync([clanId]);
+                if (row != null)
+                {
+                    row.ClanWarehouseItems = change.Items;
+                    row.ClanWarehouseGold = change.Gold;
+                    try
+                    {
+                        await unit.CommitAsync();
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Clan warehouse change by {Name} could not be stored", session.Name);
+                    }
+                }
+
+                sessionManager.Knights.WithClanWarehouse(clanId, (clan, slots) =>
+                {
+                    session.WithLock(s => change.Undo(clan, slots, s, gameDataService));
+                    return true;
+                }, false);
+                return false;
+            }));
+    }
+
+    private static ClanChange? Apply(
+        KnightsEntity clan,
+        ItemSlot[] slots,
+        UserSession session,
+        Func<KnightsEntity, ItemSlot[], UserSession, ClanChange?> mutate)
+    {
+        var change = mutate(clan, slots, session);
+        if (change == null)
+            return null;
+
+        change.Items = UserSessionBinaryState.SerializeWarehouse(slots);
+        change.Gold = clan.ClanWarehouseGold;
+        clan.ClanWarehouseItems = change.Items;
+        return change;
+    }
+
+    private static ItemSlot Copy(ItemSlot slot)
+    {
+        var copy = new ItemSlot();
+        ItemSlotState.Of(slot).RestoreTo(copy);
+        return copy;
     }
 
     private static async Task SendResult(UserSession session, WarehouseSubOpcode sub, ClanWarehouseResult result)
@@ -384,23 +367,6 @@ public class ClanWarehousePacketCoordinator(
 
     private static bool IsLeaderOrAssistant(UserSession session)
         => session.KnightsFame == 1 || session.KnightsFame == 2;
-
-    private static bool CanMergeOrPlace(ItemData itemData, ItemSlot destination, int itemId, int count)
-    {
-        if (destination.IsEmpty) return true;
-        if (destination.ItemId != itemId || itemData.Countable == 0) return false;
-        return destination.Count + count <= ItemCountMax;
-    }
-
-    private async Task PersistClanAsync(KnightsEntity clan, bool items)
-    {
-        if (items)
-            clan.ClanWarehouseItems = sessionManager.Knights.SerializeClanWarehouse(clan.Id);
-
-        using var scope = scopeFactory.CreateScope();
-        var repo = scope.ServiceProvider.GetRequiredService<IKnightsRepository>();
-        await repo.UpdateAsync(clan);
-    }
 
     private async Task BroadcastDepositAsync(UserSession actor, short clanId, int itemId, int count, bool isDeposit)
     {
@@ -413,5 +379,34 @@ public class ClanWarehousePacketCoordinator(
         var pkt = ChatPacketWriter.SystemNotice((byte)actor.Nation, message);
 
         await knightsRuntime.NotifyOnlineClanMembersAsync(clanId, pkt);
+    }
+
+    private sealed record ClanVaultView(int Gold, IReadOnlyList<ItemSlot> Slots);
+
+    private sealed class ClanChange
+    {
+        private readonly List<(ItemSlot Slot, ItemSlotState Before)> _touched = [];
+
+        public int ClanGoldDelta { get; init; }
+        public int MoneyDelta { get; init; }
+        public byte[] Items { get; set; } = [];
+        public int Gold { get; set; }
+
+        public ClanChange Touch(ItemSlot slot)
+        {
+            _touched.Add((slot, ItemSlotState.Of(slot)));
+            return this;
+        }
+
+        public void Undo(KnightsEntity clan, ItemSlot[] slots, UserSession session, IGameDataService gameData)
+        {
+            foreach (var (slot, before) in _touched)
+                before.RestoreTo(slot);
+
+            clan.ClanWarehouseGold -= ClanGoldDelta;
+            session.Money -= MoneyDelta;
+            clan.ClanWarehouseItems = UserSessionBinaryState.SerializeWarehouse(slots);
+            session.RecalculateStatsWithBuffs(gameData);
+        }
     }
 }

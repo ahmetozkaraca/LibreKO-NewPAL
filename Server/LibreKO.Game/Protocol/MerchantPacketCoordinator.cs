@@ -8,6 +8,7 @@ public interface IMerchantPacketCoordinator
 {
     Task HandleAsync(IClient client, Packet packet);
     Task HandleSessionEndedAsync(UserSession session);
+    Task CloseStallAsync(UserSession session);
 }
 
 public class MerchantPacketCoordinator(
@@ -99,5 +100,12 @@ public class MerchantPacketCoordinator(
         merchantLifecycleService.ReleaseViewedStall(session);
         await merchantBuyingService.CloseAsync(session, broadcast: true);
         await merchantLifecycleService.CloseAsync(session, session.Trade.IsMerchanting ? MerchantInOut.SessionEnded : null);
+    }
+
+    public async Task CloseStallAsync(UserSession session)
+    {
+        merchantLifecycleService.ReleaseViewedStall(session);
+        await merchantBuyingService.CloseAsync(session, broadcast: true);
+        await merchantLifecycleService.CloseAsync(session, session.Trade.IsMerchanting ? MerchantInOut.StallClosed : null);
     }
 }

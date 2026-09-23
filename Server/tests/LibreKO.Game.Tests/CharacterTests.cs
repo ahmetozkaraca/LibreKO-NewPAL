@@ -66,7 +66,7 @@ public class CharacterTests : GameTestBase
         var preGameService = provider.GetRequiredService<IPreGameService>();
         var accountId = await GetAccountIdAsync(provider, "karus-user");
 
-        var create = await preGameService.CreateCharacterAsync(accountId, 0, "Alpha", 1, 101, 2, 3, 60, 60, 60, 60, 60);
+        var create = await preGameService.CreateCharacterAsync(accountId, 0, "Alpha", 1, 101, 2, 3, 75, 65, 60, 50, 50);
         create.ReadByte().Should().Be((byte)CreateCharacterResult.Success);
 
         await using (var scope = provider.CreateAsyncScope())
@@ -84,7 +84,7 @@ public class CharacterTests : GameTestBase
             inventorySession.Inventory[InventoryConstants.InventoryStart].Count.Should().Be(1);
         }
 
-        var duplicate = await preGameService.CreateCharacterAsync(accountId, 0, "Beta", 1, 101, 2, 3, 60, 60, 60, 60, 60);
+        var duplicate = await preGameService.CreateCharacterAsync(accountId, 0, "Beta", 1, 101, 2, 3, 75, 65, 60, 50, 50);
         duplicate.ReadByte().Should().Be((byte)CreateCharacterResult.SlotFull);
     }
 
@@ -486,7 +486,8 @@ public class CharacterTests : GameTestBase
                     Slot = 0,
                     Name = "Before",
                     Race = 1,
-                    Class = 101
+                    Class = 101,
+                    Items = CreateInventory((InventoryConstants.SlotMax, CharacterRules.RenameScrollItemId, 1))
                 });
                 db.SaveChanges();
             });
@@ -1288,6 +1289,11 @@ public class CharacterTests : GameTestBase
         (await provider.GetRequiredService<IAccountLockService>()
             .AcquireAsync(client, accountId)).Granted.Should().BeTrue();
 
+        var load = new Packet(GameOpcodes.GS_GAMESTART);
+        load.WriteByte((byte)GameStartSubOpcode.Load);
+        await packetHandler.HandlePacket(client, load);
+        sentPackets.Clear();
+
         var request = new Packet(GameOpcodes.GS_GAMESTART);
         request.WriteByte(2);
 
@@ -1348,6 +1354,11 @@ public class CharacterTests : GameTestBase
 
         (await provider.GetRequiredService<IAccountLockService>()
             .AcquireAsync(client, accountId)).Granted.Should().BeTrue();
+
+        var load = new Packet(GameOpcodes.GS_GAMESTART);
+        load.WriteByte((byte)GameStartSubOpcode.Load);
+        await packetHandler.HandlePacket(client, load);
+        sentPackets.Clear();
 
         var request = new Packet(GameOpcodes.GS_GAMESTART);
         request.WriteByte(2);
@@ -1421,6 +1432,11 @@ public class CharacterTests : GameTestBase
 
         (await provider.GetRequiredService<IAccountLockService>()
             .AcquireAsync(client, accountId)).Granted.Should().BeTrue();
+
+        var load = new Packet(GameOpcodes.GS_GAMESTART);
+        load.WriteByte((byte)GameStartSubOpcode.Load);
+        await packetHandler.HandlePacket(client, load);
+        viewerPacket = null;
 
         var request = new Packet(GameOpcodes.GS_GAMESTART);
         request.WriteByte(2);

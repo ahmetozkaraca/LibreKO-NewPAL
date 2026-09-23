@@ -69,6 +69,11 @@ public class GameDataSeedRunner(IDataSeeder seeder, ILogger<GameDataSeedRunner> 
         await Seed(new LotteryEventSeed());
         await Seed(new LotteryRewardSeed());
         await Seed(new LotteryScheduleSeed());
+        await Seed(new RewardQuestSeed());
+        await Seed(new RewardQuestTargetSeed());
+        await Seed(new RewardQuestItemSeed());
+        await Seed(new RewardQuestRewardSeed());
+        await Seed(new RewardPrizeSeed());
 
         logger.LogInformation(
             "Game data seeding completed: {Applied} of {Total} seeds applied, {Skipped} unchanged, in {Elapsed}ms.",

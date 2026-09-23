@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace LibreKO.Common.Domain.Entities.GameData;
@@ -15,12 +15,14 @@ public class NpcData
     public const byte TypeRepairMerchant = 22;
     public const byte TypeAnvil = 24;
     public const byte TypeClanCape = 25;
+    public const byte TypeCastleManager = 27;
     public const byte TypeWarehouse = 31;
     public const byte TypeClassChange = 35;
     public const byte TypeHealer = 40;
     public const byte TypeGate = 50;
     public const byte TypeTalk = 64;
     public const short MakeupArtist = 31525;
+    public const short RedistributionMerchant = 18004;
     public const byte TypeObjectWood = 54;
     public const byte TypeChaoticGenerator = 162;
     public const byte TypeScarecrow = 171;

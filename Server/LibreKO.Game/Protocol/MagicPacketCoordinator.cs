@@ -17,25 +17,35 @@ public class MagicPacketCoordinator(
     SessionManager sessionManager,
     IGameDataService gameDataService,
     IMagicItemUsageService magicItemUsageService,
-    ICombatLifecycleService combatLifecycleService,
     IMagicExecutionService magicExecutionService,
     IMagicTimingService magicTimingService,
+    IMagicCostService magicCostService,
+    IMagicTargetingService magicTargetingService,
+    IViolationMonitor violationMonitor,
+    TimeProvider timeProvider,
     ILogger<MagicPacketCoordinator> logger) : IMagicPacketCoordinator
 {
-    private const int OverTimeFinalizeDelayMs = 120;
+    private const int HeaderBytes = 13;
+    private const int PayloadSlots = 7;
+    private const int PayloadSlotBytes = 4;
+    private const byte PotionItemGroup = 9;
+    private const int NoTarget = 0;
+    private const int MinimumVolley = 1;
+
+    private static readonly TimeSpan ArrowFlightAllowance = TimeSpan.FromSeconds(3);
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null)
+        if (session == null || packet.RemainingBytes < HeaderBytes)
             return;
 
         var magicOpcode = packet.ReadByte();
         var skillId = packet.ReadInt();
         var casterId = packet.ReadInt();
         var targetId = packet.ReadInt();
-        var data = new int[7];
-        for (int i = 0; i < 7 && packet.RemainingBytes >= 4; i++)
+        var data = new int[PayloadSlots];
+        for (var i = 0; i < data.Length && packet.RemainingBytes >= PayloadSlotBytes; i++)
             data[i] = packet.ReadInt();
 
         if (casterId != session.CharacterId)
@@ -43,6 +53,7 @@ public class MagicPacketCoordinator(
             logger.LogWarning(
                 "Refusing magic from {Name}: claimed caster {ClaimedCaster}, session is {CharacterId} skill={SkillId}",
                 session.Name, casterId, session.CharacterId, skillId);
+            violationMonitor.Report(session, ViolationKind.InvalidRequest, $"cast skill {skillId} as caster {casterId}");
             return;
         }
 
@@ -59,12 +70,6 @@ public class MagicPacketCoordinator(
             return;
         }
 
-        if (!session.CanUseSkills && !IsTerminator((MagicProcessOpcode)magicOpcode))
-        {
-            await SendMagicFailAsync(session, skillId);
-            return;
-        }
-
         if (!Enum.IsDefined(typeof(MagicProcessOpcode), magicOpcode))
         {
             logger.LogWarning("Unknown magic sub-opcode {SubOpcode} from {Name} skill={SkillId} type={SkillType}",
@@ -73,82 +78,266 @@ public class MagicPacketCoordinator(
             return;
         }
 
-        if (RequiresLearnedSkill((MagicProcessOpcode)magicOpcode)
-            && !MagicSkillRequirement.IsMet(magic, session.Level, session.SkillPoints))
-        {
-            logger.LogWarning(
-                "Refusing unlearned skill {SkillId} from {Name}: needs {Requirement}, has level {Level} and mastery [{Mastery}]",
-                skillId,
-                session.Name,
-                MagicSkillRequirement.Describe(magic),
-                session.Level,
-                string.Join(",", session.SkillPoints));
-            await SendMagicFailAsync(session, skillId);
-            return;
-        }
-
         switch ((MagicProcessOpcode)magicOpcode)
         {
             case MagicProcessOpcode.Casting:
-                if (!AllowTiming(session, magic, magicTimingService.CheckCasting(session, magic), magicOpcode))
-                {
-                    await SendMagicFailAsync(session, skillId);
-                    return;
-                }
-
-                magicTimingService.OnCastAccepted(session, magic);
                 await HandleCastingAsync(session, magic, targetId, data);
                 break;
             case MagicProcessOpcode.Flying:
-                if (!AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), magicOpcode))
-                {
-                    await SendMagicFailAsync(session, skillId);
-                    return;
-                }
-
-                await HandleFlyingAsync(session, magic, targetId, data);
+                await HandleFlyingAsync(session, magic, targetId);
                 break;
             case MagicProcessOpcode.Effecting:
-                if (!AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), magicOpcode))
-                {
-                    await SendMagicFailAsync(session, skillId);
-                    return;
-                }
-
-                magicTimingService.OnReleaseAccepted(session, magic);
-
-                if (OpensTransformationList(session, magic))
-                {
-                    await session.Client.SendPacket(
-                        MagicProcessPacketWriter.CreateTransformationList(skillId));
-                    return;
-                }
-
-                await HandleClientExecutionAsync(session, magic, skillId, targetId, data, magicOpcode);
-                break;
-            case MagicProcessOpcode.Fail when magic.PrimaryType == MagicSkillType.OverTime
-                && session.CastingSkillId != skillId:
-                await HandleClientExecutionAsync(session, magic, skillId, targetId, data, magicOpcode);
+                await HandleEffectingAsync(session, magic, targetId);
                 break;
             case MagicProcessOpcode.Fail:
-                magicTimingService.OnCastAborted(session, skillId);
-                await sessionManager.Regions.SendToRegion(
-                    session,
-                    MagicProcessPacketWriter.Create(MagicProcessOpcode.Fail, magic.Id, (short)session.CharacterId, targetId, data),
-                    excludeSender: true);
+                await AbortAsync(session, magic);
                 break;
             case MagicProcessOpcode.Cancel:
             case MagicProcessOpcode.SkillValueUpdate:
             case MagicProcessOpcode.DurationExpired:
-                magicTimingService.OnCastAborted(session, skillId);
+                if (magicTimingService.OnCastAborted(session, skillId))
+                    session.CombatActions.CastBindings.TryRemove(skillId, out _);
                 if (!IsPlayerCancellable(magic, skillId))
                     return;
 
                 await magicExecutionService.CancelAsync(session, skillId);
                 break;
-            case MagicProcessOpcode.CancelTransformation:
-                break;
         }
+    }
+
+    private async Task HandleCastingAsync(UserSession session, MagicData magic, int targetId, int[] data)
+    {
+        if (!MayCast(session, magic)
+            || !AllowTiming(session, magic, magicTimingService.CheckCasting(session, magic), MagicProcessOpcode.Casting))
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        var target = magicTargetingService.CheckCast(session, magic, targetId, data);
+        if (target.Binding == null)
+        {
+            ReportImplausibleReach(session, magic, target);
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        if (!magicCostService.CanAfford(session, CastCost(magic)))
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        magicTimingService.OnCastAccepted(session, magic);
+        session.CombatActions.CastBindings[magic.Id] = target.Binding;
+        MarkCombatAction(session);
+
+        await sessionManager.Regions.SendToRegion(
+            session,
+            MagicProcessPacketWriter.Create(
+                MagicProcessOpcode.Casting,
+                magic.Id,
+                session.CharacterId,
+                target.Binding.TargetId,
+                target.Binding.Data),
+            excludeSender: false);
+    }
+
+    private async Task HandleFlyingAsync(UserSession session, MagicData magic, int targetId)
+    {
+        var binding = magic.PrimaryType == MagicSkillType.Ranged
+            && MayCast(session, magic)
+            && AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), MagicProcessOpcode.Flying)
+            && MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, magic.Id, out _)
+                ? ReleaseTarget(session, magic, targetId)
+                : null;
+        if (binding == null)
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        var arrows = VolleySize(magic);
+        if (!await magicCostService.TryPayAsync(session, magicCostService.VolleyCostOf(magic, arrows)))
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        magicTimingService.OnVolleyAccepted(session, magic, arrows);
+        session.CombatActions.CastBindings.TryRemove(magic.Id, out _);
+        MarkCombatAction(session);
+
+        await sessionManager.Regions.SendToRegion(
+            session,
+            MagicProcessPacketWriter.Create(
+                MagicProcessOpcode.Flying,
+                magic.Id,
+                session.CharacterId,
+                binding.TargetId,
+                binding.Data),
+            excludeSender: false);
+    }
+
+    private async Task HandleEffectingAsync(UserSession session, MagicData magic, int targetId)
+    {
+        if (!MayCast(session, magic))
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        if (magic.PrimaryType == MagicSkillType.Ranged)
+        {
+            await HandleVolleyHitAsync(session, magic, targetId);
+            return;
+        }
+
+        var binding = AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), MagicProcessOpcode.Effecting)
+            ? ReleaseTarget(session, magic, targetId)
+            : null;
+        if (binding == null)
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        magicTimingService.OnReleaseAccepted(session, magic);
+        session.CombatActions.CastBindings.TryRemove(magic.Id, out _);
+
+        if (OpensTransformationList(session, magic))
+        {
+            await session.Client.SendPacket(MagicProcessPacketWriter.CreateTransformationList(magic.Id));
+            return;
+        }
+
+        MarkCombatAction(session);
+        var charge = MagicCharge.Deferred(() => magicCostService.TryPayAsync(session, magicCostService.CostOf(magic)));
+        await magicExecutionService.ExecuteAsync(session, magic, magic.Id, binding.TargetId, [.. binding.Data], charge);
+        if (!charge.IsPaid)
+            magicTimingService.RefundCooldown(session, magic.Id);
+    }
+
+    private async Task HandleVolleyHitAsync(UserSession session, MagicData magic, int targetId)
+    {
+        if (!magicTimingService.IsVolleyInFlight(session, magic.Id))
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        magicTimingService.OnVolleyHit(session, magic.Id);
+        var hit = magicTargetingService.CheckRelease(
+            session,
+            magic,
+            new MagicCastBinding(targetId, new int[PayloadSlots]),
+            (float)(magicTimingService.CastDuration(session, magic) + ArrowFlightAllowance).TotalSeconds);
+        if (hit.Binding == null)
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        MarkCombatAction(session);
+        await magicExecutionService.ExecuteAsync(
+            session, magic, magic.Id, hit.Binding.TargetId, [.. hit.Binding.Data], MagicCharge.Prepaid);
+    }
+
+    private async Task AbortAsync(UserSession session, MagicData magic)
+    {
+        if (!magicTimingService.OnCastAborted(session, magic.Id))
+            return;
+
+        session.CombatActions.CastBindings.TryRemove(magic.Id, out var binding);
+        await sessionManager.Regions.SendToRegion(
+            session,
+            MagicProcessPacketWriter.Create(
+                MagicProcessOpcode.Fail,
+                magic.Id,
+                session.CharacterId,
+                binding?.TargetId ?? NoTarget),
+            excludeSender: true);
+    }
+
+    private bool MayCast(UserSession session, MagicData magic)
+    {
+        if ((session.Hp <= 0 && !IsSelfRevival(magic)) || !session.CanUseSkills)
+            return false;
+
+        switch (MagicSkillRequirement.AccessFor(magic, session.Class))
+        {
+            case MagicAccess.Forged:
+                logger.LogWarning(
+                    "Refusing skill {SkillId} from {Name}: class {Class} cannot own it",
+                    magic.Id, session.Name, session.Class);
+                violationMonitor.Report(
+                    session, ViolationKind.ForgedEvent, $"cast skill {magic.Id} as class {session.Class}");
+                return false;
+            case MagicAccess.Unavailable:
+                return false;
+        }
+
+        if (!MagicSkillRequirement.IsMet(magic, session.Level, session.SkillPoints))
+        {
+            logger.LogWarning(
+                "Refusing unlearned skill {SkillId} from {Name}: needs {Requirement}, has level {Level} and mastery [{Mastery}]",
+                magic.Id,
+                session.Name,
+                MagicSkillRequirement.Describe(magic),
+                session.Level,
+                string.Join(",", session.SkillPoints));
+            return false;
+        }
+
+        return MagicWeaponRequirement.IsMet(magic, session, gameDataService)
+            && (magic.UseItem == 0 || magic.ItemGroup != PotionItemGroup || session.CanUsePotions);
+    }
+
+    private bool IsSelfRevival(MagicData magic) =>
+        magic.UseItem != 0
+        && magic.PrimaryType == MagicSkillType.Special
+        && MagicTypeLookup.TryResolve(gameDataService.MagicType5Table, magic, magic.Id, out var type5Data)
+        && (SpecialMagicType)type5Data.Type == SpecialMagicType.ResurrectionSelf;
+
+    private MagicCastBinding? ReleaseTarget(UserSession session, MagicData magic, int targetId)
+    {
+        if (!session.CombatActions.CastBindings.TryGetValue(magic.Id, out var bound)
+            || (bound.TargetId != targetId && (SkillMoral)magic.Moral != SkillMoral.Self))
+            return null;
+
+        return magicTargetingService.CheckRelease(
+            session, magic, bound, (float)magicTimingService.CastDuration(session, magic).TotalSeconds).Binding;
+    }
+
+    private MagicCost CastCost(MagicData magic) =>
+        magic.PrimaryType == MagicSkillType.Ranged
+            ? magicCostService.VolleyCostOf(magic, VolleySize(magic))
+            : magicCostService.CostOf(magic);
+
+    private int VolleySize(MagicData magic) =>
+        MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, magic.Id, out var type2Data)
+            ? Math.Max(MinimumVolley, (int)type2Data.NeedArrow)
+            : MinimumVolley;
+
+    private void MarkCombatAction(UserSession session)
+    {
+        var now = timeProvider.GetUtcNow().UtcTicks;
+        session.WithLock(caster =>
+        {
+            caster.IsSitting = false;
+            caster.CombatActions.LastActionTicks = now;
+        });
+    }
+
+    private void ReportImplausibleReach(UserSession session, MagicData magic, MagicTargetCheck target)
+    {
+        if (target.Verdict != MagicTargetVerdict.Implausible)
+            return;
+
+        violationMonitor.Report(
+            session,
+            ViolationKind.OutOfRange,
+            $"cast skill {magic.Id} {target.Distance:F0}m away, range {magicTargetingService.CastRange(session, magic):F0}m");
     }
 
     private bool OpensTransformationList(UserSession session, MagicData magic) =>
@@ -158,15 +347,6 @@ public class MagicPacketCoordinator(
         && magicItemUsageService.CanUseSkillItems(session, magic)
         && !BattleZoneManager.IsBattleZone(session.ZoneId)
         && !BattleZoneManager.IsPvpZone(session.ZoneId);
-
-    private static bool IsTerminator(MagicProcessOpcode opcode) =>
-        opcode is MagicProcessOpcode.Cancel
-            or MagicProcessOpcode.SkillValueUpdate
-            or MagicProcessOpcode.DurationExpired
-            or MagicProcessOpcode.CancelTransformation;
-
-    private static bool RequiresLearnedSkill(MagicProcessOpcode opcode) =>
-        opcode is MagicProcessOpcode.Casting or MagicProcessOpcode.Flying or MagicProcessOpcode.Effecting;
 
     private bool IsPlayerCancellable(MagicData magic, int skillId) => magic.PrimaryType switch
     {
@@ -181,242 +361,20 @@ public class MagicPacketCoordinator(
         UserSession session,
         MagicData magic,
         MagicTimingVerdict verdict,
-        byte magicOpcode)
+        MagicProcessOpcode opcode)
     {
         if (verdict == MagicTimingVerdict.Allowed)
             return true;
 
         logger.LogDebug(
             "Dropping magic {SubOpcode} from {Name} skill={SkillId}: {Verdict} (cast={CastTime} recast={ReCastTime})",
-            (MagicProcessOpcode)magicOpcode,
+            opcode,
             session.Name,
             magic.Id,
             verdict,
             magic.CastTime,
             magic.ReCastTime);
         return false;
-    }
-
-    private Task HandleClientExecutionAsync(
-        UserSession session,
-        MagicData magic,
-        int skillId,
-        int targetId,
-        int[] data,
-        byte magicOpcode)
-    {
-        if (magic.PrimaryType == MagicSkillType.Melee)
-            return ExecuteMeleeWithManaCostAsync(session, magic, skillId, targetId, data);
-
-        if (magic.PrimaryType != MagicSkillType.OverTime)
-            return ExecuteOtherWithManaCostAsync(session, magic, skillId, targetId, data);
-
-        if (magicOpcode == (byte)MagicProcessOpcode.Fail)
-        {
-            if (session.PendingOverTimeExecution?.SkillId == skillId)
-                session.PendingOverTimeExecution = null;
-
-            if (IsClientReportedMiss(session, targetId, data))
-                return Task.CompletedTask;
-
-            return ExecuteOverTimeWithManaCostAsync(session, magic, skillId, targetId, data);
-        }
-
-        if (!ShouldDelayOverTimeExecution(skillId))
-            return ExecuteOverTimeWithManaCostAsync(session, magic, skillId, targetId, data);
-
-        var token = ++session.PendingOverTimeToken;
-        var pendingExecution = new PendingMagicExecution
-        {
-            Token = token,
-            SkillId = skillId,
-            TargetId = targetId,
-            Data = [.. data]
-        };
-
-        session.PendingOverTimeExecution = pendingExecution;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(OverTimeFinalizeDelayMs);
-                if (session.PendingOverTimeExecution?.Token != token)
-                    return;
-
-                session.PendingOverTimeExecution = null;
-                await ExecuteOverTimeWithManaCostAsync(
-                    session,
-                    magic,
-                    pendingExecution.SkillId,
-                    pendingExecution.TargetId,
-                    pendingExecution.Data);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(
-                    ex,
-                    "Deferred type-3 execution failed for {Name} skill={SkillId}",
-                    session.Name,
-                    skillId);
-            }
-        });
-
-        return Task.CompletedTask;
-    }
-
-    private bool ShouldDelayOverTimeExecution(int skillId) =>
-        gameDataService.MagicType3Table.TryGetValue(skillId, out var type3Data)
-        && type3Data.Radius > 0;
-
-    private static bool IsClientReportedMiss(UserSession session, int targetId, int[] data) =>
-        targetId == session.CharacterId
-        && data.Length > 3
-        && data[3] <= -100
-        && !HasAreaCoordinates(data);
-
-    private static bool HasAreaCoordinates(int[] data) =>
-        (data.Length > 0 && data[0] != 0)
-        || (data.Length > 2 && data[2] != 0);
-
-    private async Task HandleCastingAsync(UserSession session, MagicData magic, int targetId, int[] data)
-    {
-        // CASTING phase only broadcasts the cast animation — no MP check, no
-        // MP deduction. Mana is consumed at FLYING (Type 2) or EFFECTING
-        await sessionManager.Regions.SendToRegion(
-            session,
-            MagicProcessPacketWriter.Create(
-                MagicProcessOpcode.Casting,
-                magic.Id,
-                (short)session.CharacterId,
-                targetId,
-                data),
-            excludeSender: false);
-    }
-
-    private async Task ExecuteMeleeWithManaCostAsync(
-        UserSession session,
-        MagicData magic,
-        int skillId,
-        int targetId,
-        int[] data)
-    {
-        if (!magicItemUsageService.CanUseSkillItems(session, magic))
-        {
-            await SendMagicFailAsync(session, skillId);
-            return;
-        }
-
-        if (magic.Msp > 0)
-        {
-            if (session.Mp < magic.Msp)
-            {
-                await SendMagicFailAsync(session, skillId);
-                return;
-            }
-
-            session.Mp -= (short)magic.Msp;
-            await combatLifecycleService.SendMspChangeAsync(session);
-        }
-
-        if (!await magicItemUsageService.TryConsumeSkillItemAsync(session, magic))
-        {
-            await SendMagicFailAsync(session, skillId);
-            return;
-        }
-
-        await magicExecutionService.ExecuteAsync(session, magic, skillId, targetId, data);
-    }
-
-    private async Task ExecuteOtherWithManaCostAsync(
-        UserSession session,
-        MagicData magic,
-        int skillId,
-        int targetId,
-        int[] data)
-    {
-        if (magic.PrimaryType != MagicSkillType.Ranged && magic.Msp > 0)
-        {
-            if (session.Mp < magic.Msp)
-            {
-                await SendMagicFailAsync(session, skillId);
-                return;
-            }
-
-            session.Mp -= (short)magic.Msp;
-            await combatLifecycleService.SendMspChangeAsync(session);
-        }
-
-        await magicExecutionService.ExecuteAsync(session, magic, skillId, targetId, data);
-    }
-
-    private async Task ExecuteOverTimeWithManaCostAsync(
-        UserSession session,
-        MagicData magic,
-        int skillId,
-        int targetId,
-        int[] data)
-    {
-        if (magic.Msp > 0)
-        {
-            if (session.Mp < magic.Msp)
-            {
-                await SendMagicFailAsync(session, skillId);
-                return;
-            }
-
-            session.Mp -= (short)magic.Msp;
-            await combatLifecycleService.SendMspChangeAsync(session);
-        }
-
-        await magicExecutionService.ExecuteAsync(session, magic, skillId, targetId, data);
-    }
-
-    private async Task HandleFlyingAsync(UserSession session, MagicData magic, int targetId, int[] data)
-    {
-        if (magic.PrimaryType == MagicSkillType.Ranged)
-        {
-            if (!MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, magic.Id, out var type2Data))
-            {
-                await SendMagicFailAsync(session, magic.Id);
-                return;
-            }
-
-            var requiredArrowCount = Math.Max(1, (int)type2Data.NeedArrow);
-            if (magic.UseItem != 0
-                && !magicItemUsageService.CanUseItem(session, magic.UseItem, requiredArrowCount))
-            {
-                await SendMagicFailAsync(session, magic.Id);
-                return;
-            }
-
-            if (session.Mp < magic.Msp)
-            {
-                await SendMagicFailAsync(session, magic.Id);
-                return;
-            }
-
-            if (magic.UseItem != 0
-                && !await magicItemUsageService.TryConsumeItemAsync(session, magic.UseItem, requiredArrowCount))
-            {
-                await SendMagicFailAsync(session, magic.Id);
-                return;
-            }
-
-            session.Mp -= (short)magic.Msp;
-            await combatLifecycleService.SendMspChangeAsync(session);
-            magicTimingService.OnVolleyAccepted(session, magic, requiredArrowCount);
-        }
-
-        await sessionManager.Regions.SendToRegion(
-            session,
-            MagicProcessPacketWriter.Create(
-                MagicProcessOpcode.Flying,
-                magic.Id,
-                (short)session.CharacterId,
-                targetId,
-                data),
-            excludeSender: false);
     }
 
     private static Task SendMagicFailAsync(UserSession session, int skillId) =>

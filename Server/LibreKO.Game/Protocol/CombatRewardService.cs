@@ -180,8 +180,9 @@ public class CombatRewardService(
 
             gold = timeWeather.ApplyCoinBonus(gold);
 
-                    s.Money += gold;
-                    return gold;
+                    var before = s.Money;
+                    s.Money = Coins.Credit(s.Money, gold);
+                    return s.Money - before;
                 });
                 await userNotificationService.SendGoldGainAsync(member, memberGold);
             }
@@ -205,8 +206,9 @@ public class CombatRewardService(
 
             gold = timeWeather.ApplyCoinBonus(gold);
 
-            s.Money += gold;
-            return gold;
+            var before = s.Money;
+            s.Money = Coins.Credit(s.Money, gold);
+            return s.Money - before;
         });
         await userNotificationService.SendGoldGainAsync(rewardRecipient, soloGold);
     }
@@ -257,6 +259,7 @@ public class CombatRewardService(
             return;
 
         var bundle = sessionManager.Regions.CreateBundle(npc.X, npc.Z, npc.Y);
+        bundle.ZoneId = npc.ZoneId;
         bundle.OwnerCharId = rewardRecipient.CharacterId;
         bundle.OwnerPartyIndex = rewardRecipient.IsInParty ? rewardRecipient.PartyIndex : -1;
 

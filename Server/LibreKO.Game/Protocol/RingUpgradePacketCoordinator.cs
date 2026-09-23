@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -33,9 +33,8 @@ public class RingUpgradePacketCoordinator(
         9,  // +8 -> +9
     };
 
-    // charId -> (invSlot -> current +level). In-memory; resets on server restart.
-    private static readonly Dictionary<int, Dictionary<byte, byte>> plusLevels = new();
-    private static readonly System.Random rng = new();
+    private readonly ConcurrentDictionary<(int CharacterId, byte Slot), byte> plusLevels = new();
+    private const int PercentRoll = 100;
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
@@ -67,8 +66,7 @@ public class RingUpgradePacketCoordinator(
     private async Task HandleUpgradeAsync(UserSession session, Packet packet)
     {
         byte invSlot = packet.RemainingBytes >= 1 ? packet.ReadByte() : (byte)0;
-        var slots = GetSlots(session.CharacterId);
-        slots.TryGetValue(invSlot, out byte cur);
+        byte cur = GetPlus(session.CharacterId, invSlot);
 
         if (cur >= MaxPlus)
         {
@@ -78,11 +76,11 @@ public class RingUpgradePacketCoordinator(
         }
 
         byte rate = RateForPlus(cur);
-        bool success = rng.Next(100) < rate;
+        bool success = Random.Shared.Next(PercentRoll) < rate;
         if (success)
         {
             cur++;
-            slots[invSlot] = cur;
+            plusLevels[(session.CharacterId, invSlot)] = cur;
         }
 
         logger.LogDebug("{Name} ring-upgrade slot {Slot}: {Outcome} -> +{Plus} (rate {Rate}%)",
@@ -95,19 +93,5 @@ public class RingUpgradePacketCoordinator(
     private static byte RateForPlus(byte cur)
         => cur < RateByCurrentPlus.Length ? RateByCurrentPlus[cur] : (byte)0;
 
-    private static byte GetPlus(int charId, byte invSlot)
-    {
-        GetSlots(charId).TryGetValue(invSlot, out byte cur);
-        return cur;
-    }
-
-    private static Dictionary<byte, byte> GetSlots(int charId)
-    {
-        if (!plusLevels.TryGetValue(charId, out var slots))
-        {
-            slots = new Dictionary<byte, byte>();
-            plusLevels[charId] = slots;
-        }
-        return slots;
-    }
+    private byte GetPlus(int charId, byte invSlot) => plusLevels.GetValueOrDefault((charId, invSlot));
 }

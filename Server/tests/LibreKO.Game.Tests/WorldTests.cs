@@ -471,6 +471,7 @@ public class WorldTests : GameTestBase
         session.ZoneId = 1;
         session.X = 10;
         session.Z = 10;
+        session.Hp = 100;
         sessionManager.Regions.AddToRegion(session);
 
         var packet = new Packet(GameOpcodes.GS_STATE_CHANGE);
@@ -841,7 +842,9 @@ public class WorldTests : GameTestBase
     [Fact]
     public async Task WorldPacketCoordinator_HandleMoveAsync_SendsNpcRegionListInsteadOfNpcRespawnsAfterRegionChange()
     {
-        using var provider = CreateProvider(_ => { });
+        using var provider = CreateProvider(
+            _ => { },
+            configureSettings: settings => settings.AntiCheat.Movement.Enabled = false);
 
         var client = Substitute.For<IClient>();
         client.Id.Returns(Guid.NewGuid());
@@ -1118,7 +1121,7 @@ public class WorldTests : GameTestBase
             _ => { },
             gameData =>
             {
-                gameData.GetNpc(900).Returns(new NpcData
+                gameData.GetNpc(900, false).Returns(new NpcData
                 {
                     Id = 900,
                     NpcType = 1,
@@ -1160,11 +1163,15 @@ public class WorldTests : GameTestBase
         });
         session.Quest.EventNpcUniqueId = npc.UniqueId;
 
+        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
+        var request = new Packet(GameOpcodes.GS_WARP_LIST);
+        request.WriteShort(900);
+        await coordinator.HandleWarpListAsync(client, request);
+
         var packet = new Packet(GameOpcodes.GS_WARP_LIST);
         packet.WriteShort(900);
         packet.WriteShort(21);
 
-        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
         await coordinator.HandleWarpListAsync(client, packet);
 
         session.Money.Should().Be(400);
@@ -1220,18 +1227,20 @@ public class WorldTests : GameTestBase
         session.Z = 20;
         sessionManager.Regions.AddToRegion(session);
 
+        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
+        await OpenWarpGateAsync(coordinator, client, objectIndex: 1);
+
         var packet = new Packet(GameOpcodes.GS_WARP_LIST);
         packet.WriteShort(2);
         packet.WriteShort(21);
 
-        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
         await coordinator.HandleWarpListAsync(client, packet);
 
         session.Money.Should().Be(400);
         session.X.Should().Be(30);
         session.Z.Should().Be(40);
 
-        var warpListAck = sentPackets.First(p => p.GetOpcode() == (byte)GameOpcodes.GS_WARP_LIST);
+        var warpListAck = sentPackets.Last(p => p.GetOpcode() == (byte)GameOpcodes.GS_WARP_LIST);
         warpListAck.ResetOffset();
         warpListAck.ReadByte().Should().Be(2);
         warpListAck.ReadByte().Should().Be(1);
@@ -1269,7 +1278,7 @@ public class WorldTests : GameTestBase
             {
                 Index = 4013,
                 Type = 5,
-                ControlNpcId = 4013,
+                ControlNpcId = 212,
                 Belong = 0,
                 PosX = 10,
                 PosZ = 20
@@ -1294,11 +1303,13 @@ public class WorldTests : GameTestBase
         session.Z = 20;
         sessionManager.Regions.AddToRegion(session);
 
+        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
+        await OpenWarpGateAsync(coordinator, client, objectIndex: 4013);
+
         var packet = new Packet(GameOpcodes.GS_WARP_LIST);
         packet.WriteShort(4013);
         packet.WriteShort(2121);
 
-        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
         await coordinator.HandleWarpListAsync(client, packet);
 
         session.ZoneId.Should().Be(21);
@@ -1368,11 +1379,13 @@ public class WorldTests : GameTestBase
         session.Z = 104;
         sessionManager.Regions.AddToRegion(session);
 
+        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
+        await OpenWarpGateAsync(coordinator, client, objectIndex: 4020);
+
         var packet = new Packet(GameOpcodes.GS_WARP_LIST);
         packet.WriteShort(4020);
         packet.WriteShort(7314);
 
-        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
         await coordinator.HandleWarpListAsync(client, packet);
 
         session.ZoneId.Should().Be(21);
@@ -1432,16 +1445,19 @@ public class WorldTests : GameTestBase
         var session = sessionManager.CreateSession(client, characterId: 178, accountId: 188);
         session.ZoneId = 21;
         session.Nation = AccountNation.Karus;
+        session.Level = 40;
         session.Hp = 100;
         session.X = 797;
         session.Z = 526;
         sessionManager.Regions.AddToRegion(session);
 
+        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
+        await OpenWarpGateAsync(coordinator, client, objectIndex: 4014);
+
         var packet = new Packet(GameOpcodes.GS_WARP_LIST);
         packet.WriteShort(4014);
         packet.WriteShort(2114);
 
-        var coordinator = provider.GetRequiredService<IWorldPacketCoordinator>();
         await coordinator.HandleWarpListAsync(client, packet);
 
         session.ZoneId.Should().Be(1);
@@ -1479,6 +1495,8 @@ public class WorldTests : GameTestBase
             MaxHp = 100,
             Hp = 100
         });
+
+        await provider.GetRequiredService<IZoneTransitionService>().ChangeZoneAsync(session, 21, 10, 20);
 
         var packet = new Packet(GameOpcodes.GS_ZONE_CHANGE);
         packet.WriteByte(1);
@@ -1941,6 +1959,15 @@ public class WorldTests : GameTestBase
         session.Dexterity = 65;
         session.Intelligence = 60;
         session.Magic = 55;
+        session.Quest.EventNpcUniqueId = sessionManager.Regions.SpawnNpc(new NpcInstance
+        {
+            NpcId = NpcData.RedistributionMerchant,
+            ZoneId = session.ZoneId,
+            X = session.X,
+            Z = session.Z,
+            MaxHp = 1,
+            Hp = 1,
+        }).UniqueId;
 
         var packet = new Packet(GameOpcodes.GS_CLASS_CHANGE);
         packet.WriteByte(2);
@@ -1960,6 +1987,14 @@ public class WorldTests : GameTestBase
         sentPacket.ReadByte().Should().Be(2);
         sentPacket.ReadByte().Should().Be(1);
         sentPacket.ReadInt().Should().Be(session.Money);
+    }
+
+    private static Task OpenWarpGateAsync(IWorldPacketCoordinator coordinator, IClient client, short objectIndex)
+    {
+        var packet = new Packet(GameOpcodes.GS_OBJECT_EVENT);
+        packet.WriteShort(objectIndex);
+        packet.WriteInt(0);
+        return coordinator.HandleObjectEventAsync(client, packet);
     }
 
     private static (IClient Client, UserSession Session, Func<Packet?> Sent) CreateMasterySession(

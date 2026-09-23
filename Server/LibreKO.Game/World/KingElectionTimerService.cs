@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Infrastructure.Network;
@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using LibreKO.Game.Protocol;
 using LibreKO.Game.Protocol.Writers;
 
 namespace LibreKO.Game.World;
@@ -14,6 +15,7 @@ namespace LibreKO.Game.World;
 public class KingElectionTimerService(
     IGameDataService gameData,
     SessionManager sessionManager,
+    IKingSystemRuntimeService kingSystemRuntimeService,
     IServiceProvider serviceProvider,
     ILogger<KingElectionTimerService> logger) : BackgroundService
 {
@@ -33,6 +35,16 @@ public class KingElectionTimerService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("King election timer service started");
+
+        try
+        {
+            foreach (var kingData in gameData.KingSystemTable.Values)
+                await kingSystemRuntimeService.DismissUnknownKingAsync(kingData);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Could not verify the reigning kings");
+        }
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
         while (await timer.WaitForNextTickAsync(stoppingToken))

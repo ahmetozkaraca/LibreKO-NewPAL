@@ -10,16 +10,20 @@ namespace LibreKO.Game.Protocol;
 
 public interface IMagicMovementEffectService
 {
-    Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data);
+    Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data, MagicCharge charge);
 }
 
 public class MagicMovementEffectService(
     SessionManager sessionManager,
     IGameDataService gameDataService,
     IWorldMovementService worldMovementService,
+    IStealthService stealthService,
     ILogger<MagicMovementEffectService> logger) : IMagicMovementEffectService
 {
-    public async Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data)
+    private const short NoClan = 0;
+
+    public async Task ExecuteAsync(
+        UserSession caster, MagicData magic, int skillId, int targetId, int[] data, MagicCharge charge)
     {
         if (!MagicTypeLookup.TryResolve(gameDataService.MagicType8Table, magic, skillId, out var type8Data))
         {
@@ -30,10 +34,10 @@ public class MagicMovementEffectService(
         var warpType = (MagicWarpType)type8Data.WarpType;
         var moved = warpType switch
         {
-            MagicWarpType.BindPoint => await WarpToBindPointAsync(caster, magic),
-            MagicWarpType.SummonInZone => await SummonToCasterAsync(caster, targetId),
-            MagicWarpType.MoveToTarget => await MoveToTargetAsync(caster, magic, targetId),
-            _ => Unhandled(warpType, skillId, caster),
+            MagicWarpType.BindPoint => await WarpToBindPointAsync(caster, magic, charge),
+            MagicWarpType.SummonInZone => await SummonToCasterAsync(caster, magic, targetId, charge),
+            MagicWarpType.MoveToTarget => await MoveToTargetAsync(caster, magic, targetId, charge),
+            _ => await UnhandledAsync(warpType, skillId, caster, charge),
         };
 
         if (!moved)
@@ -53,35 +57,38 @@ public class MagicMovementEffectService(
             excludeSender: false);
     }
 
-    private bool Unhandled(MagicWarpType warpType, int skillId, UserSession caster)
+    private async Task<bool> UnhandledAsync(MagicWarpType warpType, int skillId, UserSession caster, MagicCharge charge)
     {
         logger.LogDebug(
             "Warp type {WarpType} has no destination rule: skill={SkillId} caster={Name}",
             warpType, skillId, caster.Name);
-        return true;
+        return await charge.TryPayAsync();
     }
 
-    private async Task<bool> WarpToBindPointAsync(UserSession caster, MagicData magic)
+    private async Task<bool> WarpToBindPointAsync(UserSession caster, MagicData magic, MagicCharge charge)
     {
-        if ((SkillMoral)magic.Moral != SkillMoral.PartyAll)
-            return await SendHomeAsync(caster);
+        if (!caster.CanTeleport)
+            return false;
 
-        var party = caster.IsInParty ? sessionManager.Parties.GetParty(caster.PartyIndex) : null;
+        var party = (SkillMoral)magic.Moral == SkillMoral.PartyAll && caster.IsInParty
+            ? sessionManager.Parties.GetParty(caster.PartyIndex)
+            : null;
         if (party == null)
-            return await SendHomeAsync(caster);
+            return await charge.TryPayAsync() && await SendHomeAsync(caster);
+
+        var members = party.MemberIds
+            .Where(memberId => memberId >= 0)
+            .Select(memberId => sessionManager.GetByCharacterId(memberId))
+            .Where(member => member is { Hp: > 0, CanTeleport: true } && member.ZoneId == caster.ZoneId)
+            .Select(member => member!)
+            .ToList();
+
+        if (!await charge.TryPayAsync())
+            return false;
 
         var warped = false;
-        foreach (var memberId in party.MemberIds)
-        {
-            if (memberId < 0)
-                continue;
-
-            var member = sessionManager.GetByCharacterId(memberId);
-            if (member == null || member.Hp <= 0)
-                continue;
-
+        foreach (var member in members)
             warped |= await SendHomeAsync(member);
-        }
 
         return warped;
     }
@@ -107,34 +114,54 @@ public class MagicMovementEffectService(
         return true;
     }
 
-    private async Task<bool> SummonToCasterAsync(UserSession caster, int targetId)
+    private async Task<bool> SummonToCasterAsync(UserSession caster, MagicData magic, int targetId, MagicCharge charge)
     {
         var target = sessionManager.GetByCharacterId(targetId);
         if (target == null
             || target.CharacterId == caster.CharacterId
             || target.Hp <= 0
-            || target.ZoneId != caster.ZoneId)
+            || target.ZoneId != caster.ZoneId
+            || target.Nation != caster.Nation
+            || !target.CanTeleport
+            || !IsSummonable(caster, magic, target)
+            || !await charge.TryPayAsync())
             return false;
 
         await worldMovementService.WarpAsync(target, (ushort)caster.GetPosX, (ushort)caster.GetPosZ);
         return true;
     }
 
-    private async Task<bool> MoveToTargetAsync(UserSession caster, MagicData magic, int targetId)
+    private static bool IsSummonable(UserSession caster, MagicData magic, UserSession target) =>
+        (SkillMoral)magic.Moral switch
+        {
+            SkillMoral.Party or SkillMoral.PartyAll => caster.IsInParty && caster.PartyIndex == target.PartyIndex,
+            SkillMoral.Clan or SkillMoral.ClanAll => caster.KnightsId != NoClan && caster.KnightsId == target.KnightsId,
+            _ => false,
+        };
+
+    private async Task<bool> MoveToTargetAsync(UserSession caster, MagicData magic, int targetId, MagicCharge charge)
     {
         var target = sessionManager.GetByCharacterId(targetId);
         if (target == null
+            || !caster.CanTeleport
             || target.CharacterId == caster.CharacterId
             || target.Hp <= 0
-            || target.ZoneId != caster.ZoneId)
-            return false;
-
-        if ((SkillMoral)magic.Moral < SkillMoral.Enemy && PvpRules.IsEnemy(caster, target))
+            || target.ZoneId != caster.ZoneId
+            || !MayMoveTo(caster, magic, target)
+            || !await charge.TryPayAsync())
             return false;
 
         await worldMovementService.WarpAsync(caster, (ushort)target.GetPosX, (ushort)target.GetPosZ);
         return true;
     }
+
+    private bool MayMoveTo(UserSession caster, MagicData magic, UserSession target) =>
+        (SkillMoral)magic.Moral switch
+        {
+            SkillMoral.Party or SkillMoral.PartyAll => caster.IsInParty && caster.PartyIndex == target.PartyIndex,
+            SkillMoral.Enemy => PvpRules.CanAttackPlayer(caster, target) && stealthService.CanSee(caster, target),
+            _ => target.Nation == caster.Nation && !PvpRules.IsEnemy(caster, target),
+        };
 
     private const byte ObjectEventAlive = 1;
 

@@ -1,18 +1,16 @@
-using LibreKO.Game.World;
+﻿using LibreKO.Game.World;
 
 namespace LibreKO.Game.Protocol;
 
 internal static class ExchangePacketConstants
 {
-    public static bool IsWithinTradeRange(UserSession a, UserSession b)
-    {
-        if (a.ZoneId != b.ZoneId)
-            return false;
+    public static bool IsWithinTradeRange(UserSession a, UserSession b) => Reach.Within(a, b, MaxTradeDistance);
 
-        var dx = a.X - b.X;
-        var dz = a.Z - b.Z;
-        return dx * dx + dz * dz <= MaxTradeDistance * MaxTradeDistance;
-    }
+    public static bool ArePartners(UserSession a, UserSession b) =>
+        a.Trade.ExchangeUser == b.CharacterId && b.Trade.ExchangeUser == a.CharacterId;
+
+    public static bool IsBusyElsewhere(UserSession session) =>
+        session.Trade.IsMerchanting || session.Trade.IsMerchantPreparing || session.IsGathering;
 
     public const byte ExchangeRequest = 1;
     public const byte ExchangeAgree = 2;
@@ -28,4 +26,5 @@ internal static class ExchangePacketConstants
     public const byte RaceUntradeable = 20;
     public const int CoinMax = 2_100_000_000;
     public const float MaxTradeDistance = 12f;
+    public const int MaxOfferedItems = 12;
 }

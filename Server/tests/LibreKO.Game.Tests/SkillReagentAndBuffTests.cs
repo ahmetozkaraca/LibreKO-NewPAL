@@ -23,6 +23,8 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
     private const int IceOrb = 109627;
     private const int ResistCold = 109606;
     private const int Viper = 107550;
+    private const int ClubOfThePriest = 100030000;
+    private const int MillisecondsPerTenth = 100;
 
     private static readonly string SeedDirectory = FindSeedDirectory();
 
@@ -101,7 +103,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             {
                 var before = monster.Hp;
                 caster.Mp = caster.MaxMp;
-                await execution.ExecuteAsync(caster, row, skillId, monster.UniqueId, new int[7]);
+                await execution.ExecuteAsync(caster, row, skillId, monster.UniqueId, new int[7], MagicCharge.Prepaid);
                 damage[cast] = before - monster.Hp;
             }
 
@@ -133,7 +135,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var before = caster.Stats.ColdR;
 
         var execution = provider.GetRequiredService<IMagicExecutionService>();
-        await execution.ExecuteAsync(caster, row, ResistCold, caster.CharacterId, new int[7]);
+        await execution.ExecuteAsync(caster, row, ResistCold, caster.CharacterId, new int[7], MagicCharge.Prepaid);
 
         output.WriteLine($"ColdR {before} -> {caster.Stats.ColdR}, buffs {caster.ActiveBuffs.Count}");
         caster.Stats.ColdR.Should().BeGreaterThan(before, "Resist Cold adds cold resistance");
@@ -165,7 +167,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         });
 
         var execution = provider.GetRequiredService<IMagicExecutionService>();
-        await execution.ExecuteAsync(caster, row, IceOrb, monster.UniqueId, new int[7]);
+        await execution.ExecuteAsync(caster, row, IceOrb, monster.UniqueId, new int[7], MagicCharge.Prepaid);
 
         output.WriteLine($"caster buffs after Ice Orb: {caster.ActiveBuffs.Count}, "
             + $"speed {caster.SpeedAmount}");
@@ -187,13 +189,14 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         row.Type2.Should().NotBe(0);
         row.UseItem.Should().NotBe(0);
 
+        var clock = new ManualClock();
         using var provider = CreateProvider(_ => { }, gameData =>
         {
             gameData.GetMagic(Arg.Any<int>()).Returns(c => magic.GetValueOrDefault(c.Arg<int>()));
             gameData.GetItem(Arg.Any<int>()).Returns(c => items.GetValueOrDefault(c.Arg<int>()));
             gameData.MagicType1Table.Returns(Load<MagicType1Data>("MagicType1.json", m => m.Id));
             gameData.GetCoefficient(Arg.Any<short>()).Returns(new CoefficientData { ClassId = 110, Ac = 1 });
-        });
+        }, configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, row, items);
@@ -204,16 +207,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         caster.Client.SendPacket(Arg.Do<Packet>(sent.Add), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(DisguiseScroll);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(-1);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await coordinator.HandleAsync(caster.Client, packet);
+        await CastThroughPipelineAsync(provider, clock, caster, row, MagicTargetingService.AreaTargetId, sent);
 
         var reply = sent.Should().ContainSingle().Subject;
         reply.GetOpcode().Should().Be((byte)GameOpcodes.GS_MAGIC_PROCESS);
@@ -233,6 +227,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var items = Load<ItemData>("Items.json", i => i.Num);
         var row = magic[Menissiah];
 
+        var clock = new ManualClock();
         using var provider = CreateProvider(_ => { }, gameData =>
         {
             gameData.GetMagic(Arg.Any<int>()).Returns(c => magic.GetValueOrDefault(c.Arg<int>()));
@@ -240,7 +235,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             gameData.MagicType4Table.Returns(Load<MagicType4Data>("MagicType4.json", m => m.Id));
             gameData.MagicType6Table.Returns(Load<MagicType6Data>("MagicType6.json", m => m.Id));
             gameData.GetCoefficient(Arg.Any<short>()).Returns(new CoefficientData { ClassId = 110, Ac = 1 });
-        });
+        }, configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, row, items);
@@ -252,16 +247,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         caster.Client.SendPacket(Arg.Do<Packet>(sent.Add), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(Menissiah);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(caster.CharacterId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await coordinator.HandleAsync(caster.Client, packet);
+        await CastThroughPipelineAsync(provider, clock, caster, row, caster.CharacterId, sent);
 
         foreach (var s in sent)
             output.WriteLine($"  0x{s.GetOpcode():X2} {Convert.ToHexString(s.GetBytes())}");
@@ -304,6 +290,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         row.UseItem.Should().Be(379091000, "the skill asks for a Transformation Gem");
         row.BeforeAction.Should().Be(381001000, "and names the Disguise Scroll that listed it");
 
+        var clock = new ManualClock();
         using var provider = CreateProvider(_ => { }, gameData =>
         {
             gameData.GetMagic(Arg.Any<int>()).Returns(c => magic.GetValueOrDefault(c.Arg<int>()));
@@ -311,7 +298,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             gameData.MagicType4Table.Returns(Load<MagicType4Data>("MagicType4.json", m => m.Id));
             gameData.MagicType6Table.Returns(Load<MagicType6Data>("MagicType6.json", m => m.Id));
             gameData.GetCoefficient(Arg.Any<short>()).Returns(new CoefficientData { ClassId = 110, Ac = 1 });
-        });
+        }, configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, row, items);
@@ -322,23 +309,14 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             caster.Inventory[i] = new ItemSlot();
         caster.Inventory[InventoryConstants.InventoryStart] = new ItemSlot
         {
-            ItemId = 381001000, Count = 10, Durability = 1
+            ItemId = MagicCostService.DisguiseScrollItem, Count = 10, Durability = 1
         };
 
         var sent = new List<Packet>();
         caster.Client.SendPacket(Arg.Do<Packet>(sent.Add), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
-        var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(RavenHarpy);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(caster.CharacterId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await coordinator.HandleAsync(caster.Client, packet);
+        await CastThroughPipelineAsync(provider, clock, caster, row, caster.CharacterId, sent);
 
         foreach (var s in sent)
             output.WriteLine($"  0x{s.GetOpcode():X2} {Convert.ToHexString(s.GetBytes())}");
@@ -347,6 +325,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             2200,
             "carrying the Disguise Scroll is enough on its own: it stands in for both the scroll and the gem");
         sent.Should().ContainSingle(s => s.GetOpcode() == (byte)GameOpcodes.GS_STATE_CHANGE);
+        caster.Inventory[InventoryConstants.InventoryStart].Count.Should().Be(9, "the scroll that stood in for the gem is spent");
     }
 
     [Fact]
@@ -432,19 +411,19 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
     private static void GiveStones(UserSession caster, int stone, ushort count) =>
         caster.Inventory[InventoryConstants.InventoryStart + 1] = new ItemSlot { ItemId = stone, Count = count };
 
-    private static Packet EffectingPacket(int skillId, int casterId, int targetId)
+    private static async Task CastThroughPipelineAsync(
+        ServiceProvider provider, ManualClock clock, UserSession caster, MagicData row, int targetId,
+        List<Packet>? sent = null)
     {
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(skillId);
-        packet.WriteInt(casterId);
-        packet.WriteInt(targetId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-        return packet;
+        var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(caster.Client, MagicProcessOpcode.Casting, row.Id, caster.CharacterId, targetId);
+        sent?.Clear();
+        clock.Advance(TimeSpan.FromMilliseconds(row.CastTime * MillisecondsPerTenth));
+        await coordinator.SendAsync(caster.Client, MagicProcessOpcode.Effecting, row.Id, caster.CharacterId, targetId);
     }
 
-    private ServiceProvider CreateMasterSkillProvider(Dictionary<int, MagicData> magic, Dictionary<int, ItemData> items) =>
+    private ServiceProvider CreateMasterSkillProvider(
+        Dictionary<int, MagicData> magic, Dictionary<int, ItemData> items, ManualClock clock) =>
         CreateProvider(_ => { }, gameData =>
         {
             gameData.GetMagic(Arg.Any<int>()).Returns(c => magic.GetValueOrDefault(c.Arg<int>()));
@@ -452,7 +431,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             gameData.MagicType1Table.Returns(Load<MagicType1Data>("MagicType1.json", m => m.Id));
             gameData.MagicType4Table.Returns(Load<MagicType4Data>("MagicType4.json", m => m.Id));
             gameData.GetCoefficient(Arg.Any<short>()).Returns(new CoefficientData { ClassId = 110, Ac = 1 });
-        });
+        }, configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
     [Fact]
     public async Task AMasterSkillKeepsItsScrollAndSpendsOneClassStone()
@@ -461,15 +440,15 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var items = Load<ItemData>("Items.json", i => i.Num);
         magic[MagicShield].ConsumedItem.Should().Be(StoneOfRogue);
 
-        using var provider = CreateMasterSkillProvider(magic, items);
+        var clock = new ManualClock();
+        using var provider = CreateMasterSkillProvider(magic, items, clock);
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, magic[MagicShield], items);
         for (var i = 0; i < caster.SkillPoints.Length; i++)
             caster.SkillPoints[i] = 99;
         GiveStones(caster, StoneOfRogue, 3);
 
-        await provider.GetRequiredService<IMagicPacketCoordinator>()
-            .HandleAsync(caster.Client, EffectingPacket(MagicShield, caster.CharacterId, caster.CharacterId));
+        await CastThroughPipelineAsync(provider, clock, caster, magic[MagicShield], caster.CharacterId);
 
         caster.ActiveBuffs.Should().ContainKey(MagicShield);
         caster.Inventory[InventoryConstants.InventoryStart].ItemId.Should().Be(MagicShieldScroll, "the scroll is the requirement, never the cost");
@@ -482,14 +461,14 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var magic = Load<MagicData>("Magic.json", m => m.Id);
         var items = Load<ItemData>("Items.json", i => i.Num);
 
-        using var provider = CreateMasterSkillProvider(magic, items);
+        var clock = new ManualClock();
+        using var provider = CreateMasterSkillProvider(magic, items, clock);
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, magic[MagicShield], items);
         for (var i = 0; i < caster.SkillPoints.Length; i++)
             caster.SkillPoints[i] = 99;
 
-        await provider.GetRequiredService<IMagicPacketCoordinator>()
-            .HandleAsync(caster.Client, EffectingPacket(MagicShield, caster.CharacterId, caster.CharacterId));
+        await CastThroughPipelineAsync(provider, clock, caster, magic[MagicShield], caster.CharacterId);
 
         caster.ActiveBuffs.Should().NotContainKey(MagicShield);
         caster.Inventory[InventoryConstants.InventoryStart].ItemId.Should().Be(MagicShieldScroll);
@@ -502,11 +481,16 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var items = Load<ItemData>("Items.json", i => i.Num);
         magic[Judgment].ConsumedItem.Should().Be(StoneOfPriest);
 
-        using var provider = CreateMasterSkillProvider(magic, items);
+        var clock = new ManualClock();
+        using var provider = CreateMasterSkillProvider(magic, items, clock);
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, magic[Judgment], items);
         for (var i = 0; i < caster.SkillPoints.Length; i++)
             caster.SkillPoints[i] = 99;
+        caster.Inventory[InventoryConstants.RightHand] = new ItemSlot
+        {
+            ItemId = ClubOfThePriest, Count = 1, Durability = items[ClubOfThePriest].Duration
+        };
         GiveStones(caster, StoneOfPriest, 2);
         var monster = sessionManager.Regions.SpawnNpc(new NpcInstance
         {
@@ -515,9 +499,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             MaxHp = 100000, Hp = 100000, Ac = 0, EvadeRate = 1
         });
 
-        await provider.GetRequiredService<IMagicPacketCoordinator>()
-            .HandleAsync(caster.Client, EffectingPacket(Judgment, caster.CharacterId, monster.UniqueId));
-        await Task.Delay(400);
+        await CastThroughPipelineAsync(provider, clock, caster, magic[Judgment], monster.UniqueId);
 
         monster.Hp.Should().BeLessThan(100000);
         caster.Inventory[InventoryConstants.InventoryStart].ItemId.Should().Be(JudgmentScroll);
@@ -571,13 +553,14 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var items = Load<ItemData>("Items.json", i => i.Num);
         var row = magic[ResistCold];
 
+        var clock = new ManualClock();
         using var provider = CreateProvider(_ => { }, gameData =>
         {
             gameData.GetMagic(Arg.Any<int>()).Returns(c => magic.GetValueOrDefault(c.Arg<int>()));
             gameData.GetItem(Arg.Any<int>()).Returns(c => items.GetValueOrDefault(c.Arg<int>()));
             gameData.MagicType4Table.Returns(Load<MagicType4Data>("MagicType4.json", m => m.Id));
             gameData.GetCoefficient(Arg.Any<short>()).Returns(new CoefficientData { ClassId = 110, Ac = 1 });
-        });
+        }, configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, row, items);
@@ -585,16 +568,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             caster.SkillPoints[i] = 99;
         var before = caster.Stats.ColdR;
 
-        var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(ResistCold);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(caster.CharacterId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await coordinator.HandleAsync(caster.Client, packet);
+        await CastThroughPipelineAsync(provider, clock, caster, row, caster.CharacterId);
 
         output.WriteLine($"pipeline ColdR {before} -> {caster.Stats.ColdR}, buffs {caster.ActiveBuffs.Count}");
         caster.Stats.ColdR.Should().BeGreaterThan(before);
@@ -611,6 +585,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var items = Load<ItemData>("Items.json", i => i.Num);
         var row = magic[skillId];
 
+        var clock = new ManualClock();
         using var provider = CreateProvider(_ => { }, gameData =>
         {
             gameData.GetMagic(Arg.Any<int>()).Returns(c => magic.GetValueOrDefault(c.Arg<int>()));
@@ -619,7 +594,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             gameData.MagicType3Table.Returns(Load<MagicType3Data>("MagicType3.json", m => m.Id));
             gameData.MagicType4Table.Returns(Load<MagicType4Data>("MagicType4.json", m => m.Id));
             gameData.GetCoefficient(Arg.Any<short>()).Returns(new CoefficientData { ClassId = 110, Ac = 1 });
-        });
+        }, configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = CreateCaster(provider, sessionManager, row, items);
@@ -633,19 +608,9 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
             MaxHp = 100000, Hp = 100000, Ac = 0, EvadeRate = 1
         });
 
-        var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
         var before = monster.Hp;
 
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(skillId);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(monster.UniqueId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await coordinator.HandleAsync(caster.Client, packet);
-        await Task.Delay(400);
+        await CastThroughPipelineAsync(provider, clock, caster, row, monster.UniqueId);
 
         var damage = before - monster.Hp;
         output.WriteLine($"{name} through the pipeline: damage {damage}");
@@ -672,10 +637,10 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var caster = CreateCaster(provider, sessionManager, magic[ResistFire], items);
         var execution = provider.GetRequiredService<IMagicExecutionService>();
 
-        await execution.ExecuteAsync(caster, magic[ResistFire], ResistFire, caster.CharacterId, new int[7]);
+        await execution.ExecuteAsync(caster, magic[ResistFire], ResistFire, caster.CharacterId, new int[7], MagicCharge.Prepaid);
         var fireR = caster.Stats.FireR;
 
-        await execution.ExecuteAsync(caster, magic[ResistCold], ResistCold, caster.CharacterId, new int[7]);
+        await execution.ExecuteAsync(caster, magic[ResistCold], ResistCold, caster.CharacterId, new int[7], MagicCharge.Prepaid);
 
         output.WriteLine($"after Resist Fire then Resist Cold: FireR={caster.Stats.FireR} "
             + $"ColdR={caster.Stats.ColdR} buffs={caster.ActiveBuffs.Count}");

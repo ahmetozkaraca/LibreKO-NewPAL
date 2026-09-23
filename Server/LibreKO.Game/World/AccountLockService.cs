@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Gameplay;
 using LibreKO.Common.Infrastructure.Network;
@@ -23,20 +23,29 @@ public interface IAccountLockService
     Task<AccountLockResult> AcquireAsync(IClient client, int accountId);
     Task<AccountKickCode> KickAsync(int accountId);
     bool Owns(IClient client);
+    IClient? HolderOf(int accountId);
     Task ReleaseAsync(IClient client);
     Task ClearOwnClaimsAsync();
 }
 
 public sealed class AccountClaim(int accountId, IClient client)
 {
+    private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _evicted;
+
     public int AccountId { get; } = accountId;
     public IClient Client { get; } = client;
+    public bool IsEvicted => Volatile.Read(ref _evicted) != 0;
+    public Task Released => _released.Task;
+
+    public bool TryEvict() => Interlocked.Exchange(ref _evicted, 1) == 0;
+
+    public void MarkReleased() => _released.TrySetResult();
 }
 
 public class AccountLockService(
     IServiceScopeFactory scopeFactory,
     IServerRepository serverRepository,
-    ISessionTerminationService sessionTerminationService,
     SessionManager sessionManager,
     IOptions<GameServerSettings> settings,
     ILogger<AccountLockService> logger) : IAccountLockService
@@ -46,6 +55,8 @@ public class AccountLockService(
     private readonly ConcurrentDictionary<int, AccountClaim> _claims = new();
     private readonly ConcurrentDictionary<Guid, int> _accountByClient = new();
 
+    private TimeSpan HandoverTimeout => TimeSpan.FromSeconds(settings.Value.Player.SessionHandoverTimeoutSeconds);
+
     public async Task<AccountLockResult> AcquireAsync(IClient client, int accountId)
     {
         var wanted = new AccountClaim(accountId, client);
@@ -53,20 +64,17 @@ public class AccountLockService(
         while (true)
         {
             var current = _claims.GetOrAdd(accountId, wanted);
-            if (ReferenceEquals(current, wanted) || current.Client.Id == client.Id)
+            if (ReferenceEquals(current, wanted) || (current.Client.Id == client.Id && !current.IsEvicted))
                 break;
 
-            if (current.Client.IsConnected)
+            if (current.Client.Id == client.Id || (current.Client.IsConnected && !current.IsEvicted))
                 return new AccountLockResult(false, await DescribeAsync(current));
 
-            if (!_claims.TryUpdate(accountId, wanted, current))
-                continue;
-
             logger.LogInformation(
-                "Account {AccountId}: replacing dropped claim from client {ClientId}",
+                "Account {AccountId}: waiting for client {ClientId} to finish leaving before handing the account over",
                 accountId, current.Client.Id);
-            _accountByClient.TryRemove(new KeyValuePair<Guid, int>(current.Client.Id, accountId));
-            break;
+            if (!await WaitForReleaseAsync(current))
+                return new AccountLockResult(false, await DescribeAsync(current));
         }
 
         _accountByClient[client.Id] = accountId;
@@ -76,10 +84,11 @@ public class AccountLockService(
 
     public async Task<AccountKickCode> KickAsync(int accountId)
     {
-        await ClearOnlineAsync(accountId);
-
         if (!_claims.TryGetValue(accountId, out var claim))
+        {
+            await ClearOnlineAsync(accountId);
             return AccountKickCode.NotOnline;
+        }
 
         await EvictAsync(claim);
         return AccountKickCode.Done;
@@ -88,7 +97,11 @@ public class AccountLockService(
     public bool Owns(IClient client)
         => _accountByClient.TryGetValue(client.Id, out var accountId)
            && _claims.TryGetValue(accountId, out var claim)
-           && claim.Client.Id == client.Id;
+           && claim.Client.Id == client.Id
+           && !claim.IsEvicted;
+
+    public IClient? HolderOf(int accountId)
+        => _claims.TryGetValue(accountId, out var claim) ? claim.Client : null;
 
     public async Task ReleaseAsync(IClient client)
     {
@@ -98,8 +111,9 @@ public class AccountLockService(
         if (!_claims.TryGetValue(accountId, out var claim) || claim.Client.Id != client.Id)
             return;
 
-        _claims.TryRemove(new KeyValuePair<int, AccountClaim>(accountId, claim));
         await ClearOnlineAsync(accountId);
+        _claims.TryRemove(new KeyValuePair<int, AccountClaim>(accountId, claim));
+        claim.MarkReleased();
     }
 
     public async Task ClearOwnClaimsAsync()
@@ -120,31 +134,40 @@ public class AccountLockService(
 
     private async Task EvictAsync(AccountClaim claim)
     {
-        _claims.TryRemove(new KeyValuePair<int, AccountClaim>(claim.AccountId, claim));
-        _accountByClient.TryRemove(new KeyValuePair<Guid, int>(claim.Client.Id, claim.AccountId));
+        if (claim.TryEvict())
+        {
+            logger.LogInformation(
+                "Evicting account {AccountId} (client {ClientId}) for a takeover",
+                claim.AccountId, claim.Client.Id);
 
-        logger.LogInformation(
-            "Evicting account {AccountId} (client {ClientId}) for a takeover",
-            claim.AccountId, claim.Client.Id);
+            await claim.Client.SendPacket(SessionPacketWriter.KickResult(AccountKickCode.Evicted));
 
-        var notice = SessionPacketWriter.KickResult(AccountKickCode.Evicted);
-        await claim.Client.SendPacket(notice);
+            var evicted = claim.Client;
+            evicted.ExpectedClose = true;
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(EvictionGraceMs);
+                evicted.Disconnect();
+            });
+        }
 
+        if (!await WaitForReleaseAsync(claim))
+            logger.LogWarning(
+                "Account {AccountId}: client {ClientId} has not finished leaving; its claim stays until it does",
+                claim.AccountId, claim.Client.Id);
+    }
+
+    private async Task<bool> WaitForReleaseAsync(AccountClaim claim)
+    {
         try
         {
-            await sessionTerminationService.LogoutAsync(claim.Client);
+            await claim.Released.WaitAsync(HandoverTimeout);
+            return true;
         }
-        catch (Exception ex)
+        catch (TimeoutException)
         {
-            logger.LogWarning(ex, "Error terminating evicted session for account {AccountId}", claim.AccountId);
+            return false;
         }
-
-        var evicted = claim.Client;
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(EvictionGraceMs);
-            evicted.Disconnect();
-        });
     }
 
     private async Task<AccountOccupant> DescribeAsync(AccountClaim claim)

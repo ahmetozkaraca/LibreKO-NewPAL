@@ -17,13 +17,24 @@ public interface IItemTradeService
 public class ItemTradeService(
     SessionManager sessionManager,
     IGameDataService gameDataService,
-    IUserNotificationService userNotificationService) : IItemTradeService
+    IUserNotificationService userNotificationService,
+    IViolationMonitor violationMonitor) : IItemTradeService
 {
-    private const int ItemNoTrade = 900000001;
+    private const byte TradeBuy = 1;
+    private const byte TradeSell = 2;
+    private const byte TradeMove = 3;
+    private const byte RepairEquipped = 1;
+    private const byte RepairInBag = 2;
+    private const int NoSellingGroup = 0;
     private const int LoyaltyMerchantSellingGroup = 249000;
+    private const int MaxTradeLines = InventoryConstants.HaveMax;
     private const int SaleTypeFull = 1;
     private const int SellPriceDivisor = 6;
     private const int ItemBaseIdStep = 1000;
+    private const int PercentBase = 100;
+    private const int RepairPriceOffset = 10;
+    private const double RepairPriceScale = 10000.0;
+    private const double RepairPriceExponent = 0.75;
 
     public async Task HandleRepairAsync(IClient client, Packet packet)
     {
@@ -37,33 +48,18 @@ public class ItemTradeService(
         var itemId = packet.ReadInt();
 
         var npc = sessionManager.Regions.GetNpc(npcId);
-        if (npc == null || !npc.IsAlive || !IsInNpcRange(session, npc))
+        if (npc == null || !npc.IsAlive || npc.NpcType != NpcData.TypeRepairMerchant
+            || !Reach.CanInteract(session, npc) || ItemTransfer.IsInventoryLocked(session))
         {
             await SendRepairResponseAsync(session, ItemRepairResult.Failed);
             return;
         }
 
         int absolutePosition;
-        if (positionType == 1)
-        {
-            if (slot >= InventoryConstants.SlotMax)
-            {
-                await SendRepairResponseAsync(session, ItemRepairResult.Failed);
-                return;
-            }
-
+        if (positionType == RepairEquipped && slot < InventoryConstants.SlotMax)
             absolutePosition = slot;
-        }
-        else if (positionType == 2)
-        {
-            if (slot >= InventoryConstants.HaveMax)
-            {
-                await SendRepairResponseAsync(session, ItemRepairResult.Failed);
-                return;
-            }
-
+        else if (positionType == RepairInBag && slot < InventoryConstants.HaveMax)
             absolutePosition = InventoryConstants.InventoryStart + slot;
-        }
         else
         {
             await SendRepairResponseAsync(session, ItemRepairResult.Failed);
@@ -87,19 +83,12 @@ public class ItemTradeService(
             if (quantity <= 0)
                 return (Success: false, Money: 0);
 
-            var repairCost = (int)(((itemData.BuyPrice - 10) / 10000.0f + Math.Pow(itemData.BuyPrice, 0.75f))
-                * quantity / (double)itemData.Duration);
-            if (repairCost < 0)
-                repairCost = 0;
-
             var repairDiscount = gameDataService.GetPremiumProperty(s.PremiumType, PremiumPropertyType.RepairDiscount);
-            if (repairDiscount > 0)
-                repairCost = repairCost * (100 - repairDiscount) / 100;
-
+            var repairCost = RepairCost(itemData, quantity, repairDiscount);
             if (s.Money < repairCost)
                 return (Success: false, Money: 0);
 
-            s.Money -= repairCost;
+            s.Money -= (int)repairCost;
             item.Durability = itemData.Duration;
             return (Success: true, Money: s.Money);
         });
@@ -120,217 +109,210 @@ public class ItemTradeService(
             return;
 
         var type = packet.ReadByte();
-
-        if (type == 1 || type == 2)
+        if (type is not (TradeBuy or TradeSell))
         {
-            var sellingGroup = packet.ReadInt();
-            var npcId = packet.ReadInt();
-
-            var npc = sessionManager.Regions.GetNpc(npcId);
-            if (npc == null || !npc.IsAlive || !IsInNpcRange(session, npc) || npc.SellingGroup != sellingGroup)
-            {
-                await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
-                return;
-            }
-            if (session.Trade.IsTrading)
-            {
-                await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
-                return;
-            }
-
-            var itemCount = packet.ReadByte();
-            if (itemCount == 0)
-            {
-                await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
-                return;
-            }
-
-            var entries = new List<NpcTradeEntry>(itemCount);
-            for (var index = 0; index < itemCount; index++)
-            {
-                var tradeItemId = packet.ReadInt();
-                var tradePosition = packet.ReadByte();
-                var count = packet.ReadUShort();
-                byte line = 0;
-                byte listIndex = 0;
-                if (type == 1)
-                {
-                    line = packet.ReadByte();
-                    listIndex = packet.ReadByte();
-                }
-
-                entries.Add(new NpcTradeEntry(tradeItemId, tradePosition, count, line, listIndex));
-            }
-
-            var result = await HandleNpcTradeAsync(session, client, npc, type, entries);
-            if (result != null)
-                await client.SendPacket(result);
+            if (type == TradeMove)
+                violationMonitor.Report(session, ViolationKind.InvalidRequest, "sent the shop bag swap the client never sends");
+            await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
             return;
         }
 
-        var itemId = packet.ReadInt();
-        var position = packet.ReadByte();
-
-        if (type == 3)
+        var sellingGroup = packet.ReadInt();
+        var npcId = packet.ReadInt();
+        var lineCount = packet.ReadByte();
+        if (lineCount == 0 || lineCount > MaxTradeLines)
         {
-            var destinationPosition = packet.ReadByte();
-            if (position >= InventoryConstants.HaveMax || destinationPosition >= InventoryConstants.HaveMax)
-            {
-                await SendItemTradeErrorAsync(session, ItemTradeRefusal.InventoryFull);
-                return;
-            }
-
-            var sourceIndex = InventoryConstants.InventoryStart + position;
-            var destinationIndex = InventoryConstants.InventoryStart + destinationPosition;
-            var swapped = session.WithLock(s =>
-            {
-                if (s.Inventory[sourceIndex].ItemId != itemId)
-                    return false;
-                SwapItems(s.Inventory[sourceIndex], s.Inventory[destinationIndex]);
-                return true;
-            });
-
-            if (!swapped)
-            {
-                await SendItemTradeErrorAsync(session, ItemTradeRefusal.InventoryFull);
-                return;
-            }
-
-            var moveResult = ItemTradePacketWriter.Moved();
-            await client.SendPacket(moveResult);
-        }
-    }
-
-    private async Task<Packet?> HandleNpcTradeAsync(
-        UserSession session,
-        IClient client,
-        NpcInstance npc,
-        byte type,
-        List<NpcTradeEntry> entries)
-    {
-        var outcome = session.WithLock(s =>
-        {
-            var usedPositions = new HashSet<byte>();
-            var totalPrice = 0;
-            ItemData? lastItemData = null;
-
-            foreach (var entry in entries)
-            {
-                var itemData = gameDataService.GetItem(entry.ItemId);
-                if (itemData == null
-                    || entry.Position >= InventoryConstants.HaveMax
-                    || entry.Count == 0
-                    || entry.Count > 9999
-                    || (type == 1 && !usedPositions.Add(entry.Position))
-                    || (type == 2 && (entry.ItemId >= ItemNoTrade || itemData.Race == 20)))
-                {
-                    return (Error: ItemTradeRefusal.CannotTrade, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-                }
-
-                var absolutePosition = InventoryConstants.InventoryStart + entry.Position;
-                if (type == 1)
-                {
-                    var existingItem = s.Inventory[absolutePosition];
-                    if (!existingItem.IsEmpty)
-                    {
-                        if (existingItem.ItemId != entry.ItemId || itemData.Countable == 0)
-                            return (Error: ItemTradeRefusal.CannotTrade, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-
-                        if (existingItem.Count + entry.Count > 9999)
-                            return (Error: ItemTradeRefusal.InventoryFull, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-                    }
-
-                    var entryPrice = checked(itemData.BuyPrice * entry.Count);
-                    if (s.Money < totalPrice + entryPrice)
-                        return (Error: ItemTradeRefusal.NotEnoughCoins, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-
-                    var totalWeight = s.Stats.ItemWeight + entries.Sum(candidate =>
-                    {
-                        var data = gameDataService.GetItem(candidate.ItemId);
-                        return data == null ? 0 : data.Weight * candidate.Count;
-                    });
-                    if (totalWeight > s.Stats.MaxWeight)
-                        return (Error: ItemTradeRefusal.InventoryFull, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-
-                    existingItem.ItemId = entry.ItemId;
-                    existingItem.Durability = itemData.Duration;
-                    existingItem.Count += entry.Count;
-                    totalPrice += entryPrice;
-                }
-                else
-                {
-                    var inventoryItem = s.Inventory[absolutePosition];
-                    if (inventoryItem.ItemId != entry.ItemId || inventoryItem.Count < entry.Count || !inventoryItem.IsTradable)
-                        return (Error: ItemTradeRefusal.CannotTrade, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-
-                    var entryPrice = SellUnitPrice(itemData) * entry.Count;
-                    var sellBonus = gameDataService.GetPremiumProperty(s.PremiumType, PremiumPropertyType.ItemSell);
-                    if (sellBonus > 0)
-                        entryPrice = entryPrice * (100 + sellBonus) / 100;
-
-                    totalPrice += entryPrice;
-
-                    if (entry.Count >= inventoryItem.Count)
-                        inventoryItem.Clear();
-                    else
-                        inventoryItem.Count -= entry.Count;
-                }
-
-                lastItemData = itemData;
-            }
-
-            if (lastItemData == null)
-                return (Error: ItemTradeRefusal.None, Price: 0, Money: 0, Loyalty: 0, SellingGroup: (byte)0, HasItems: false);
-
-            if (type == 1)
-                s.Money -= totalPrice;
-            else
-                s.Money += totalPrice;
-
-            s.RecalculateStatsWithBuffs(gameDataService);
-
-            return (Error: ItemTradeRefusal.None, Price: totalPrice, Money: s.Money, Loyalty: s.Loyalty, SellingGroup: lastItemData.SellingGroup, HasItems: true);
-        });
-
-        if (outcome.Error != ItemTradeRefusal.None)
-        {
-            await SendItemTradeErrorAsync(session, outcome.Error);
-            return null;
+            await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
+            return;
         }
 
-        if (!outcome.HasItems)
-            return null;
+        var entries = new List<NpcTradeEntry>(lineCount);
+        for (var index = 0; index < lineCount; index++)
+        {
+            var tradeItemId = packet.ReadInt();
+            var tradePosition = packet.ReadByte();
+            var count = packet.ReadUShort();
+            byte line = 0;
+            byte listIndex = 0;
+            if (type == TradeBuy)
+            {
+                line = packet.ReadByte();
+                listIndex = packet.ReadByte();
+            }
+
+            entries.Add(new NpcTradeEntry(tradeItemId, tradePosition, count, line, listIndex));
+        }
+
+        var npc = sessionManager.Regions.GetNpc(npcId);
+        if (npc == null || !npc.IsAlive || !IsShopkeeper(npc, sellingGroup)
+            || !Reach.CanInteract(session, npc) || ItemTransfer.IsInventoryLocked(session))
+        {
+            await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
+            return;
+        }
+
+        var outcome = type == TradeBuy ? Buy(session, sellingGroup, entries) : Sell(session, entries);
+        if (outcome.Refusal != ItemTradeRefusal.None)
+        {
+            await SendItemTradeErrorAsync(session, outcome.Refusal);
+            return;
+        }
 
         await userNotificationService.SendWeightChangeAsync(session);
-
-        var isLoyaltyMerchant = npc.SellingGroup == LoyaltyMerchantSellingGroup;
-        return ItemTradePacketWriter.Traded(
-            isLoyaltyMerchant ? outcome.Loyalty : outcome.Money,
-            outcome.Price,
-            isLoyaltyMerchant ? outcome.SellingGroup : null);
+        await client.SendPacket(ItemTradePacketWriter.Traded(outcome.Balance, outcome.Price, outcome.LoyaltyGroup));
     }
 
-    private int SellUnitPrice(ItemData itemData)
+    private TradeOutcome Buy(UserSession session, int sellingGroup, List<NpcTradeEntry> entries)
+    {
+        var loyaltyMerchant = sellingGroup == LoyaltyMerchantSellingGroup;
+        var lines = new List<(NpcTradeEntry Entry, ItemData Data, long UnitPrice)>(entries.Count);
+        var positions = new HashSet<byte>();
+        foreach (var entry in entries)
+        {
+            var listed = gameDataService.GetSellingGroupItem(sellingGroup, entry.Line, entry.Index);
+            if (listed == null || listed.ItemId != entry.ItemId)
+            {
+                violationMonitor.Report(session, ViolationKind.InvalidRequest,
+                    $"asked selling group {sellingGroup} for item {entry.ItemId} at line {entry.Line} index {entry.Index}");
+                return TradeOutcome.Refused(ItemTradeRefusal.CannotTrade);
+            }
+
+            var itemData = gameDataService.GetItem(entry.ItemId);
+            var unitPrice = itemData == null ? 0 : UnitBuyPrice(itemData, listed, loyaltyMerchant);
+            if (itemData == null
+                || unitPrice <= 0
+                || entry.Position >= InventoryConstants.HaveMax
+                || !positions.Add(entry.Position)
+                || entry.Count == 0
+                || entry.Count > InventoryConstants.MaxStackCount
+                || (itemData.Countable == 0 && entry.Count != 1))
+                return TradeOutcome.Refused(ItemTradeRefusal.CannotTrade);
+
+            lines.Add((entry, itemData, unitPrice));
+        }
+
+        return session.WithLock(s =>
+        {
+            long total = 0;
+            long weight = s.Stats.ItemWeight;
+            foreach (var (entry, itemData, unitPrice) in lines)
+            {
+                if (!ItemTransfer.CanPut(BagSlot(s, entry.Position), Purchased(entry, itemData), itemData.Countable != 0))
+                    return TradeOutcome.Refused(ItemTradeRefusal.InventoryFull);
+
+                total += unitPrice * entry.Count;
+                weight += (long)itemData.Weight * entry.Count;
+            }
+
+            if (total > (loyaltyMerchant ? s.Loyalty : s.Money))
+                return TradeOutcome.Refused(ItemTradeRefusal.NotEnoughCoins);
+
+            if (weight > s.Stats.MaxWeight)
+                return TradeOutcome.Refused(ItemTradeRefusal.InventoryFull);
+
+            foreach (var (entry, itemData, _) in lines)
+                ItemTransfer.Put(BagSlot(s, entry.Position), Purchased(entry, itemData));
+
+            if (loyaltyMerchant)
+                s.Loyalty -= (int)total;
+            else
+                s.Money -= (int)total;
+
+            s.RecalculateStatsWithBuffs(gameDataService);
+            return new TradeOutcome(
+                ItemTradeRefusal.None,
+                loyaltyMerchant ? s.Loyalty : s.Money,
+                (int)total,
+                loyaltyMerchant ? lines[^1].Data.SellingGroup : null);
+        });
+    }
+
+    private TradeOutcome Sell(UserSession session, List<NpcTradeEntry> entries)
+    {
+        var lines = new List<(NpcTradeEntry Entry, ItemData Data)>(entries.Count);
+        var positions = new HashSet<byte>();
+        foreach (var entry in entries)
+        {
+            var itemData = gameDataService.GetItem(entry.ItemId);
+            if (itemData == null
+                || entry.Position >= InventoryConstants.HaveMax
+                || !positions.Add(entry.Position)
+                || entry.Count == 0)
+                return TradeOutcome.Refused(ItemTradeRefusal.CannotTrade);
+
+            lines.Add((entry, itemData));
+        }
+
+        return session.WithLock(s =>
+        {
+            var sellBonus = gameDataService.GetPremiumProperty(s.PremiumType, PremiumPropertyType.ItemSell);
+            long total = 0;
+            foreach (var (entry, itemData) in lines)
+            {
+                var slot = BagSlot(s, entry.Position);
+                if (slot.ItemId != entry.ItemId
+                    || entry.Count > slot.Count
+                    || (itemData.Countable == 0 && entry.Count != slot.Count)
+                    || !ItemTransfer.CanLeaveOwner(slot, itemData)
+                    || entry.ItemId >= ExchangePacketConstants.ItemNoTrade)
+                    return TradeOutcome.Refused(ItemTradeRefusal.CannotTrade);
+
+                total += SalePrice(itemData, entry.Count, sellBonus);
+            }
+
+            if (!Coins.CanCredit(s.Money, total))
+                return TradeOutcome.Refused(ItemTradeRefusal.CannotTrade);
+
+            foreach (var (entry, _) in lines)
+                ItemTransfer.Take(BagSlot(s, entry.Position), entry.Count);
+
+            s.Money += (int)total;
+            s.RecalculateStatsWithBuffs(gameDataService);
+            return new TradeOutcome(ItemTradeRefusal.None, s.Money, (int)total, null);
+        });
+    }
+
+    private static bool IsShopkeeper(NpcInstance npc, int sellingGroup) =>
+        npc.SellingGroup != NoSellingGroup
+        && npc.SellingGroup == sellingGroup
+        && npc.NpcType is NpcData.TypeTradeMerchant or NpcData.TypeRepairMerchant;
+
+    private static long UnitBuyPrice(ItemData itemData, SellingGroupItemData listed, bool loyaltyMerchant)
+    {
+        var tablePrice = loyaltyMerchant ? itemData.NpBuyPrice : itemData.BuyPrice;
+        return tablePrice > 0 ? tablePrice : listed.Price;
+    }
+
+    private static ItemStack Purchased(NpcTradeEntry entry, ItemData itemData) =>
+        ItemStack.Fresh(entry.ItemId, itemData.Duration, entry.Count);
+
+    private static ItemSlot BagSlot(UserSession session, byte position) =>
+        session.Inventory[InventoryConstants.InventoryStart + position];
+
+    private long SalePrice(ItemData itemData, ushort count, int sellBonusPercent)
+    {
+        var fullPrice = SaleTypeOf(itemData) == SaleTypeFull;
+        long unitPrice = fullPrice ? itemData.BuyPrice : itemData.BuyPrice / SellPriceDivisor;
+        if (unitPrice < 1)
+            return 0;
+
+        var price = unitPrice * count;
+        return !fullPrice && sellBonusPercent > 0 ? price * (PercentBase + sellBonusPercent) / PercentBase : price;
+    }
+
+    private int SaleTypeOf(ItemData itemData)
     {
         var baseItem = gameDataService.GetItem(itemData.Num / ItemBaseIdStep * ItemBaseIdStep);
-        var saleType = baseItem?.SellPrice ?? itemData.SellPrice;
-        var price = saleType == SaleTypeFull ? itemData.BuyPrice : itemData.BuyPrice / SellPriceDivisor;
-        return price < 1 ? 0 : price;
+        return baseItem?.SellPrice ?? itemData.SellPrice;
     }
 
-    private static bool IsInNpcRange(UserSession session, NpcInstance npc)
+    private static long RepairCost(ItemData itemData, int missingDurability, int discountPercent)
     {
-        var dx = session.X - npc.X;
-        var dz = session.Z - npc.Z;
-        return dx * dx + dz * dz <= GameConstants.MaxNpcInteractionRangeSq;
-    }
-
-    private static void SwapItems(ItemSlot sourceItem, ItemSlot destinationItem)
-    {
-        (sourceItem.ItemId, destinationItem.ItemId) = (destinationItem.ItemId, sourceItem.ItemId);
-        (sourceItem.Durability, destinationItem.Durability) = (destinationItem.Durability, sourceItem.Durability);
-        (sourceItem.Count, destinationItem.Count) = (destinationItem.Count, sourceItem.Count);
-        (sourceItem.Flag, destinationItem.Flag) = (destinationItem.Flag, sourceItem.Flag);
+        var cost = ((itemData.BuyPrice - RepairPriceOffset) / RepairPriceScale
+                + Math.Pow(itemData.BuyPrice, RepairPriceExponent))
+            * missingDurability / itemData.Duration;
+        var charged = (long)Math.Clamp(cost, 0, ExchangePacketConstants.CoinMax);
+        return discountPercent > 0 ? charged * (PercentBase - discountPercent) / PercentBase : charged;
     }
 
     private static async Task SendRepairResponseAsync(UserSession session, ItemRepairResult result)
@@ -344,7 +326,10 @@ public class ItemTradeService(
         await session.Client.SendPacket(ItemTradePacketWriter.Failed(reason));
     }
 
-
     private readonly record struct NpcTradeEntry(int ItemId, byte Position, ushort Count, byte Line, byte Index);
 
+    private readonly record struct TradeOutcome(ItemTradeRefusal Refusal, int Balance, int Price, byte? LoyaltyGroup)
+    {
+        public static TradeOutcome Refused(ItemTradeRefusal refusal) => new(refusal, 0, 0, null);
+    }
 }

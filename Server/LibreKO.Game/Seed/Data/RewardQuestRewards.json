@@ -1,0 +1,296 @@
+[
+  {
+    "Id": 1,
+    "QuestId": 1,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 5000
+  },
+  {
+    "Id": 2,
+    "QuestId": 1,
+    "Kind": 1,
+    "ItemId": 0,
+    "Count": 500
+  },
+  {
+    "Id": 3,
+    "QuestId": 1,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 1
+  },
+  {
+    "Id": 4,
+    "QuestId": 2,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 10000
+  },
+  {
+    "Id": 5,
+    "QuestId": 2,
+    "Kind": 1,
+    "ItemId": 0,
+    "Count": 5000
+  },
+  {
+    "Id": 6,
+    "QuestId": 2,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 1
+  },
+  {
+    "Id": 7,
+    "QuestId": 3,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 2000
+  },
+  {
+    "Id": 8,
+    "QuestId": 3,
+    "Kind": 1,
+    "ItemId": 0,
+    "Count": 3000
+  },
+  {
+    "Id": 9,
+    "QuestId": 3,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 2
+  },
+  {
+    "Id": 10,
+    "QuestId": 4,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 20000
+  },
+  {
+    "Id": 11,
+    "QuestId": 4,
+    "Kind": 1,
+    "ItemId": 0,
+    "Count": 20000
+  },
+  {
+    "Id": 12,
+    "QuestId": 4,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 1
+  },
+  {
+    "Id": 13,
+    "QuestId": 5,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 40000
+  },
+  {
+    "Id": 14,
+    "QuestId": 5,
+    "Kind": 1,
+    "ItemId": 0,
+    "Count": 150000
+  },
+  {
+    "Id": 15,
+    "QuestId": 5,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 2
+  },
+  {
+    "Id": 16,
+    "QuestId": 6,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 60000
+  },
+  {
+    "Id": 17,
+    "QuestId": 6,
+    "Kind": 1,
+    "ItemId": 0,
+    "Count": 1000000
+  },
+  {
+    "Id": 18,
+    "QuestId": 6,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 2
+  },
+  {
+    "Id": 19,
+    "QuestId": 7,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 100000
+  },
+  {
+    "Id": 20,
+    "QuestId": 7,
+    "Kind": 2,
+    "ItemId": 379016000,
+    "Count": 2
+  },
+  {
+    "Id": 21,
+    "QuestId": 7,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 5
+  },
+  {
+    "Id": 22,
+    "QuestId": 9001,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 20000
+  },
+  {
+    "Id": 23,
+    "QuestId": 9001,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 3
+  },
+  {
+    "Id": 24,
+    "QuestId": 9002,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 15000
+  },
+  {
+    "Id": 25,
+    "QuestId": 9002,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 3
+  },
+  {
+    "Id": 26,
+    "QuestId": 9003,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 80000
+  },
+  {
+    "Id": 27,
+    "QuestId": 9003,
+    "Kind": 2,
+    "ItemId": 379016000,
+    "Count": 1
+  },
+  {
+    "Id": 28,
+    "QuestId": 9003,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 5
+  },
+  {
+    "Id": 29,
+    "QuestId": 9004,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 30000
+  },
+  {
+    "Id": 30,
+    "QuestId": 9004,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 3
+  },
+  {
+    "Id": 31,
+    "QuestId": 9005,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 30000
+  },
+  {
+    "Id": 32,
+    "QuestId": 9005,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 3
+  },
+  {
+    "Id": 33,
+    "QuestId": 9006,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 100000
+  },
+  {
+    "Id": 34,
+    "QuestId": 9006,
+    "Kind": 2,
+    "ItemId": 379016000,
+    "Count": 1
+  },
+  {
+    "Id": 35,
+    "QuestId": 9006,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 5
+  },
+  {
+    "Id": 36,
+    "QuestId": 9007,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 30000
+  },
+  {
+    "Id": 37,
+    "QuestId": 9007,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 3
+  },
+  {
+    "Id": 38,
+    "QuestId": 9008,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 25000
+  },
+  {
+    "Id": 39,
+    "QuestId": 9008,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 3
+  },
+  {
+    "Id": 40,
+    "QuestId": 9009,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 80000
+  },
+  {
+    "Id": 41,
+    "QuestId": 9009,
+    "Kind": 2,
+    "ItemId": 379016000,
+    "Count": 1
+  },
+  {
+    "Id": 42,
+    "QuestId": 9009,
+    "Kind": 3,
+    "ItemId": 0,
+    "Count": 5
+  }
+]

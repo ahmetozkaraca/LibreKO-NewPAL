@@ -1,5 +1,4 @@
 ﻿using LibreKO.Common.Domain.Entities;
-using LibreKO.Common.Enums;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Infrastructure.Network;
@@ -22,6 +21,7 @@ public interface IShoppingMallLetterMutationService
 public class ShoppingMallLetterMutationService(
     SessionManager sessionManager,
     IServiceScopeFactory scopeFactory,
+    ICharacterStatePersister characterStatePersister,
     IGameDataService gameDataService,
     IUserNotificationService userNotificationService,
     ILogger<ShoppingMallLetterMutationService> logger) : IShoppingMallLetterMutationService
@@ -54,7 +54,7 @@ public class ShoppingMallLetterMutationService(
         }
 
         var letterType = packet.ReadByte();
-        if (letterType is 0 or > 2)
+        if (letterType is not (ShoppingMallLetterProtocol.LetterTypeText or ShoppingMallLetterProtocol.LetterTypeItem))
         {
             await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
                 ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, Rejected));
@@ -62,14 +62,10 @@ public class ShoppingMallLetterMutationService(
         }
 
         var itemId = 0;
-        short itemDurability = 0;
-        short itemCount = 0;
         var cost = ShoppingMallLetterProtocol.LetterSendCost;
-        ItemSlot? itemSlot = null;
         byte sourcePosition = 0;
-        var coins = 0;
 
-        if (letterType == 2)
+        if (letterType == ShoppingMallLetterProtocol.LetterTypeItem)
         {
             if (packet.RemainingBytes < 9)
             {
@@ -110,83 +106,68 @@ public class ShoppingMallLetterMutationService(
             return;
         }
 
-        if (session.Money < cost)
+        if (session.Trade.LocksInventory || session.Money < cost)
         {
             await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
                 ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, Rejected));
             return;
         }
 
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        var recipientExists = await db.Characters.AnyAsync(character => character.Name == recipientName);
-        if (!recipientExists)
+        var postage = await characterStatePersister.RunAsync(session, Postage.Refused(Rejected), async unit =>
         {
-            await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, Rejected));
-            return;
-        }
+            var recipientExists = await unit.Db.Characters
+                .AnyAsync(character => character.Name == recipientName && character.DeletionTime == null);
+            if (!recipientExists)
+                return Postage.Refused(Rejected);
 
-        if (letterType == 2)
-        {
-            var sourceIndex = InventoryConstants.InventoryStart + sourcePosition;
-            if (sourcePosition >= InventoryConstants.HaveMax || sourceIndex >= session.Inventory.Length)
+            var taken = session.WithLock(s => TakePostage(s, letterType, itemId, sourcePosition, cost));
+            if (taken.Result != Succeeded)
+                return taken;
+
+            unit.Db.MailBoxes.Add(new MailBox
             {
-                await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                    ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, Rejected));
-                return;
+                SendDate = DateTime.UtcNow,
+                Status = ShoppingMallLetterProtocol.LetterStatusUnread,
+                SenderId = session.Name,
+                RecipientId = recipientName,
+                Subject = subject,
+                Message = message,
+                Type = letterType,
+                ItemId = taken.TookItem ? itemId : 0,
+                Count = taken.TookItem ? (short)taken.Before.Count : (short)0,
+                Durability = taken.TookItem ? taken.Before.Durability : (short)0,
+                SerialNumber = 0,
+                Coins = 0,
+                Deleted = false
+            });
+
+            try
+            {
+                await unit.CommitAsync();
+            }
+            catch (Exception ex)
+            {
+                session.WithLock(s => taken.Undo(s, gameDataService));
+                logger.LogWarning(ex, "{Name} could not send a letter to {Recipient}", session.Name, recipientName);
+                return Postage.Refused(Rejected);
             }
 
-            itemSlot = session.Inventory[sourceIndex];
-            if (itemSlot.ItemId != itemId || itemSlot.IsEmpty)
-            {
-                await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                    ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, Rejected));
-                return;
-            }
-
-            var itemData = gameDataService.GetItem(itemId);
-            if (itemData == null
-                || itemData.Race == 7
-                || itemId >= InventoryConstants.ItemGold
-                || !itemSlot.IsTradable)
-            {
-                await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                    ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, SendItemNotMailable));
-                return;
-            }
-
-            itemDurability = itemSlot.Durability;
-            itemCount = (short)itemSlot.Count;
-        }
-
-        session.Money -= cost;
-        await userNotificationService.SendGoldLossAsync(session, cost);
-
-        if (itemSlot != null)
-        {
-            itemSlot.Clear();
-            await userNotificationService.SendStackChangeAsync(session, sourcePosition, 0, 0, 0);
-        }
-
-        db.MailBoxes.Add(new MailBox
-        {
-            SendDate = DateTime.UtcNow,
-            Status = 1,
-            SenderId = session.Name,
-            RecipientId = recipientName,
-            Subject = subject,
-            Message = message,
-            Type = letterType,
-            ItemId = itemId,
-            Count = itemCount,
-            Durability = itemDurability,
-            SerialNumber = 0,
-            Coins = coins,
-            Deleted = false
+            return taken;
         });
-        await db.SaveChangesAsync();
+
+        if (postage.Result != Succeeded)
+        {
+            await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
+                ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterSend, postage.Result));
+            return;
+        }
+
+        await userNotificationService.SendGoldLossAsync(session, postage.Cost);
+        if (postage.TookItem)
+        {
+            await userNotificationService.SendStackChangeAsync(session, (byte)postage.SourceIndex, 0, 0, 0);
+            await userNotificationService.SendWeightChangeAsync(session);
+        }
 
         logger.LogInformation("{Name} sent mail to {Recipient} (type={LetterType})", session.Name, recipientName, letterType);
 
@@ -241,71 +222,126 @@ public class ShoppingMallLetterMutationService(
             return;
 
         var letterId = packet.ReadInt();
-
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        var letter = await db.MailBoxes
-            .OrderBy(mail => mail.LetterId)
-            .FirstOrDefaultAsync(mail => mail.LetterId == letterId
-                && mail.RecipientId == session.Name
-                && mail.Status == 1
-                && mail.Type == 2
-                && !mail.Deleted);
-
-        if (letter == null)
+        if (session.Trade.LocksInventory)
         {
             await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, GetItemNoLetter));
+                ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, Rejected));
             return;
         }
 
+        var receipt = await characterStatePersister.RunAsync(session, Receipt.Refused(Rejected), async unit =>
+        {
+            var letter = await unit.Db.MailBoxes
+                .OrderBy(mail => mail.LetterId)
+                .FirstOrDefaultAsync(mail => mail.LetterId == letterId
+                    && mail.RecipientId == session.Name
+                    && mail.Status == ShoppingMallLetterProtocol.LetterStatusUnread
+                    && mail.Type == ShoppingMallLetterProtocol.LetterTypeItem
+                    && !mail.Deleted);
+            if (letter == null)
+                return Receipt.Refused(GetItemNoLetter);
+
+            var received = session.WithLock(s => Receive(s, letter));
+            if (received.Result != Succeeded)
+                return received;
+
+            letter.Status = ShoppingMallLetterProtocol.LetterStatusRead;
+            try
+            {
+                await unit.CommitAsync();
+            }
+            catch (Exception ex)
+            {
+                session.WithLock(s => received.Undo(s, gameDataService));
+                logger.LogWarning(ex, "{Name} could not take the contents of letter {LetterId}", session.Name, letterId);
+                return Receipt.Refused(Rejected);
+            }
+
+            return received;
+        });
+
+        if (receipt.Result != Succeeded)
+        {
+            await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
+                ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, receipt.Result));
+            return;
+        }
+
+        if (receipt.Slot >= 0)
+        {
+            var slotEntry = session.Inventory[receipt.Slot];
+            await userNotificationService.SendStackChangeAsync(
+                session,
+                (byte)receipt.Slot,
+                slotEntry.ItemId,
+                slotEntry.Count,
+                slotEntry.Durability,
+                receipt.Before.ItemId == 0);
+        }
+
+        if (receipt.Coins > 0)
+            await userNotificationService.SendGoldGainAsync(session, receipt.Coins);
+
+        await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
+            ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, Succeeded));
+    }
+
+    private Postage TakePostage(UserSession session, byte letterType, int itemId, byte sourcePosition, int cost)
+    {
+        if (session.Money < cost)
+            return Postage.Refused(Rejected);
+
+        if (letterType != ShoppingMallLetterProtocol.LetterTypeItem)
+        {
+            session.Money -= cost;
+            return new Postage(Succeeded, cost, -1, default);
+        }
+
+        var sourceIndex = InventoryConstants.InventoryStart + sourcePosition;
+        if (sourcePosition >= InventoryConstants.HaveMax)
+            return Postage.Refused(Rejected);
+
+        var itemSlot = session.Inventory[sourceIndex];
+        if (itemSlot.IsEmpty || itemSlot.ItemId != itemId)
+            return Postage.Refused(Rejected);
+
+        if (!ItemTransfer.CanLeaveOwner(itemSlot, gameDataService.GetItem(itemId)))
+            return Postage.Refused(SendItemNotMailable);
+
+        var before = ItemSlotState.Of(itemSlot);
+        session.Money -= cost;
+        itemSlot.Clear();
+        session.RecalculateStatsWithBuffs(gameDataService);
+        return new Postage(Succeeded, cost, sourceIndex, before);
+    }
+
+    private Receipt Receive(UserSession session, MailBox letter)
+    {
+        if (letter.Coins < 0 || (long)session.Money + letter.Coins > ExchangePacketConstants.CoinMax)
+            return Receipt.Refused(Rejected);
+
+        var slot = -1;
+        ItemSlotState before = default;
         if (letter.ItemId > 0)
         {
-            var slot = session.FindSlotForItem(letter.ItemId, gameDataService, (ushort)letter.Count);
-            if (slot < 0)
-            {
-                await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                    ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, Rejected));
-                return;
-            }
-
+            slot = session.FindSlotForItem(letter.ItemId, gameDataService, (ushort)letter.Count);
             var itemData = gameDataService.GetItem(letter.ItemId);
-            if (itemData == null || !CanReceiveItem(session, itemData, letter.Count))
-            {
-                await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-                    ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, Rejected));
-                return;
-            }
+            if (slot < 0 || itemData == null || !CanReceiveItem(session, itemData, letter.Count))
+                return Receipt.Refused(Rejected);
 
             var slotEntry = session.Inventory[slot];
+            before = ItemSlotState.Of(slotEntry);
             var isNewItem = slotEntry.IsEmpty;
             slotEntry.ItemId = letter.ItemId;
             slotEntry.Count += (ushort)letter.Count;
             slotEntry.Durability = isNewItem
                 ? letter.Durability
                 : (short)(slotEntry.Durability + letter.Durability);
-
-            await userNotificationService.SendStackChangeAsync(
-                session,
-                (byte)slot,
-                letter.ItemId,
-                slotEntry.Count,
-                slotEntry.Durability,
-                isNewItem);
+            session.RecalculateStatsWithBuffs(gameDataService);
         }
 
-        if (letter.Coins > 0)
-        {
-            session.Money += letter.Coins;
-            await userNotificationService.SendGoldGainAsync(session, letter.Coins);
-        }
-
-        letter.Status = 2;
-        await db.SaveChangesAsync();
-
-        await session.Client.SendPacket(ShoppingMallPacketWriter.Result(
-            ShoppingMallLetterProtocol.StoreLetter, ShoppingMallLetterProtocol.LetterGetItem, Succeeded));
+        session.Money += letter.Coins;
+        return new Receipt(Succeeded, slot, before, letter.Coins);
     }
 
     private static bool CanReceiveItem(UserSession session, ItemData itemData, short count)
@@ -315,5 +351,37 @@ public class ShoppingMallLetterMutationService(
 
         var totalWeight = itemData.Weight * count;
         return session.Stats.ItemWeight + totalWeight <= session.Stats.MaxWeight;
+    }
+
+    private readonly record struct Postage(byte Result, int Cost, int SourceIndex, ItemSlotState Before)
+    {
+        public bool TookItem => SourceIndex >= 0;
+
+        public static Postage Refused(byte result) => new(result, 0, -1, default);
+
+        public void Undo(UserSession session, IGameDataService gameData)
+        {
+            session.Money += Cost;
+            if (!TookItem)
+                return;
+
+            Before.RestoreTo(session.Inventory[SourceIndex]);
+            session.RecalculateStatsWithBuffs(gameData);
+        }
+    }
+
+    private readonly record struct Receipt(byte Result, int Slot, ItemSlotState Before, int Coins)
+    {
+        public static Receipt Refused(byte result) => new(result, -1, default, 0);
+
+        public void Undo(UserSession session, IGameDataService gameData)
+        {
+            session.Money -= Coins;
+            if (Slot < 0)
+                return;
+
+            Before.RestoreTo(session.Inventory[Slot]);
+            session.RecalculateStatsWithBuffs(gameData);
+        }
     }
 }

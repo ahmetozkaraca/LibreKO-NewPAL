@@ -1,5 +1,6 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 
 namespace LibreKO.Common.Infrastructure.Network;
 
@@ -7,13 +8,19 @@ public static class PacketProvider
 {
     private const short CRYPTO_OPCODE = 0x1EFC;
 
-    public static async Task<Packet> ReadFromStream(Stream stream, CancellationToken ct)
+    public static Task<Packet> ReadFromStream(Stream stream, CancellationToken ct) =>
+        ReadFromStream(stream, null, ct);
+
+    public static async Task<Packet> ReadFromStream(Stream stream, Action? onFrameStarted, CancellationToken ct)
     {
         var twoBytes = new byte[2];
 
         try
         {
-            await stream.ReadExactlyAsync(twoBytes, ct);
+            await stream.ReadExactlyAsync(twoBytes.AsMemory(0, 1), ct);
+            onFrameStarted?.Invoke();
+
+            await stream.ReadExactlyAsync(twoBytes.AsMemory(1, 1), ct);
             if (!twoBytes.AsSpan().SequenceEqual(Packet.Header))
                 throw new InvalidDataException($"Invalid packet header: {Convert.ToHexString(twoBytes)}");
 
@@ -94,8 +101,7 @@ public static class PacketProvider
                 if (actualCrc != expectedCrc)
                     throw new InvalidDataException(
                         $"Encrypted client packet CRC check failed. " +
-                        $"Len={decrypted.Length} Seq={sequenceId} Expected=0x{expectedCrc:X8} Actual=0x{actualCrc:X8} " +
-                        $"Raw={Convert.ToHexString(packet.GetBytes())} Decrypted={Convert.ToHexString(decrypted)}");
+                        $"Len={decrypted.Length} Seq={sequenceId} Expected=0x{expectedCrc:X8} Actual=0x{actualCrc:X8}");
 
                 dataStart = 4;
                 dataEnd = decrypted.Length - 4;
@@ -109,8 +115,14 @@ public static class PacketProvider
 
     public static Packet UnwrapLoginSeedPacket(Packet packet, byte[] seedBytes)
     {
-        var decrypted = LoginSeedCipher.Unprotect(packet.GetBytes(), seedBytes);
-        return BuildPacket(decrypted);
+        try
+        {
+            return BuildPacket(LoginSeedCipher.Unprotect(packet.GetBytes(), seedBytes));
+        }
+        catch (CryptographicException ex)
+        {
+            throw new InvalidDataException("Seed-protected login packet does not decrypt.", ex);
+        }
     }
 
     private static byte[] BuildServerPacket(byte[] data, uint sequenceId)

@@ -8,6 +8,7 @@ using LibreKO.Game.Protocol;
 using LibreKO.Game.Scripting;
 using LibreKO.Game.World;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -25,6 +26,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IKnightsAllianceRepository, KnightsAllianceRepository>();
         services.AddScoped<IKingElectionRepository, KingElectionRepository>();
         services.AddScoped<ISheriffReportRepository, SheriffReportRepository>();
+        services.AddScoped<IRewardStateRepository, RewardStateRepository>();
         services.AddScoped<IDataSeeder, DataSeeder>();
         services.AddScoped<GameDataSeedRunner>();
         services.AddSingleton<IPatchRepository, PatchRepository>();
@@ -107,8 +109,22 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IPetPacketCoordinator, PetPacketCoordinator>();
         services.AddSingleton<ISocialPacketCoordinator, SocialPacketCoordinator>();
         services.AddSingleton<IShoppingMallPacketCoordinator, ShoppingMallPacketCoordinator>();
-        services.AddSingleton<IInGameOpcodeRouter, InGameOpcodeRouter>();
+        services.AddServerAuthority();
+        services.AddSingleton<InGameOpcodeRouter>();
+        services.AddSingleton<IInGameOpcodeRouter, GuardedInGameOpcodeRouter>();
         services.AddSingleton<IPacketHandler, GamePacketHandler>();
+        return services;
+    }
+
+    public static IServiceCollection AddServerAuthority(this IServiceCollection services)
+    {
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<IViolationMonitor, ViolationMonitor>();
+        services.TryAddSingleton<IPacketGuard, PacketGuard>();
+        services.TryAddSingleton<IMovementValidator, MovementValidator>();
+        services.TryAddSingleton(sp => new LoginAttemptLimiter(
+            sp.GetRequiredService<IOptions<GameServerSettings>>().Value.Connections,
+            sp.GetRequiredService<TimeProvider>()));
         return services;
     }
 
@@ -127,6 +143,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ICombatNotificationService, CombatNotificationService>();
         services.AddSingleton<ICombatRewardService, CombatRewardService>();
         services.AddSingleton<ICombatLifecycleService, CombatLifecycleService>();
+        services.AddSingleton<INpcKillObserver, WarNpcKillObserver>();
 
         // Exchange
         services.AddSingleton<IExchangeLifecycleService, ExchangeLifecycleService>();
@@ -159,6 +176,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMagicCombatEffectService, MagicCombatEffectService>();
         services.AddSingleton<IMagicExecutionService, MagicExecutionService>();
         services.AddSingleton<IMagicItemUsageService, MagicItemUsageService>();
+        services.AddSingleton<IMagicCostService, MagicCostService>();
+        services.AddSingleton<IMagicTargetingService, MagicTargetingService>();
         services.AddSingleton<IMagicMovementEffectService, MagicMovementEffectService>();
         services.AddSingleton<IMagicStatusEffectService, MagicStatusEffectService>();
         services.AddSingleton<IMagicTimingService, MagicTimingService>();
@@ -180,6 +199,13 @@ public static class ServiceCollectionExtensions
         // Quests
         services.AddSingleton<IQuestNpcInteractionService, QuestNpcInteractionService>();
         services.AddSingleton<IQuestProgressionService, QuestProgressionService>();
+        services.AddSingleton<IRewardRandom, RewardRandom>();
+        services.AddSingleton<IPrizeDrawService, PrizeDrawService>();
+        services.AddSingleton<IRewardGrantService, RewardGrantService>();
+        services.AddSingleton<IRewardStateService, RewardStateService>();
+        services.AddSingleton<IRewardQuestService, RewardQuestService>();
+        services.AddSingleton<IRewardDrawService, RewardDrawService>();
+        services.AddSingleton<INpcKillObserver, RewardQuestKillObserver>();
 
         // World
         services.AddSingleton<IWorldMovementService, WorldMovementService>();
@@ -199,7 +225,8 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddWorldServices(this IServiceCollection services)
     {
         services.AddSingleton<IClientFactory>(sp =>
-            new ClientFactory(ServerType.Game, sp.GetRequiredService<ILogger<Client>>()));
+            new ClientFactory(ServerType.Game, sp.GetRequiredService<ILogger<Client>>(),
+                sp.GetRequiredService<IOptions<GameServerSettings>>().Value.Connections));
         services.AddSingleton<MapManager>();
         services.AddSingleton<SessionManager>();
 

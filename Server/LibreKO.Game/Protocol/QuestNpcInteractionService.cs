@@ -116,7 +116,7 @@ public class QuestNpcInteractionService(
     public async Task HandleClientEventAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null || session.Hp <= 0 || packet.RemainingBytes < 4)
+        if (session == null || session.Hp <= 0 || session.Trade.LocksInventory || packet.RemainingBytes < 4)
             return;
 
         var npcUniqueId = packet.ReadInt();
@@ -205,8 +205,7 @@ public class QuestNpcInteractionService(
 
     private static bool IsBusy(UserSession session) =>
         session.Hp <= 0
-        || session.Trade.IsTrading
-        || session.Trade.IsMerchanting
+        || session.Trade.LocksInventory
         || session.IsGathering;
 
     private static void ResetDialog(UserSession session)

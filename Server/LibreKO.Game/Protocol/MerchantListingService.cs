@@ -34,30 +34,47 @@ public class MerchantListingService(
         var dstPos = packet.ReadByte();
 
         var itemData = gameDataService.GetItem(itemId);
+        var absPos = InventoryConstants.InventoryStart + srcPos;
         var refusal =
             itemData == null ? "no such item"
+            : !session.Trade.IsSellingMerchantPreparing || session.Trade.IsMerchanting ? "the stall setup is not open"
+            : session.Trade.IsTrading || session.IsGathering ? "busy"
             : srcPos >= InventoryConstants.HaveMax ? "source slot out of range"
             : dstPos >= session.Trade.MerchantItems.Length ? "stall slot out of range"
             : IsNoTradeItem(itemId) ? "item cannot be traded"
             : !IsSanePrice(price) ? "price out of range"
             : count == 0 ? "count is zero"
             : itemData.Countable == 0 && count != 1 ? "not stackable but count is not 1"
-            : session.Trade.MerchantItems[dstPos] is { IsEmpty: false } ? "stall slot already taken"
-            : session.Trade.MerchantItems.Any(item =>
-                item is { IsEmpty: false } && item.OriginalSlot == InventoryConstants.SlotMax + srcPos)
-                ? "that bag slot is already listed"
             : null;
 
-        var absPos = InventoryConstants.SlotMax + srcPos;
-        if (refusal == null)
+        refusal ??= session.WithLock(s =>
         {
-            var held = session.Inventory[absPos];
-            refusal =
-                held.ItemId != itemId ? $"slot {absPos} holds {held.ItemId}, not {itemId}"
-                : held.Count < count ? $"slot {absPos} holds {held.Count}, fewer than {count}"
-                : !held.IsTradable ? $"item is {held.State}"
-                : null;
-        }
+            if (s.Trade.MerchantItems[dstPos] is { IsEmpty: false })
+                return "stall slot already taken";
+
+            if (s.Trade.MerchantItems.Any(item => item is { IsEmpty: false } && item.OriginalSlot == absPos))
+                return "that bag slot is already listed";
+
+            var held = s.Inventory[absPos];
+            if (held.ItemId != itemId)
+                return $"slot {absPos} holds {held.ItemId}, not {itemId}";
+            if (held.Count < count)
+                return $"slot {absPos} holds {held.Count}, fewer than {count}";
+            if (!ItemTransfer.CanLeaveOwner(held, itemData))
+                return $"item {itemId} ({held.State}) may not change hands";
+
+            s.Trade.MerchantItems[dstPos] = new MerchantItem
+            {
+                ItemId = itemId,
+                Durability = held.Durability,
+                Count = count,
+                Price = price,
+                OriginalSlot = (byte)absPos,
+                Flag = held.Flag,
+                ExpiresAt = held.ExpiresAt,
+            };
+            return null;
+        });
 
         if (refusal != null)
         {
@@ -70,17 +87,6 @@ public class MerchantListingService(
             return;
         }
 
-        var slot = session.Inventory[absPos];
-
-        session.Trade.MerchantItems[dstPos] = new MerchantItem
-        {
-            ItemId = itemId,
-            Durability = slot.Durability,
-            Count = count,
-            Price = price,
-            OriginalSlot = (byte)absPos
-        };
-
         await session.Client.SendPacket(MerchantPacketWriter.ItemAdded(
             MerchantSubOpcode.ItemAdd, itemId, count,
             session.Trade.MerchantItems[dstPos].Durability, price, srcPos, dstPos));
@@ -90,22 +96,24 @@ public class MerchantListingService(
     {
         var slotIndex = packet.ReadByte();
 
-        if (slotIndex >= session.Trade.MerchantItems.Length)
+        var cancelled = slotIndex < session.Trade.MerchantItems.Length
+            && !session.Trade.IsMerchanting
+            && session.WithLock(s =>
+            {
+                var merchantItem = s.Trade.MerchantItems[slotIndex];
+                if (merchantItem == null || merchantItem.IsEmpty)
+                    return false;
+
+                s.Trade.MerchantItems[slotIndex] = new MerchantItem();
+                return true;
+            });
+
+        if (!cancelled)
         {
             await session.Client.SendPacket(
                 MerchantPacketWriter.Result(MerchantSubOpcode.ItemCancel, MerchantPacketWriter.Failed));
             return;
         }
-
-        var merchantItem = session.Trade.MerchantItems[slotIndex];
-        if (merchantItem == null || merchantItem.IsEmpty)
-        {
-            await session.Client.SendPacket(
-                MerchantPacketWriter.Result(MerchantSubOpcode.ItemCancel, MerchantPacketWriter.Failed));
-            return;
-        }
-
-        session.Trade.MerchantItems[slotIndex] = new MerchantItem();
 
         await session.Client.SendPacket(MerchantPacketWriter.ItemCancelled(
             MerchantSubOpcode.ItemCancel, slotIndex));
@@ -115,7 +123,10 @@ public class MerchantListingService(
     {
         var targetId = packet.ReadInt();
         var merchant = sessionManager.GetByCharacterId(targetId);
-        if (merchant == null || !merchant.Trade.IsMerchanting)
+        if (merchant == null
+            || merchant.CharacterId == session.CharacterId
+            || !merchant.Trade.IsSellingMerchant
+            || !ExchangePacketConstants.IsWithinTradeRange(session, merchant))
         {
             session.Trade.MerchantTargetUserId = -1;
             return;
@@ -124,14 +135,11 @@ public class MerchantListingService(
         session.Trade.MerchantTargetUserId = merchant.CharacterId;
         logger.LogDebug("{Name} browsing merchant shop of {MerchantName}", session.Name, merchant.Name);
 
-        var stall = new List<MerchantPacketWriter.StallItem?>(session.Trade.MerchantItems.Length);
-        for (var i = 0; i < session.Trade.MerchantItems.Length; i++)
-        {
-            var item = merchant.Trade.MerchantItems[i];
-            stall.Add(item != null && !item.IsEmpty
+        var stall = merchant.WithLock(m => m.Trade.MerchantItems
+            .Select(item => item != null && !item.IsEmpty
                 ? new MerchantPacketWriter.StallItem(item.ItemId, item.Count, item.Durability, item.Price)
-                : null);
-        }
+                : (MerchantPacketWriter.StallItem?)null)
+            .ToList());
 
         await session.Client.SendPacket(MerchantPacketWriter.StallContents(
             MerchantSubOpcode.ItemList, targetId, stall));
@@ -146,96 +154,104 @@ public class MerchantListingService(
         var itemId = packet.ReadInt();
         var count = packet.ReadUShort();
         var merchantSlot = packet.ReadByte();
-        var buyerSlot = packet.ReadByte();
+        _ = packet.ReadByte();
 
-        if (merchantSlot >= session.Trade.MerchantItems.Length || count == 0)
+        var itemData = gameDataService.GetItem(itemId);
+        if (merchantSlot >= session.Trade.MerchantItems.Length
+            || count == 0
+            || itemData == null
+            || (itemData.Countable == 0 && count != 1)
+            || ItemTransfer.IsInventoryLocked(session))
         {
             await RefuseBuyAsync(session);
             return;
         }
 
         var merchant = sessionManager.GetByCharacterId(session.Trade.MerchantTargetUserId);
-        if (merchant == null || !merchant.Trade.IsMerchanting || merchant.CharacterId == session.CharacterId)
+        if (merchant == null
+            || merchant.CharacterId == session.CharacterId
+            || !merchant.Trade.IsSellingMerchant
+            || !ExchangePacketConstants.IsWithinTradeRange(session, merchant))
         {
             session.Trade.MerchantTargetUserId = -1;
             await RefuseBuyAsync(session);
             return;
         }
 
-        var merchantItem = merchant.Trade.MerchantItems[merchantSlot];
-        var itemData = gameDataService.GetItem(itemId);
-        if (merchantItem == null
-            || merchantItem.IsEmpty
-            || merchantItem.ItemId != itemId
-            || merchantItem.Count < count
-            || itemData == null
-            || (itemData.Countable == 0 && count != 1))
+        Sale? sale = null;
+        UserSession.WithBoth(session, merchant, (buyer, seller) =>
+            sale = TrySell(buyer, seller, merchantSlot, itemId, count, itemData));
+
+        if (sale == null)
         {
+            logger.LogDebug("Merchant buy refused for {Name}: {ItemId} x{Count} from stall slot {Slot} of {MerchantName}",
+                session.Name, itemId, count, merchantSlot, merchant.Name);
             await RefuseBuyAsync(session);
             return;
         }
-
-        var totalCost = (long)merchantItem.Price * count;
-        if (!IsSanePrice(totalCost) || totalCost > session.Money || !CanReceive(merchant, totalCost))
-        {
-            await RefuseBuyAsync(session);
-            return;
-        }
-
-        var destination = session.FindSlotForItem(itemId, gameDataService, count);
-        if (destination < 0)
-        {
-            logger.LogDebug("Merchant buy refused for {Name}: no free bag slot for {ItemId}", session.Name, itemId);
-            await RefuseBuyAsync(session);
-            return;
-        }
-
-        buyerSlot = (byte)(destination - InventoryConstants.SlotMax);
-        var destinationSlot = session.Inventory[destination];
-        session.Money -= (int)totalCost;
-        merchant.Money += (int)totalCost;
-
-        if (destinationSlot.IsEmpty)
-        {
-            destinationSlot.ItemId = merchantItem.ItemId;
-            destinationSlot.Count = count;
-            destinationSlot.Durability = merchantItem.Durability;
-        }
-        else
-        {
-            destinationSlot.Count += count;
-        }
-
-        merchantItem.Count -= count;
-        var remainingCount = merchantItem.Count;
-
-        var sellerSlot = merchant.Inventory[merchantItem.OriginalSlot];
-        if (sellerSlot.ItemId == merchantItem.ItemId)
-        {
-            sellerSlot.Count -= Math.Min(count, sellerSlot.Count);
-            if (sellerSlot.Count == 0)
-                sellerSlot.Clear();
-        }
-
-        if (remainingCount == 0)
-            merchant.Trade.MerchantItems[merchantSlot] = new MerchantItem();
 
         logger.LogInformation("{BuyerName} bought item {ItemId} x{Count} from {SellerName} for {Cost} gold",
-            session.Name, itemId, count, merchant.Name, totalCost);
+            session.Name, itemId, count, merchant.Name, sale.Cost);
 
-        session.RecalculateStatsWithBuffs(gameDataService);
         var buyResult = MerchantPacketWriter.ItemBought(
-            MerchantSubOpcode.ItemBuy, itemId, remainingCount, merchantSlot, buyerSlot);
+            MerchantSubOpcode.ItemBuy, itemId, sale.Remaining, merchantSlot,
+            (byte)(sale.BuyerIndex - InventoryConstants.InventoryStart));
         await session.Client.SendPacket(buyResult);
-        await userNotificationService.SendGoldLossAsync(session, (int)totalCost);
-        await userNotificationService.SendGoldGainAsync(merchant, (int)totalCost);
+        await userNotificationService.SendGoldLossAsync(session, sale.Cost);
+        await userNotificationService.SendGoldGainAsync(merchant, sale.Cost);
         await userNotificationService.SendWeightChangeAsync(session);
+        await userNotificationService.SendStackChangeAsync(
+            merchant, (byte)sale.SellerIndex, sale.SellerSlot.ItemId, sale.SellerSlot.Count, sale.SellerSlot.Durability);
 
         var soldNotify = MerchantPacketWriter.ItemSold(
             MerchantSubOpcode.ItemPurchased, itemId, session.Name);
         await merchant.Client.SendPacket(soldNotify);
 
-        if (merchant.Trade.MerchantItems.All(entry => entry == null || entry.IsEmpty))
+        if (sale.StallEmptied)
             await merchantLifecycleService.CloseAsync(merchant, MerchantInOut.StallClosed);
     }
+
+    private Sale? TrySell(UserSession buyer, UserSession seller, byte merchantSlot, int itemId, ushort count, ItemData itemData)
+    {
+        if (!seller.Trade.IsSellingMerchant)
+            return null;
+
+        var listed = seller.Trade.MerchantItems[merchantSlot];
+        if (listed == null || listed.IsEmpty || listed.ItemId != itemId || listed.Count < count)
+            return null;
+
+        var sellerSlot = seller.Inventory[listed.OriginalSlot];
+        if (!listed.IsStillHeldIn(sellerSlot) || !ItemTransfer.CanLeaveOwner(sellerSlot, itemData))
+            return null;
+
+        var cost = (long)listed.Price * count;
+        if (!IsSanePrice(cost) || cost > buyer.Money || !CanReceive(seller, cost))
+            return null;
+
+        var stackable = itemData.Countable != 0;
+        var buyerIndex = ItemTransfer.FindBagSlot(buyer.Inventory, ItemStack.Of(sellerSlot) with { Count = count }, stackable);
+        if (buyerIndex == ItemTransfer.NoSlot)
+            return null;
+
+        ItemTransfer.Put(buyer.Inventory[buyerIndex], ItemTransfer.Take(sellerSlot, count));
+        buyer.Money -= (int)cost;
+        seller.Money += (int)cost;
+
+        listed.Count -= count;
+        if (listed.Count == 0)
+            seller.Trade.MerchantItems[merchantSlot] = new MerchantItem();
+
+        buyer.RecalculateStatsWithBuffs(gameDataService);
+        seller.RecalculateStatsWithBuffs(gameDataService);
+
+        return new Sale(
+            (int)cost,
+            listed.Count,
+            buyerIndex,
+            listed.OriginalSlot,
+            ItemStack.Of(sellerSlot),
+            seller.Trade.MerchantItems.All(entry => entry == null || entry.IsEmpty));
+    }
+
+    private sealed record Sale(int Cost, ushort Remaining, int BuyerIndex, int SellerIndex, ItemStack SellerSlot, bool StallEmptied);
 }

@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
@@ -993,7 +993,7 @@ public class ItemTests : GameTestBase
             Z = 10,
             MaxHp = 1,
             Hp = 1,
-            NpcType = 11
+            NpcType = NpcData.TypeTradeMerchant
         });
 
         var packet = new Packet(GameOpcodes.GS_ITEM_TRADE);
@@ -1070,7 +1070,7 @@ public class ItemTests : GameTestBase
             Z = 10,
             MaxHp = 1,
             Hp = 1,
-            NpcType = 11
+            NpcType = NpcData.TypeTradeMerchant
         });
 
         var packet = new Packet(GameOpcodes.GS_ITEM_TRADE);
@@ -1107,6 +1107,11 @@ public class ItemTests : GameTestBase
                     Duration = 20,
                     Weight = 15
                 });
+                gameData.GetSellingGroupItem(1, 0, 0).Returns(new SellingGroupItemData
+                {
+                    SellingGroup = 1,
+                    ItemId = itemId
+                });
             });
 
         var client = Substitute.For<IClient>();
@@ -1136,7 +1141,7 @@ public class ItemTests : GameTestBase
             Z = 10,
             MaxHp = 1,
             Hp = 1,
-            NpcType = 11
+            NpcType = NpcData.TypeTradeMerchant
         });
 
         var packet = new Packet(GameOpcodes.GS_ITEM_TRADE);

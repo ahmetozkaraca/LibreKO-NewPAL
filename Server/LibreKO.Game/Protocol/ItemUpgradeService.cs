@@ -20,6 +20,7 @@ public class ItemUpgradeService(
     IUserNotificationService userNotificationService,
     IGlobalAnvilRateService globalAnvilRateService,
     IChaoticGeneratorService chaoticGeneratorService,
+    IViolationMonitor violationMonitor,
     ILogger<ItemUpgradeService> logger) : IItemUpgradeService
 {
 
@@ -37,7 +38,7 @@ public class ItemUpgradeService(
     private const byte ObjectAnvil = 8;
 
     private const int UpgradeSlotCount = 10;
-    private const int UpgradeMaterialMax = 8;
+    private const ushort MaterialConsumed = 1;
     private const int UpgradeRequestBytes = 1 + 4 + UpgradeSlotCount * 5;
     private const float MaxAnvilRangeSq = 100.0f;
 
@@ -75,23 +76,27 @@ public class ItemUpgradeService(
     private const int SealCodeLength = 8;
 
     private sealed record SealRule(
-        Func<ItemFlag, bool> IsApplicable,
+        Func<ItemSlot, bool> IsApplicable,
         ItemFlag AppliedFlag,
         int Price = 0,
         bool NeedsCode = false,
+        bool NeedsBindingCost = false,
         bool ChargesStones = false);
 
     private static readonly Dictionary<ItemSealType, SealRule> SealRules = new()
     {
         [ItemSealType.Seal] = new SealRule(
-            flag => flag != ItemFlag.Sealed, ItemFlag.Sealed, SealPrice, NeedsCode: true),
+            IsFreelyHeld, ItemFlag.Sealed, SealPrice, NeedsCode: true),
         [ItemSealType.Unseal] = new SealRule(
-            flag => flag == ItemFlag.Sealed, ItemFlag.Unsealed, NeedsCode: true),
+            slot => slot.State == ItemFlag.Sealed, ItemFlag.Unsealed, NeedsCode: true),
         [ItemSealType.Bind] = new SealRule(
-            flag => flag != ItemFlag.Bound, ItemFlag.Bound),
+            IsFreelyHeld, ItemFlag.Bound, NeedsBindingCost: true),
         [ItemSealType.Unbind] = new SealRule(
-            flag => flag == ItemFlag.Bound, ItemFlag.NotBound, ChargesStones: true),
+            slot => slot.State == ItemFlag.Bound, ItemFlag.NotBound, NeedsBindingCost: true, ChargesStones: true),
     };
+
+    private static bool IsFreelyHeld(ItemSlot slot) =>
+        (slot.State is ItemFlag.Unsealed or ItemFlag.NotBound) && !slot.Expires;
 
     private enum ScrollClass
     {
@@ -123,6 +128,13 @@ public class ItemUpgradeService(
                 await HandleItemSealAsync(session, packet);
                 break;
             case ItemUpgradeSubOpcode.BifrostExchange:
+                if (ItemTransfer.IsInventoryLocked(session))
+                {
+                    await session.Client.SendPacket(
+                        ItemUpgradePacketWriter.BifrostExchangeResult(ItemUpgradePacketWriter.BifrostResult.Rejected));
+                    break;
+                }
+
                 await chaoticGeneratorService.HandlePieceExchangeAsync(session, packet);
                 break;
             default:
@@ -135,7 +147,7 @@ public class ItemUpgradeService(
     {
         var requestBytes = packet.RemainingBytes;
 
-        if (session.Trade.IsTrading || session.Trade.IsMerchanting || session.Hp <= 0)
+        if (ItemTransfer.IsInventoryLocked(session) || session.Hp <= 0)
         {
             logger.LogWarning(
                 "Upgrade rejected for {Name}: trading={IsTrading} merchanting={IsMerchanting} hp={Hp}",
@@ -148,6 +160,13 @@ public class ItemUpgradeService(
         {
             logger.LogWarning("Upgrade parse failed for {Name}: bytes={Bytes}", session.Name, requestBytes);
             await SendUpgradeResultAsync(session, responseSubOpcode, UpgradeTypeNormal, UpgradeNoMatch, [], []);
+            return;
+        }
+
+        if (NamesASlotTwice(itemIds, positions))
+        {
+            violationMonitor.Report(session, ViolationKind.InvalidRequest, "named the same bag slot twice in an upgrade");
+            await SendUpgradeResultAsync(session, responseSubOpcode, upgradeType, UpgradeNoMatch, itemIds, positions);
             return;
         }
 
@@ -361,44 +380,56 @@ public class ItemUpgradeService(
             return;
         }
 
-        var roll = Random.Shared.Next(0, MaxGenRate);
-        var rollOutcome = globalAnvilRateService.ResolveRoll(genRate, roll);
-        var upgradeResult = rollOutcome.Succeeded ? UpgradeSucceeded : UpgradeFailed;
-
-        logger.LogInformation(
-            "Upgrade roll {Outcome} for {Name}: recipe={RecipeIndex} originItem={OriginItemId} targetItem={UpgradedItemId} baseGenRate={BaseGenRate} effectiveGenRate={EffectiveGenRate} modifierBeforePercent={ModifierBeforePercent} modifierAfterPercent={ModifierAfterPercent} roll={Roll}",
-            rollOutcome.Succeeded ? "succeeded" : "failed", session.Name, recipe.Index, originItemId, upgradedItemId,
-            rollOutcome.BaseGenRate, rollOutcome.EffectiveGenRate, rollOutcome.ModifierBeforePercent,
-            rollOutcome.ModifierAfterPercent, roll);
-
-        if (rollOutcome.Succeeded)
+        var applied = session.WithLock(s =>
         {
-            originItem.ItemId = upgradedItemId;
-            originItem.Durability = upgradedItemData.Duration;
-            itemIds[0] = upgradedItemId;
-        }
-        else if (hasLogos)
-        {
-            var downgradedItemId = originItemId - 1;
-            if (grade > 1 && Random.Shared.Next(0, LogosDowngradeBound) < roll && gameDataService.GetItem(downgradedItemId) != null)
+            if (!StillHoldsEveryListedItem(s, itemIds, positions) || s.Money < requiredNoah)
+                return (Applied: false, Result: UpgradeFailed);
+
+            var roll = Random.Shared.Next(0, MaxGenRate);
+            var rollOutcome = globalAnvilRateService.ResolveRoll(genRate, roll);
+
+            logger.LogInformation(
+                "Upgrade roll {Outcome} for {Name}: recipe={RecipeIndex} originItem={OriginItemId} targetItem={UpgradedItemId} baseGenRate={BaseGenRate} effectiveGenRate={EffectiveGenRate} modifierBeforePercent={ModifierBeforePercent} modifierAfterPercent={ModifierAfterPercent} roll={Roll}",
+                rollOutcome.Succeeded ? "succeeded" : "failed", s.Name, recipe.Index, originItemId, upgradedItemId,
+                rollOutcome.BaseGenRate, rollOutcome.EffectiveGenRate, rollOutcome.ModifierBeforePercent,
+                rollOutcome.ModifierAfterPercent, roll);
+
+            if (rollOutcome.Succeeded)
             {
-                originItem.ItemId = downgradedItemId;
-                itemIds[0] = downgradedItemId;
+                originItem.ItemId = upgradedItemId;
+                originItem.Durability = upgradedItemData.Duration;
+                itemIds[0] = upgradedItemId;
             }
-        }
-        else
+            else if (hasLogos)
+            {
+                var downgradedItemId = originItemId - 1;
+                if (grade > 1 && Random.Shared.Next(0, LogosDowngradeBound) < roll && gameDataService.GetItem(downgradedItemId) != null)
+                {
+                    originItem.ItemId = downgradedItemId;
+                    itemIds[0] = downgradedItemId;
+                }
+            }
+            else
+            {
+                originItem.Clear();
+                itemIds[0] = 0;
+            }
+
+            s.Money -= requiredNoah;
+            ConsumeMaterials(s, itemIds, positions);
+            return (Applied: true, Result: rollOutcome.Succeeded ? UpgradeSucceeded : UpgradeFailed);
+        });
+
+        if (!applied.Applied)
         {
-            originItem.Clear();
-            itemIds[0] = 0;
+            logger.LogWarning("Upgrade rejected for {Name}: the bag changed before the roll", session.Name);
+            await SendUpgradeResultAsync(session, responseSubOpcode, upgradeType, UpgradeNoMatch, itemIds, positions);
+            return;
         }
 
+        var upgradeResult = applied.Result;
         if (requiredNoah > 0)
-        {
-            session.Money -= requiredNoah;
             await userNotificationService.SendGoldLossAsync(session, requiredNoah);
-        }
-
-        ConsumeMaterials(session, itemIds, positions);
 
         logger.LogInformation(
             "Upgrade completed for {Name}: sub={Sub} result={Result} anvil={AnvilId} originItem={OriginItemId} finalItem={FinalItemId} moneyAfter={MoneyAfter}",
@@ -425,23 +456,41 @@ public class ItemUpgradeService(
 
     private static void ConsumeMaterials(UserSession session, int[] itemIds, sbyte[] positions)
     {
-        var consumed = 0;
-        for (var index = 1; index < UpgradeSlotCount && consumed < UpgradeMaterialMax; index++)
+        for (var index = 1; index < UpgradeSlotCount; index++)
         {
-            if (positions[index] < 0 || itemIds[index] == 0)
-                continue;
-
-            var material = session.Inventory[InventoryConstants.InventoryStart + positions[index]];
-            if (material.IsEmpty || material.ItemId != itemIds[index])
-                continue;
-
-            if (material.Count > 1)
-                material.Count--;
-            else
-                material.Clear();
-
-            consumed++;
+            if (IsListed(itemIds, positions, index))
+                ItemTransfer.Take(session.Inventory[InventoryConstants.InventoryStart + positions[index]], MaterialConsumed);
         }
+    }
+
+    private static bool IsListed(int[] itemIds, sbyte[] positions, int index) =>
+        positions[index] >= 0 && itemIds[index] != 0;
+
+    private static bool NamesASlotTwice(int[] itemIds, sbyte[] positions)
+    {
+        var named = new HashSet<sbyte>();
+        for (var index = 0; index < UpgradeSlotCount; index++)
+        {
+            if (IsListed(itemIds, positions, index) && !named.Add(positions[index]))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool StillHoldsEveryListedItem(UserSession session, int[] itemIds, sbyte[] positions)
+    {
+        for (var index = 0; index < UpgradeSlotCount; index++)
+        {
+            if (!IsListed(itemIds, positions, index))
+                continue;
+
+            var slot = session.Inventory[InventoryConstants.InventoryStart + positions[index]];
+            if (slot.IsEmpty || slot.ItemId != itemIds[index] || slot.Count == 0 || !slot.IsTradable)
+                return false;
+        }
+
+        return true;
     }
 
     private static int CountMaterial(int[] itemIds, sbyte[] positions, int itemId)
@@ -585,41 +634,55 @@ public class ItemUpgradeService(
     {
         var rule = SealRules.GetValueOrDefault(sealType);
         if (rule == null
-            || session.Trade.IsTrading
-            || session.Trade.IsMerchanting
+            || ItemTransfer.IsInventoryLocked(session)
             || srcPos >= InventoryConstants.HaveMax)
             return ItemSealResult.Failed;
 
-        var slot = session.Inventory[InventoryConstants.InventoryStart + srcPos];
-        if (slot.IsEmpty || slot.ItemId != itemId || !rule.IsApplicable(slot.State))
+        var bindingCost = gameDataService.GetItem(itemId)?.Bound ?? 0;
+        if (rule.NeedsBindingCost && bindingCost <= 0)
             return ItemSealResult.Failed;
 
-        if (rule.NeedsCode)
+        var stones = rule.ChargesStones ? bindingCost : 0;
+        var outcome = session.WithLock(s =>
         {
-            if (session.SealCode.Length != SealCodeLength)
-                return ItemSealResult.NoCodeSet;
+            var slot = s.Inventory[InventoryConstants.InventoryStart + srcPos];
+            if (slot.IsEmpty || slot.ItemId != itemId || !rule.IsApplicable(slot))
+                return (Result: ItemSealResult.Failed, Spent: new List<int>());
 
-            if (code != session.SealCode)
-                return ItemSealResult.WrongCode;
-        }
+            if (rule.NeedsCode)
+            {
+                if (s.SealCode.Length != SealCodeLength)
+                    return (Result: ItemSealResult.NoCodeSet, Spent: new List<int>());
 
-        if (session.Money < rule.Price)
-            return ItemSealResult.NeedCoins;
+                if (code != s.SealCode)
+                    return (Result: ItemSealResult.WrongCode, Spent: new List<int>());
+            }
 
-        var stones = rule.ChargesStones ? gameDataService.GetItem(itemId)?.Bound ?? 0 : 0;
-        if (stones > 0 && CountSealStones(session) < stones)
-            return ItemSealResult.MissingMaterial;
+            if (s.Money < rule.Price)
+                return (Result: ItemSealResult.NeedCoins, Spent: new List<int>());
+
+            if (stones > 0 && CountSealStones(s) < stones)
+                return (Result: ItemSealResult.MissingMaterial, Spent: new List<int>());
+
+            s.Money -= rule.Price;
+            var spent = SpendSealStones(s, stones);
+            slot.Flag = (byte)rule.AppliedFlag;
+            return (Result: ItemSealResult.Succeeded, Spent: spent);
+        });
+
+        if (outcome.Result != ItemSealResult.Succeeded)
+            return outcome.Result;
 
         if (rule.Price > 0)
-        {
-            session.Money -= rule.Price;
             await userNotificationService.SendGoldLossAsync(session, rule.Price);
+
+        foreach (var index in outcome.Spent)
+        {
+            var slot = session.Inventory[index];
+            await userNotificationService.SendStackChangeAsync(
+                session, (byte)index, slot.ItemId, slot.Count, slot.Durability);
         }
 
-        if (stones > 0)
-            await SpendSealStonesAsync(session, stones);
-
-        slot.Flag = (byte)rule.AppliedFlag;
         return ItemSealResult.Succeeded;
     }
 
@@ -636,8 +699,9 @@ public class ItemUpgradeService(
         return count;
     }
 
-    private async Task SpendSealStonesAsync(UserSession session, int count)
+    private static List<int> SpendSealStones(UserSession session, int count)
     {
+        var spent = new List<int>();
         var remaining = count;
         for (var index = 0; index < InventoryConstants.HaveMax && remaining > 0; index++)
         {
@@ -647,15 +711,12 @@ public class ItemUpgradeService(
                 continue;
 
             var taken = Math.Min((int)slot.Count, remaining);
-            slot.Count -= (ushort)taken;
+            ItemTransfer.Take(slot, (ushort)taken);
             remaining -= taken;
-
-            if (slot.Count == 0)
-                slot.Clear();
-
-            await userNotificationService.SendStackChangeAsync(
-                session, (byte)absolute, slot.ItemId, slot.Count, slot.Durability);
+            spent.Add(absolute);
         }
+
+        return spent;
     }
 
     private static string DescribeUpgradeType(byte upgradeType) => upgradeType switch

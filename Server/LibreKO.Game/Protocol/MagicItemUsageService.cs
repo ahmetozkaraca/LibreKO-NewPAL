@@ -21,8 +21,9 @@ public interface IMagicItemUsageService
     bool CanUseSkillItems(UserSession session, MagicData magic, int count = 1);
     ItemUsability CheckItem(UserSession session, int itemId, int count = 1);
     bool HasArrows(UserSession session, int count = 1);
+    IReadOnlyList<int> TakeItem(UserSession session, int itemId, int count);
+    Task SendItemChangesAsync(UserSession session, IReadOnlyList<int> slots);
     Task<bool> TryConsumeItemAsync(UserSession session, int itemId, int count = 1);
-    Task<bool> TryConsumeSkillItemAsync(UserSession session, MagicData magic, int count = 1);
     Task<bool> TryConsumeArrowAsync(UserSession session, int count = 1);
 }
 
@@ -71,25 +72,18 @@ public class MagicItemUsageService(
             : ItemUsability.NotCarryingEnough;
     }
 
-    public Task<bool> TryConsumeSkillItemAsync(UserSession session, MagicData magic, int count = 1) =>
-        magic.UseItem == 0 ? Task.FromResult(true)
-        : !CanUseSkillItems(session, magic, count) ? Task.FromResult(false)
-        : TryConsumeItemAsync(session, magic.ConsumedItem, count);
-
-    public async Task<bool> TryConsumeItemAsync(UserSession session, int itemId, int count = 1)
+    public IReadOnlyList<int> TakeItem(UserSession session, int itemId, int count)
     {
-        if (!CanUseItem(session, itemId, count))
-            return false;
-
-        if (SpellRequirementItems.Contains(itemId))
-            return true;
+        if (count <= 0 || SpellRequirementItems.Contains(itemId))
+            return [];
 
         var itemData = gameDataService.GetItem(itemId);
         if (itemData == null)
-            return false;
+            return [];
 
         var spendsDurability = itemData.Category == ItemKind.PowerUpStore;
         var remaining = count;
+        var changed = new List<int>();
         for (var index = InventoryConstants.InventoryStart; index < session.Inventory.Length && remaining > 0; index++)
         {
             var slot = session.Inventory[index];
@@ -116,6 +110,21 @@ public class MagicItemUsageService(
                     slot.Clear();
             }
 
+            changed.Add(index);
+        }
+
+        RecalculateWeight(session, changed);
+        return changed;
+    }
+
+    public async Task SendItemChangesAsync(UserSession session, IReadOnlyList<int> slots)
+    {
+        if (slots.Count == 0)
+            return;
+
+        foreach (var index in slots)
+        {
+            var slot = session.Inventory[index];
             await userNotificationService.SendStackChangeAsync(
                 session,
                 (byte)index,
@@ -124,14 +133,16 @@ public class MagicItemUsageService(
                 slot.Durability);
         }
 
-        if (remaining > 0)
+        await userNotificationService.SendWeightChangeAsync(session);
+    }
+
+    public async Task<bool> TryConsumeItemAsync(UserSession session, int itemId, int count = 1)
+    {
+        var taken = session.WithLock(s => CanUseItem(s, itemId, count) ? TakeItem(s, itemId, count) : null);
+        if (taken == null)
             return false;
 
-        var coefficient = gameDataService.GetCoefficient(session.Class);
-        if (coefficient != null)
-            session.RecalculateStats(coefficient, gameDataService);
-
-        await userNotificationService.SendWeightChangeAsync(session);
+        await SendItemChangesAsync(session, taken);
         return true;
     }
 
@@ -159,10 +170,18 @@ public class MagicItemUsageService(
 
     public async Task<bool> TryConsumeArrowAsync(UserSession session, int count = 1)
     {
-        if (!HasArrows(session, count))
+        var taken = session.WithLock(s => HasArrows(s, count) ? TakeArrows(s, count) : null);
+        if (taken == null)
             return false;
 
+        await SendItemChangesAsync(session, taken);
+        return true;
+    }
+
+    private IReadOnlyList<int> TakeArrows(UserSession session, int count)
+    {
         var remaining = count;
+        var changed = new List<int>();
         for (var index = InventoryConstants.InventoryStart; index < session.Inventory.Length && remaining > 0; index++)
         {
             var slot = session.Inventory[index];
@@ -180,23 +199,21 @@ public class MagicItemUsageService(
             if (slot.Count == 0)
                 slot.Clear();
 
-            await userNotificationService.SendStackChangeAsync(
-                session,
-                (byte)index,
-                slot.ItemId,
-                slot.Count,
-                slot.Durability);
+            changed.Add(index);
         }
 
-        if (remaining > 0)
-            return false;
+        RecalculateWeight(session, changed);
+        return changed;
+    }
+
+    private void RecalculateWeight(UserSession session, List<int> changed)
+    {
+        if (changed.Count == 0)
+            return;
 
         var coefficient = gameDataService.GetCoefficient(session.Class);
         if (coefficient != null)
             session.RecalculateStats(coefficient, gameDataService);
-
-        await userNotificationService.SendWeightChangeAsync(session);
-        return true;
     }
 
     private static int CountItem(UserSession session, int itemId, bool useDurability)

@@ -1,3 +1,5 @@
+﻿using LibreKO.Common.Domain.Entities;
+using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
@@ -50,7 +52,8 @@ public class KnightsCapePacketCoordinator(
             || session.KnightsId == 0
             || session.Trade.IsTrading
             || session.Trade.IsMerchanting
-            || session.IsGathering)
+            || session.IsGathering
+            || !NpcDialogContext.IsTalkingTo(sessionManager, session, NpcData.TypeClanCape))
         {
             await SendFailAsync(client, CapeResult.NotAllowed);
             return;
@@ -129,6 +132,12 @@ public class KnightsCapePacketCoordinator(
         }
 
         bool applyingPaint = r != 0 || g != 0 || b != 0;
+        if (capeId < 0 && !applyingPaint)
+        {
+            await SendFailAsync(client, CapeResult.NotAllowed);
+            return;
+        }
+
         if (applyingPaint)
         {
             if (clan.Grade > 3)
@@ -145,32 +154,35 @@ public class KnightsCapePacketCoordinator(
             return;
         }
 
-        if (opcode == OpcodeNormalPurchase && reqClanPoints > 0 && clan.ClanPointFund < reqClanPoints)
+        if (!sessionManager.Knights.WithClan(clan.Id, knights => TrySpendClanPoints(knights, reqClanPoints), false))
         {
             await SendFailAsync(client, CapeResult.NotEnoughClanPoints);
             return;
         }
 
-        // ── Apply changes ─────────────────────────────────────────────────
-        if (opcode == OpcodeTicketPurchase && capeId >= 0)
+        var paid = opcode == OpcodeTicketPurchase
+            ? capeId < 0 || session.WithLock(ConsumeOneTicket)
+            : session.WithLock(chief => TryPayCoins(chief, reqCoins));
+        if (!paid)
         {
-            if (!ConsumeOneTicket(session))
-                return;
+            sessionManager.Knights.WithClan(clan.Id, knights => RefundClanPoints(knights, reqClanPoints), false);
+            await SendFailAsync(client, opcode == OpcodeTicketPurchase
+                ? CapeResult.MissingPurchaseItem
+                : CapeResult.NotEnoughCoins);
+            return;
         }
 
-        if (opcode == OpcodeNormalPurchase)
+        sessionManager.Knights.WithClan(clan.Id, knights =>
         {
-            session.Money -= reqCoins;
-            clan.ClanPointFund -= reqClanPoints;
-        }
-
-        if (capeId >= 0) clan.Cape = capeId;
-        if (applyingPaint)
-        {
-            clan.CapeR = r;
-            clan.CapeG = g;
-            clan.CapeB = b;
-        }
+            if (capeId >= 0) knights.Cape = capeId;
+            if (applyingPaint)
+            {
+                knights.CapeR = r;
+                knights.CapeG = g;
+                knights.CapeB = b;
+            }
+            return true;
+        }, false);
 
         // Persist clan changes.
         using (var scope = serviceProvider.CreateScope())
@@ -207,6 +219,30 @@ public class KnightsCapePacketCoordinator(
             if (slot.ItemId == itemId && slot.Count > 0) return true;
         }
         return false;
+    }
+
+    private static bool TrySpendClanPoints(KnightsEntity clan, int points)
+    {
+        if (clan.ClanPointFund < points)
+            return false;
+
+        clan.ClanPointFund -= points;
+        return true;
+    }
+
+    private static bool RefundClanPoints(KnightsEntity clan, int points)
+    {
+        clan.ClanPointFund += points;
+        return true;
+    }
+
+    private static bool TryPayCoins(UserSession chief, int coins)
+    {
+        if (chief.Money < coins)
+            return false;
+
+        chief.Money -= coins;
+        return true;
     }
 
     private static bool ConsumeOneTicket(UserSession session)

@@ -5,6 +5,7 @@ using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Common.Infrastructure.Persistence;
 using LibreKO.Game.World;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -14,6 +15,7 @@ public interface IKingSystemRuntimeService
 {
     KingSystemData? GetKingData(AccountNation nation);
     bool IsKing(UserSession session, KingSystemData? kingData);
+    Task<bool> DismissUnknownKingAsync(KingSystemData kingData);
     Task PersistKingPropertyAsync<TProperty>(
         KingSystemData kingData,
         Expression<Func<KingSystemData, TProperty>> propertySelector);
@@ -33,8 +35,35 @@ public class KingSystemRuntimeService(
 
     public bool IsKing(UserSession session, KingSystemData? kingData)
     {
+        var kingName = kingData?.KingName?.Trim();
         return kingData != null
-            && string.Equals(kingData.KingName?.Trim(), session.Name, StringComparison.OrdinalIgnoreCase);
+            && kingData.Nation == (byte)session.Nation
+            && !string.IsNullOrEmpty(kingName)
+            && string.Equals(kingName, session.Name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async Task<bool> DismissUnknownKingAsync(KingSystemData kingData)
+    {
+        var kingName = kingData.KingName?.Trim();
+        if (string.IsNullOrEmpty(kingName))
+            return false;
+
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var nation = (AccountNation)kingData.Nation;
+        var kingExists = await db.Characters
+            .Where(character => character.Name == kingName)
+            .Join(db.Accounts, character => character.AccountId, account => account.Id, (_, account) => account.Nation)
+            .AnyAsync(accountNation => accountNation == nation);
+        if (kingExists)
+            return false;
+
+        logger.LogWarning(
+            "Nation {Nation} names {KingName} as its king, but no character of that nation carries the name; the throne is left empty",
+            kingData.Nation, kingName);
+        kingData.KingName = string.Empty;
+        await PersistKingPropertyAsync(kingData, entry => entry.KingName);
+        return true;
     }
 
     public async Task PersistKingPropertyAsync<TProperty>(

@@ -396,7 +396,7 @@ public sealed class Binder
             new ArgumentSet(new Dictionary<string, long> { ["quest"] = _defaultQuest, ["status"] = 1 }));
         var zone = BindingRequirement();
         Add(QuestProgram.AcceptEvent,
-            [.. Guard([start, .. BindGrantedItems()], Both(Both(StatusIn(0, 4), eligibility), zone), span), sync]);
+            [.. Guard([start, .. BindGrantedItems().SelectMany(GrantUnlessHeld)], Both(Both(StatusIn(0, 4), eligibility), zone), span), sync]);
         var claim = new BoundStatement.Action(span, QuestActionKind.ClaimQuest,
             new ArgumentSet(new Dictionary<string, long> { ["quest"] = _defaultQuest }));
         Add(QuestProgram.FulfilEvent, [.. Guard([claim], zone, span), sync]);
@@ -835,6 +835,17 @@ public sealed class Binder
     private IReadOnlyList<BoundStatement.Action> BindGrantedItems() =>
         BindQuestItems(block => block.Grants?.Select(g => (g.Span, g.Count, g.CountSpan, (Token?)g.Item)),
             QuestActionKind.GiveItem, "Give");
+
+    private static IReadOnlyList<BoundStatement> GrantUnlessHeld(BoundStatement.Action grant)
+    {
+        if (grant.Kind != QuestActionKind.GiveItem)
+            return [grant];
+
+        var noneHeld = new BoundCondition.Predicate(QuestConditionKind.ItemCount, CompareOperator.Equal,
+            new ArgumentSet(new Dictionary<string, long> { ["item"] = grant.Arguments.Get("item"), ["count"] = 0 }),
+            grant.Span);
+        return Guard([grant], noneHeld, grant.Span);
+    }
 
     private IReadOnlyList<BoundStatement.Action> BindCollectedItems() =>
         BindQuestItems(block => block.Collects?.Select(c => (c.Span, c.Count, c.CountSpan, c.Item)),

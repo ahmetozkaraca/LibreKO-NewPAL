@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Domain.Entities.GameData;
 
 using LibreKO.Common.Enums;
@@ -32,6 +32,42 @@ public class NpcInstance
     {
         using var scope = _sync.EnterScope();
         return reader(this);
+    }
+
+    public DamageOutcome ApplyDamage(int amount)
+    {
+        using var scope = _sync.EnterScope();
+        if (Hp <= 0 || DeathTimeTicks > 0 || amount <= 0)
+            return DamageOutcome.None;
+
+        var dealt = Math.Min(amount, Hp);
+        Hp -= dealt;
+        return new DamageOutcome(dealt, Hp <= 0);
+    }
+
+    public int Heal(int amount)
+    {
+        using var scope = _sync.EnterScope();
+        if (Hp <= 0 || DeathTimeTicks > 0 || amount <= 0)
+            return 0;
+
+        var healed = Math.Min(amount, MaxHp - Hp);
+        if (healed <= 0)
+            return 0;
+
+        Hp += healed;
+        return healed;
+    }
+
+    public bool TryBeginDeath(long nowTicks)
+    {
+        using var scope = _sync.EnterScope();
+        if (DeathTimeTicks > 0)
+            return false;
+
+        DeathTimeTicks = Math.Max(1, nowTicks);
+        State = NpcState.Dead;
+        return true;
     }
 
     public int UniqueId { get; set; }

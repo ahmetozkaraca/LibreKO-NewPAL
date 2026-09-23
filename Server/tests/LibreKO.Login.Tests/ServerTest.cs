@@ -10,6 +10,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Net;
 using System.Net.Sockets;
 
@@ -27,7 +28,7 @@ public abstract class ServerTest : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _serverTask;
 
-    protected ServerTest(int? port = null)
+    protected ServerTest(int? port = null, IReadOnlyDictionary<string, string?>? settingOverrides = null)
     {
         var bindPort = port ?? GetFreeTcpPort();
         Settings = new LoginServerSettings
@@ -40,14 +41,18 @@ public abstract class ServerTest : IDisposable
             }
         };
 
+        var settingValues = new Dictionary<string, string?>
+        {
+            [$"{LoginServerSettings.SectionName}:BindHost"] = Settings.BindHost,
+            [$"{LoginServerSettings.SectionName}:BindPort"] = Settings.BindPort.ToString(),
+            [$"{LoginServerSettings.SectionName}:Version"] = Settings.Version.ToString(),
+            [$"{LoginServerSettings.SectionName}:Account:AutoCreate"] = Settings.Account.AutoCreate.ToString(),
+        };
+        foreach (var (key, value) in settingOverrides ?? new Dictionary<string, string?>())
+            settingValues[$"{LoginServerSettings.SectionName}:{key}"] = value;
+
         var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                [$"{LoginServerSettings.SectionName}:BindHost"] = Settings.BindHost,
-                [$"{LoginServerSettings.SectionName}:BindPort"] = Settings.BindPort.ToString(),
-                [$"{LoginServerSettings.SectionName}:Version"] = Settings.Version.ToString(),
-                [$"{LoginServerSettings.SectionName}:Account:AutoCreate"] = Settings.Account.AutoCreate.ToString(),
-            })
+            .AddInMemoryCollection(settingValues)
             .Build();
 
         host = Host.CreateDefaultBuilder()
@@ -68,16 +73,22 @@ public abstract class ServerTest : IDisposable
                     .UseInMemoryDatabase(_dbName, _dbRoot)
                     .ConfigureWarnings(warnings => warnings.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning)));
                 services.AddMemoryCache();
+                services.AddSingleton(TimeProvider.System);
 
 
                 services.AddScoped<IAccountRepository, AccountRepository>();
                 services.AddScoped<ILoginService, LoginService>();
+                services.AddSingleton(sp => new LoginAttemptLimiter(
+                    sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections,
+                    sp.GetRequiredService<TimeProvider>()));
+                services.AddSingleton<AccountCreationThrottle>();
 
                 services.AddSingleton<IServerRepository, ServerRepository>();
                 services.AddSingleton<IKingRepository, KingRepository>();
                 services.AddSingleton<IPatchRepository, PatchRepository>();
                 services.AddSingleton<IClientFactory>(sp =>
-                    new ClientFactory(ServerType.Login, sp.GetRequiredService<ILogger<Client>>()));
+                    new ClientFactory(ServerType.Login, sp.GetRequiredService<ILogger<Client>>(),
+                        sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections));
                 services.AddSingleton<IPacketHandler, LoginPacketHandler>();
 
                 ConfigureServices(ctx, services);

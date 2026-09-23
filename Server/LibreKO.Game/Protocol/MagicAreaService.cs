@@ -12,7 +12,8 @@ public class MagicAreaService(
     IGameDataService gameDataService,
     ICombatLifecycleService combatLifecycleService)
 {
-    public async Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data)
+    public async Task ExecuteAsync(
+        UserSession caster, MagicData magic, int skillId, int targetId, int[] data, MagicCharge charge)
     {
         if (!MagicTypeLookup.TryResolve(gameDataService.MagicType7Table, magic, skillId, out var type7Data))
         {
@@ -21,7 +22,8 @@ public class MagicAreaService(
         }
 
         var targetChange = (MagicAreaTargetChange)type7Data.TargetChange;
-        if (targetChange is not (MagicAreaTargetChange.Provoke or MagicAreaTargetChange.Sleep))
+        if (targetChange is not (MagicAreaTargetChange.Provoke or MagicAreaTargetChange.Sleep)
+            || !await charge.TryPayAsync())
         {
             await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
             return;
@@ -40,11 +42,14 @@ public class MagicAreaService(
             if (type7Data.Damage == 0)
                 continue;
 
-            var damage = GmMode.Dealt(caster, npc.Hp, type7Data.Damage);
-            npc.Hp = Math.Max(0, npc.Hp - damage);
-            npc.RecordDamage(caster.CharacterId, damage, caster, id => sessionManager.GetByCharacterId(id));
-            await combatLifecycleService.SendNpcTargetHpAsync(caster, npc, damage);
-            if (npc.Hp <= 0)
+            var outcome = npc.ApplyDamage(GmMode.Dealt(caster, npc.Hp, type7Data.Damage));
+            if (outcome.Dealt > 0)
+            {
+                npc.RecordDamage(caster.CharacterId, outcome.Dealt, caster, id => sessionManager.GetByCharacterId(id));
+                await combatLifecycleService.SendNpcTargetHpAsync(caster, npc, outcome.Dealt);
+            }
+
+            if (outcome.Killed)
                 await combatLifecycleService.HandleNpcDeathAsync(npc, caster);
         }
 
@@ -96,11 +101,20 @@ public class MagicAreaService(
             return;
 
         var now = DateTime.UtcNow.Ticks;
-        npc.State = NpcState.Sleeping;
-        npc.TargetUserId = 0;
-        npc.IsMoving = false;
-        npc.WakeTicks = now + duration * TimeSpan.TicksPerSecond;
-        npc.StateChangeTicks = now;
+        var asleep = npc.WithLock(target =>
+        {
+            if (!target.IsAlive)
+                return false;
+
+            target.State = NpcState.Sleeping;
+            target.TargetUserId = 0;
+            target.IsMoving = false;
+            target.WakeTicks = now + duration * TimeSpan.TicksPerSecond;
+            target.StateChangeTicks = now;
+            return true;
+        });
+        if (!asleep)
+            return;
 
         await sessionManager.Regions.BroadcastFromNpc(
             npc,

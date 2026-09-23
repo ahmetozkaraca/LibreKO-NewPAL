@@ -104,7 +104,7 @@ public class QuestSummonTests
             .BuildServiceProvider();
 
         await new ScriptEffectApplier(gameData, Substitute.For<ICharacterStatePersister>(), provider,
-                Substitute.For<ILogger<ScriptEffectApplier>>())
+                TimeProvider.System, Substitute.For<ILogger<ScriptEffectApplier>>())
             .ApplyAsync(session, context, "25022_21.quest");
 
         var guard = sessions.Regions.GetNearbyNpcs(session).Should().ContainSingle(n => n.NpcId == GuardOfBlackMarketer).Subject;

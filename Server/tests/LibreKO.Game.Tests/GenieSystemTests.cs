@@ -181,12 +181,15 @@ public class GenieSystemTests
         client.Id.Returns(Guid.NewGuid());
         var sessionManager = new SessionManager();
         var session = sessionManager.CreateSession(client, characterId: 1, accountId: 1);
+        var packetGuard = Substitute.For<IPacketGuard>();
+        packetGuard.Admit(Arg.Any<IClient>(), Arg.Any<GameOpcodes>()).Returns(true);
         var coordinator = new GenieSystemPacketCoordinator(
             sessionManager,
             Substitute.For<IMagicItemUsageService>(),
             combat ?? Substitute.For<ICombatPacketCoordinator>(),
             magic ?? Substitute.For<IMagicPacketCoordinator>(),
             world ?? Substitute.For<IWorldPacketCoordinator>(),
+            packetGuard,
             Substitute.For<ILogger<GenieSystemPacketCoordinator>>());
         return (coordinator, session, client);
     }

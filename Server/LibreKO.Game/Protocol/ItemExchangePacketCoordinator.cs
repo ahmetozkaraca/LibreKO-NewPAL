@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -27,9 +27,8 @@ public class ItemExchangePacketCoordinator(
         (6, "Animal Hides -> Cured Leather",700006000, 8, 700006100),
     };
 
-    // charId -> number of successful exchanges (in-memory; resets on server restart). Kept for parity with
-    // the per-character static state convention; could later gate daily exchange limits.
-    private static readonly Dictionary<int, int> exchangeCount = new();
+    private readonly ConcurrentDictionary<int, int> exchangeCount = new();
+    private const int OneExchange = 1;
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
@@ -75,13 +74,10 @@ public class ItemExchangePacketCoordinator(
         // NOTE: input-item consumption + reward granting are stubbed (legacy inventory path not wired here).
         // The server confirms the exchange and tells the client which reward item it gets so it can apply it
         // optimistically, consistent with the existing vendor/loot flows.
-        exchangeCount[session.CharacterId] = GetExchangeCount(session.CharacterId) + 1;
+        exchangeCount.AddOrUpdate(session.CharacterId, OneExchange, (_, count) => count + OneExchange);
         logger.LogDebug("{Name} exchanged recipe {Recipe} -> item {Out}", session.Name, recipeId, entry.OutputItemId);
 
         await session.Client.SendPacket(ItemExchangePacketWriter.Result(
             ItemExchangeSubOpcode.Exchange, ItemExchangePacketWriter.Succeeded, entry.OutputItemId));
     }
-
-    private static int GetExchangeCount(int charId)
-        => exchangeCount.TryGetValue(charId, out var n) ? n : 0;
 }

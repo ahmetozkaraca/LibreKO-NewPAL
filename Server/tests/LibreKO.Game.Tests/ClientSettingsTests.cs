@@ -1,10 +1,11 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
 using LibreKO.Game.World;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 
@@ -28,6 +29,22 @@ public class ClientSettingsTests : GameTestBase
         reply.ReadByte().Should().Be(SubSetLanguage);
         reply.ReadByte().Should().Be(1);
         reply.ReadByte().Should().Be((byte)GameLanguage.Spanish);
+    }
+
+    [Fact]
+    public async Task SetLanguage_NeverTriggersAFullCharacterSave()
+    {
+        var persister = Substitute.For<ICharacterStatePersister>();
+        using var provider = CreateProvider(_ => { }, configureServices: services => services.AddSingleton(persister));
+        var client = Substitute.For<IClient>();
+        client.Id.Returns(Guid.NewGuid());
+        provider.GetRequiredService<SessionManager>().CreateSession(client, characterId: 2, accountId: 2);
+        var coordinator = provider.GetRequiredService<IClientSettingsPacketCoordinator>();
+
+        foreach (var language in new[] { GameLanguage.Spanish, GameLanguage.English, GameLanguage.Spanish })
+            await coordinator.HandleAsync(client, Request(SubSetLanguage, (byte)language));
+
+        await persister.DidNotReceiveWithAnyArgs().SaveAsync(default!, default);
     }
 
     [Fact]
@@ -101,7 +118,6 @@ public class ClientSettingsTests : GameTestBase
 
         var coordinator = new ClientSettingsPacketCoordinator(
             sessionManager,
-            Substitute.For<ICharacterStatePersister>(),
             Substitute.For<ILogger<ClientSettingsPacketCoordinator>>());
 
         return (coordinator, session, client, sent);

@@ -52,6 +52,11 @@ public interface IGameDataService
     IReadOnlyDictionary<int, LotteryEventData> LotteryEventTable { get; }
     ILookup<int, LotteryRewardData> LotteryRewardsByEvent { get; }
     ILookup<int, LotteryScheduleData> LotterySchedulesByEvent { get; }
+    IReadOnlyDictionary<int, RewardQuestData> RewardQuestTable { get; }
+    ILookup<int, RewardQuestTargetData> RewardQuestTargetsByNpc { get; }
+    ILookup<int, RewardQuestItemData> RewardQuestItemsByQuest { get; }
+    ILookup<int, RewardQuestRewardData> RewardQuestRewardsByQuest { get; }
+    ILookup<PrizePool, RewardPrizeData> RewardPrizesByPool { get; }
     SiegeWarfareData? SiegeWarfare { get; }
     bool IsLoaded { get; }
 
@@ -76,6 +81,7 @@ public interface IGameDataService
     NpcItemData? GetNpcItem(short index, bool isMonster);
     IEnumerable<ItemOpData> GetItemOps(int itemId);
     string? GetServerResource(int resourceId);
+    SellingGroupItemData? GetSellingGroupItem(int sellingGroup, byte line, byte index);
 
     int GetPremiumProperty(byte premiumType, PremiumPropertyType property);
 }

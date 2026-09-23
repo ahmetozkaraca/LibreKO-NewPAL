@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 
@@ -44,14 +44,16 @@ public class KnightsManager
         });
     }
 
-    public byte[] SerializeClanWarehouse(int clanId)
-    {
-        if (!_clanWarehouseCache.TryGetValue(clanId, out var slots))
-            return [];
-        return UserSessionBinaryState.SerializeWarehouse(slots);
-    }
-
     private readonly ConcurrentDictionary<int, Lock> _clanWarehouseLocks = new();
+    private readonly ConcurrentDictionary<int, Lock> _clanLocks = new();
+
+    public T WithClan<T>(int clanId, Func<KnightsEntity, T> mutator, T fallback)
+    {
+        var lockObj = _clanLocks.GetOrAdd(clanId, _ => new Lock());
+        using var scope = lockObj.EnterScope();
+        return _clans.TryGetValue(clanId, out var clan) ? mutator(clan) : fallback;
+    }
+    private readonly ConcurrentDictionary<int, SemaphoreSlim> _clanWarehouseGates = new();
 
     public T WithClanWarehouse<T>(int clanId, Func<KnightsEntity, ItemSlot[], T> mutator, T fallback)
     {
@@ -63,6 +65,20 @@ public class KnightsManager
         if (slots == null)
             return fallback;
         return mutator(clan, slots);
+    }
+
+    public async Task<T> WithClanWarehouseGateAsync<T>(int clanId, Func<Task<T>> operation)
+    {
+        var gate = _clanWarehouseGates.GetOrAdd(clanId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            return await operation();
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     // Alliance tracking: maps clanId → alliance.

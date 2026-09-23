@@ -34,6 +34,7 @@ public class MiscPacketCoordinator(
     SessionManager sessionManager,
     IWorldPacketCoordinator worldPacketCoordinator,
     IKnightsRuntimeService knightsRuntimeService,
+    TimeProvider timeProvider,
     ILogger<MiscPacketCoordinator> logger) : IMiscPacketCoordinator
 {
     private const byte RentalNpc = 3;
@@ -59,11 +60,17 @@ public class MiscPacketCoordinator(
 
     private byte santaOrAngelState;
 
-    // In-memory trade-ad board (GS_MARKET_BBS). Persisted for the server lifetime; ads expire after a week.
-    private static readonly List<MarketAd> marketAds = new();
-    private static int nextMarketAdId = 1;
     private const int MarketBbsMaxAds = 200;
+    private const int MarketBbsMaxAdsPerSeller = 5;
     private const int MarketBbsAdDays = 7;
+    private const int MarketBbsRegisterBytes = 11;
+    private const byte MarketBbsSelling = 1;
+    private const byte MarketBbsBuying = 2;
+    private static readonly TimeSpan MarketBbsAdLifetime = TimeSpan.FromDays(MarketBbsAdDays);
+
+    private readonly Lock _marketSync = new();
+    private readonly List<MarketAd> _marketAds = [];
+    private int _lastMarketAdId;
 
     public async Task HandlePremiumAsync(IClient client)
     {
@@ -107,13 +114,20 @@ public class MiscPacketCoordinator(
 
         var targetId = packet.ReadShort();
         var target = sessionManager.GetByCharacterId(targetId);
-        if (target == null)
+        if (target == null || !MayLocateCorpse(session, target))
             return;
 
         var result = MiscPacketWriter.CorpseLocation(
             targetId, target.GetPosX, target.GetPosZ, target.GetPosY);
         await session.Client.SendPacket(result);
     }
+
+    private static bool MayLocateCorpse(UserSession requester, UserSession target)
+        => target.CharacterId == requester.CharacterId
+            || (target.Hp <= 0
+                && target.ZoneId == requester.ZoneId
+                && ((requester.IsInParty && requester.PartyIndex == target.PartyIndex)
+                    || (requester.KnightsId > 0 && requester.KnightsId == target.KnightsId)));
 
     public async Task HandleMarketBbsAsync(IClient client, Packet packet)
     {
@@ -138,7 +152,6 @@ public class MiscPacketCoordinator(
 
             case MarketBbsReport:
             {
-                // Acknowledge a report (no moderation backend yet).
                 var result = MarketBbsPacketWriter.Result(
                     MarketBbsReport, MarketBbsPacketWriter.Succeeded);
                 await session.Client.SendPacket(result);
@@ -150,21 +163,25 @@ public class MiscPacketCoordinator(
     private async Task SendMarketBbsListAsync(UserSession session, Packet packet)
     {
         byte filter = packet.RemainingBytes >= 1 ? packet.ReadByte() : (byte)0;
-        PruneMarketAds();
-        var ads = marketAds.Where(a => filter == 0 || a.BuyType == filter).ToList();
+        await session.Client.SendPacket(MarketBbsPacketWriter.AdvertList(MarketBbsOpen, ListMarketAds(filter)));
+    }
 
-        var result = MarketBbsPacketWriter.AdvertList(
-            MarketBbsOpen,
-            ads.Select(ad => new MarketBbsPacketWriter.Advert(
+    private List<MarketBbsPacketWriter.Advert> ListMarketAds(byte filter)
+    {
+        var now = timeProvider.GetUtcNow();
+        using var scope = _marketSync.EnterScope();
+        PruneMarketAds(now);
+        return _marketAds
+            .Where(ad => filter == 0 || ad.BuyType == filter)
+            .Select(ad => new MarketBbsPacketWriter.Advert(
                 ad.AdId, ad.SellerId, ad.Seller, ad.ItemId, ad.Price,
-                (ushort)ad.Count, ad.BuyType, MarketBbsAdDays)).ToList());
-        await session.Client.SendPacket(result);
+                ad.Count, ad.BuyType, (int)Math.Ceiling((ad.ExpiresAt - now).TotalDays)))
+            .ToList();
     }
 
     private async Task HandleMarketBbsRegisterAsync(UserSession session, Packet packet)
     {
-        PruneMarketAds();
-        if (packet.RemainingBytes < 11 || marketAds.Count >= MarketBbsMaxAds)
+        if (packet.RemainingBytes < MarketBbsRegisterBytes)
         {
             await session.Client.SendPacket(MarketBbsPacketWriter.Registered(
                 MarketBbsRegister, MarketBbsPacketWriter.Failed, 0));
@@ -173,56 +190,66 @@ public class MiscPacketCoordinator(
 
         int itemId = packet.ReadInt();
         int price = packet.ReadInt();
-        int count = packet.ReadUShort();
-        byte buyType = packet.RemainingBytes >= 1 ? packet.ReadByte() : (byte)1;
-        string memo = packet.RemainingBytes >= 1 ? packet.ReadSByteString() : string.Empty;
+        var count = packet.ReadUShort();
+        byte buyType = packet.RemainingBytes >= 1 ? packet.ReadByte() : MarketBbsSelling;
 
-        var ad = new MarketAd
+        var adId = itemId <= 0 || price < 0 || count is 0 or > InventoryConstants.MaxStackCount
+            ? 0
+            : PostMarketAd(session, itemId, price, count, buyType == MarketBbsBuying ? MarketBbsBuying : MarketBbsSelling);
+        if (adId == 0)
         {
-            AdId = nextMarketAdId++,
-            SellerId = session.CharacterId,
-            Seller = session.Name,
-            ItemId = itemId,
-            Price = price,
-            Count = count,
-            BuyType = buyType == 2 ? (byte)2 : (byte)1,
-            Memo = memo,
-        };
-        marketAds.Add(ad);
-        logger.LogDebug("Market ad #{Id} by {Name}: item {Item} x{Count} @ {Price}", ad.AdId, session.Name, itemId, count, price);
+            await session.Client.SendPacket(MarketBbsPacketWriter.Registered(
+                MarketBbsRegister, MarketBbsPacketWriter.Failed, 0));
+            return;
+        }
+
+        logger.LogDebug("Market ad #{Id} by {Name}: item {Item} x{Count} @ {Price}", adId, session.Name, itemId, count, price);
 
         await session.Client.SendPacket(MarketBbsPacketWriter.Registered(
-            MarketBbsRegister, MarketBbsPacketWriter.Succeeded, ad.AdId));
+            MarketBbsRegister, MarketBbsPacketWriter.Succeeded, adId));
+    }
+
+    private int PostMarketAd(UserSession session, int itemId, int price, ushort count, byte buyType)
+    {
+        var now = timeProvider.GetUtcNow();
+        using var scope = _marketSync.EnterScope();
+        PruneMarketAds(now);
+        if (_marketAds.Count >= MarketBbsMaxAds
+            || _marketAds.Count(ad => ad.SellerId == session.CharacterId) >= MarketBbsMaxAdsPerSeller)
+            return 0;
+
+        var ad = new MarketAd(++_lastMarketAdId, session.CharacterId, session.Name, itemId, price, count, buyType,
+            now + MarketBbsAdLifetime);
+        _marketAds.Add(ad);
+        return ad.AdId;
     }
 
     private async Task HandleMarketBbsDeleteAsync(UserSession session, Packet packet)
     {
-        var result = new Packet(GameOpcodes.GS_MARKET_BBS);
         int adId = packet.RemainingBytes >= 4 ? packet.ReadInt() : 0;
-        int removed = marketAds.RemoveAll(a => a.AdId == adId && a.SellerId == session.CharacterId);
         await session.Client.SendPacket(MarketBbsPacketWriter.Result(
             MarketBbsDelete,
-            removed > 0 ? MarketBbsPacketWriter.Succeeded : MarketBbsPacketWriter.Failed));
+            RemoveMarketAd(session, adId) ? MarketBbsPacketWriter.Succeeded : MarketBbsPacketWriter.Failed));
     }
 
-    private static void PruneMarketAds()
+    private bool RemoveMarketAd(UserSession session, int adId)
     {
-        // Drop ads whose seller's character no longer exists is out of scope without a clock; cap the board size.
-        if (marketAds.Count > MarketBbsMaxAds)
-            marketAds.RemoveRange(0, marketAds.Count - MarketBbsMaxAds);
+        using var scope = _marketSync.EnterScope();
+        return _marketAds.RemoveAll(a => a.AdId == adId && a.SellerId == session.CharacterId) > 0;
     }
 
-    private sealed class MarketAd
-    {
-        public int AdId;
-        public int SellerId;
-        public string Seller = string.Empty;
-        public int ItemId;
-        public int Price;
-        public int Count;
-        public byte BuyType;   // 1 = selling, 2 = want-to-buy
-        public string Memo = string.Empty;
-    }
+    private void PruneMarketAds(DateTimeOffset now)
+        => _marketAds.RemoveAll(ad => ad.ExpiresAt <= now);
+
+    private sealed record MarketAd(
+        int AdId,
+        int SellerId,
+        string Seller,
+        int ItemId,
+        int Price,
+        ushort Count,
+        byte BuyType,
+        DateTimeOffset ExpiresAt);
 
     public async Task HandleNameChangeAsync(IClient client, Packet packet)
     {

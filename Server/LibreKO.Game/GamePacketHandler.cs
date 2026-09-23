@@ -1,6 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Gameplay;
+using LibreKO.Common.Infrastructure.Logging;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
 using LibreKO.Game.Configuration;
@@ -28,17 +29,30 @@ public class GamePacketHandler(
     IInGameOpcodeRouter opcodeRouter,
     ICollectionRaceService collectionRaceService,
     IMailService mailService,
+    IPacketGuard packetGuard,
+    IViolationMonitor violationMonitor,
+    LoginAttemptLimiter loginAttempts,
+    IOptions<GameServerSettings> settings,
+    TimeProvider time,
     ILogger<GamePacketHandler> logger) : IPacketHandler
 {
-    private const byte LoginFollowUpOpcode = 0xC0;
-
     private const int PingMinIntervalMs = 200;
     private const int PingMaxEchoBytes = 8;
+    private const char CommandArgumentSeparator = ' ';
+    private static readonly TimeSpan UnhandledWarningInterval = TimeSpan.FromSeconds(30);
+
     private readonly ConcurrentDictionary<Guid, long> _lastPingTicks = new();
+    private readonly ConcurrentDictionary<Guid, ConnectionState> _connections = new();
+    private readonly ConnectionRateLimiter<GameOpcodes> _preGameLimiter =
+        new(PreGameOpcodePolicies.ClientTotal, PreGameOpcodePolicies.LimitOf, time);
 
     public async Task OnClientDisconnected(IClient client)
     {
         _lastPingTicks.TryRemove(client.Id, out _);
+        _connections.TryRemove(client.Id, out _);
+        _preGameLimiter.Forget(client.Id);
+        packetGuard.Forget(client.Id);
+        violationMonitor.Forget(client.Id);
         await sessionTerminationService.DisconnectAsync(client);
         await accountLockService.ReleaseAsync(client);
     }
@@ -61,9 +75,7 @@ public class GamePacketHandler(
 
         if (opcode == GameOpcodes.GS_COMPRESS_PACKET)
         {
-            var decompressed = Packet.Decompress(packet);
-            if (decompressed != null)
-                await HandlePacket(client, decompressed);
+            violationMonitor.Report(client, ViolationKind.ForgedEvent, "sent a compressed packet");
             return;
         }
 
@@ -83,52 +95,120 @@ public class GamePacketHandler(
             return;
         }
 
-        using var scope = serviceProvider.CreateScope();
+        if (!_preGameLimiter.TryAcquire(client.Id, opcode))
+        {
+            violationMonitor.Report(client, ViolationKind.RateLimit, $"exceeded the pre-game rate limit for {opcode}");
+            return;
+        }
 
         if (client.AccountId == 0)
         {
-            if (opcode == GameOpcodes.GS_VERSION_CHECK)
-            {
-                var settings = scope.ServiceProvider.GetRequiredService<IOptions<GameServerSettings>>();
-                await HandleVersionCheckAsync(client, settings);
-                return;
-            }
-            if (opcode == GameOpcodes.GS_LOGIN)
-            {
-                var preGameService = scope.ServiceProvider.GetRequiredService<IPreGameService>();
-                var response = await preGameService.LoginAsync(packet.ReadString(), packet.ReadString());
-                await HandleLoginAsync(client, response);
-                return;
-            }
-            if (opcode == GameOpcodes.GS_KICKOUT)
-            {
-                var preGameService = scope.ServiceProvider.GetRequiredService<IPreGameService>();
-                await HandleKickOutAsync(client, packet, preGameService);
-            }
+            await HandleUnauthenticatedPacket(client, packet, opcode);
             return;
         }
 
         // CharacterId == 0: pre-game (character select, etc.)
+        using var scope = serviceProvider.CreateScope();
         var preGamePacketCoordinator = scope.ServiceProvider.GetRequiredService<IPreGamePacketCoordinator>();
         await HandlePreGamePacket(client, packet, opcode, preGamePacketCoordinator);
     }
+
+    private async Task HandleUnauthenticatedPacket(IClient client, Packet packet, GameOpcodes opcode)
+    {
+        if (opcode == GameOpcodes.GS_VERSION_CHECK)
+        {
+            await client.SendPacket(SessionPacketWriter.VersionCheck((short)settings.Value.Version));
+            return;
+        }
+
+        if (opcode is not (GameOpcodes.GS_LOGIN or GameOpcodes.GS_KICKOUT))
+            return;
+
+        var login = packet.ReadString();
+        var password = packet.ReadString();
+        if (CredentialAttemptsExhausted(client))
+            return;
+
+        using var scope = serviceProvider.CreateScope();
+        var preGameService = scope.ServiceProvider.GetRequiredService<IPreGameService>();
+        var auth = await AuthenticateAsync(client, login, password, preGameService);
+
+        if (opcode == GameOpcodes.GS_LOGIN)
+            await CompleteLoginAsync(client, auth);
+        else
+            await CompleteKickOutAsync(client, login, auth);
+    }
+
+    private async Task<GameLoginResult> AuthenticateAsync(
+        IClient client, string login, string password, IPreGameService preGameService)
+    {
+        if (loginAttempts.IsLockedOut(client.RemoteAddress, login))
+        {
+            logger.LogDebug("Refused credentials for {Login} from client {ClientId}: too many recent failures",
+                LogSanitizer.Clean(login), client.Id);
+            RecordCredentialFailure(client, login);
+            return GameLoginResult.Denied;
+        }
+
+        var auth = await preGameService.LoginAsync(login, password);
+        if (auth.Success)
+            loginAttempts.RecordSuccess(login);
+        else
+            RecordCredentialFailure(client, login);
+
+        return auth;
+    }
+
+    private bool CredentialAttemptsExhausted(IClient client)
+    {
+        var limit = settings.Value.Connections.MaxLoginFailuresPerConnection;
+        if (limit <= 0 || StateOf(client).CredentialFailures < limit)
+            return false;
+
+        logger.LogWarning("Disconnecting client {ClientId} after {Failures} failed logins on one connection",
+            client.Id, limit);
+        client.Disconnect();
+        return true;
+    }
+
+    private void RecordCredentialFailure(IClient client, string login)
+    {
+        StateOf(client).CredentialFailures++;
+        loginAttempts.RecordFailure(client.RemoteAddress, login);
+    }
+
+    private ConnectionState StateOf(IClient client) => _connections.GetOrAdd(client.Id, _ => new ConnectionState());
 
     private async Task HandlePreGamePacket(IClient client, Packet packet, GameOpcodes opcode, IPreGamePacketCoordinator preGamePacketCoordinator)
     {
         var response = await preGamePacketCoordinator.HandleAsync(client, packet, opcode);
 
-        if (response == null && !ShouldSuppressPreGameWarning(opcode, packet))
-            logger.LogWarning(
-                "Unhandled opcode 0x{Opcode:X2} from client {ClientId} (pre-game), payload={Payload}",
-                packet.GetOpcode(),
-                client.Id,
-                Convert.ToHexString(packet.GetData()));
-
         if (response != null)
+        {
             await client.SendPacket(response);
+            return;
+        }
+
+        if (!ShouldSuppressPreGameWarning(opcode, packet))
+            WarnUnhandledPreGamePacket(client, packet);
     }
 
-    private async Task HandleLoginAsync(IClient client, GameLoginResult response)
+    private void WarnUnhandledPreGamePacket(IClient client, Packet packet)
+    {
+        var state = StateOf(client);
+        var now = time.GetTimestamp();
+        if (state.LastUnhandledWarning != 0 && time.GetElapsedTime(state.LastUnhandledWarning, now) < UnhandledWarningInterval)
+            return;
+
+        state.LastUnhandledWarning = now;
+        logger.LogWarning(
+            "Unhandled opcode 0x{Opcode:X2} ({Length} bytes) from client {ClientId} (pre-game)",
+            packet.GetOpcode(),
+            packet.GetLength(),
+            client.Id);
+    }
+
+    private async Task CompleteLoginAsync(IClient client, GameLoginResult response)
     {
         if (!response.Success)
         {
@@ -153,15 +233,11 @@ public class GamePacketHandler(
         await client.SendPacket(SessionPacketWriter.LoginFollowUp());
     }
 
-    private async Task HandleKickOutAsync(IClient client, Packet packet, IPreGameService preGameService)
+    private async Task CompleteKickOutAsync(IClient client, string login, GameLoginResult auth)
     {
-        var login = packet.ReadString();
-        var password = packet.ReadString();
-
-        var auth = await preGameService.LoginAsync(login, password);
         if (!auth.Success)
         {
-            logger.LogWarning("Rejected kick request for '{Login}' from client {ClientId}", login, client.Id);
+            logger.LogWarning("Rejected kick request for '{Login}' from client {ClientId}", LogSanitizer.Clean(login), client.Id);
             await client.SendPacket(SessionPacketWriter.KickResult(AccountKickCode.Rejected));
             return;
         }
@@ -223,8 +299,7 @@ public class GamePacketHandler(
         IPreGameService preGameService,
         IGameSessionInitializer gameSessionInitializer)
     {
-        var subOpcode = packet.ReadByte();
-        UserSession? session = null;
+        var subOpcode = (GameStartSubOpcode)packet.ReadByte();
 
         if (!accountLockService.Owns(client))
         {
@@ -232,66 +307,83 @@ public class GamePacketHandler(
             return;
         }
 
-        if (subOpcode == 1)
+        var session = sessionManager.GetByClientId(client.Id);
+        var state = StateOf(client);
+        if (subOpcode == GameStartSubOpcode.Load && session == null)
         {
-            session = await gameSessionInitializer.InitializeAsync(client);
-            if (session == null)
-                return;
+            await LoadWorldAsync(client, preGameService, gameSessionInitializer);
+        }
+        else if (subOpcode == GameStartSubOpcode.Ready && session != null && !ReferenceEquals(state.EnteredWorld, session))
+        {
+            state.EnteredWorld = session;
+            await EnterWorldAsync(client, session, preGameService);
+        }
+        else
+        {
+            violationMonitor.Report(client, ViolationKind.InvalidState, $"sent game start {subOpcode} out of sequence");
+        }
+    }
 
-            logger.LogDebug(
-                "GameStart subOp=1: {Name} (id={Id}) entered zone={Zone} pos=({X},{Z}) region=({RX},{RZ})",
-                session.Name, session.CharacterId, session.ZoneId, session.X, session.Z, session.RegionX, session.RegionZ);
+    private async Task LoadWorldAsync(
+        IClient client,
+        IPreGameService preGameService,
+        IGameSessionInitializer gameSessionInitializer)
+    {
+        var session = await gameSessionInitializer.InitializeAsync(client);
+        if (session == null)
+        {
+            logger.LogWarning("Closing client {ClientId}: character {CharacterId} cannot enter the game",
+                client.Id, client.CharacterId);
+            client.Disconnect();
+            return;
         }
 
-        var responses = await preGameService.GameStartAsync(client.CharacterId, client.AccountId, subOpcode, session);
+        logger.LogDebug(
+            "GameStart subOp=1: {Name} (id={Id}) entered zone={Zone} pos=({X},{Z}) region=({RX},{RZ})",
+            session.Name, session.CharacterId, session.ZoneId, session.X, session.Z, session.RegionX, session.RegionZ);
+
+        var responses = await preGameService.GameStartAsync(
+            client.CharacterId, client.AccountId, (byte)GameStartSubOpcode.Load, session);
         foreach (var response in responses)
         {
             await client.SendPacket(response);
 
-            if (subOpcode == 1
-                && session != null
-                && response.GetOpcode() == (byte)GameOpcodes.GS_MYINFO)
-            {
-                await zoneTransitionService.SendZoneAbilityAsync(session);
-                await adminPanelPacketCoordinator.SendGrantAsync(session);
-                await worldPacketCoordinator.SendRegionUserListAsync(session);
-                await worldPacketCoordinator.SendNpcRegionListAsync(session);
-            }
-        }
-
-        if (subOpcode == 2)
-        {
-            session ??= sessionManager.GetByClientId(client.Id) ?? await gameSessionInitializer.InitializeAsync(client);
-            if (session == null)
-                return;
-
-            logger.LogDebug(
-                "GameStart subOp=2: {Name} (id={Id}) ready in zone={Zone} pos=({X},{Z}) region=({RX},{RZ}) — broadcasting Respawn",
-                session.Name, session.CharacterId, session.ZoneId, session.X, session.Z, session.RegionX, session.RegionZ);
+            if (response.GetOpcode() != (byte)GameOpcodes.GS_MYINFO)
+                continue;
 
             await zoneTransitionService.SendZoneAbilityAsync(session);
-            if (session.AccountStatus != 0 || session.PremiumType != 0 || session.PremiumTime > 0)
-                await miscPacketCoordinator.SendPremiumInfoAsync(session);
-            await worldPacketCoordinator.BroadcastUserInOutAsync(session, InOutType.Respawn);
-            await shoppingMallPacketCoordinator.SendUnreadAsync(session);
-            await savedMagicService.RecastAsync(session);
-            await collectionRaceService.SyncPlayerAsync(session);
-            await mailService.SendUnreadAsync(session);
-
-            if (session.Hp <= 0)
-                await SendReconnectDeathStateAsync(session);
+            await adminPanelPacketCoordinator.SendGrantAsync(session);
+            await worldPacketCoordinator.SendRegionUserListAsync(session);
+            await worldPacketCoordinator.SendNpcRegionListAsync(session);
         }
+    }
+
+    private async Task EnterWorldAsync(IClient client, UserSession session, IPreGameService preGameService)
+    {
+        await preGameService.GameStartAsync(
+            client.CharacterId, client.AccountId, (byte)GameStartSubOpcode.Ready, session);
+
+        logger.LogDebug(
+            "GameStart subOp=2: {Name} (id={Id}) ready in zone={Zone} pos=({X},{Z}) region=({RX},{RZ}) — broadcasting Respawn",
+            session.Name, session.CharacterId, session.ZoneId, session.X, session.Z, session.RegionX, session.RegionZ);
+
+        await zoneTransitionService.SendZoneAbilityAsync(session);
+        if (session.AccountStatus != 0 || session.PremiumType != 0 || session.PremiumTime > 0)
+            await miscPacketCoordinator.SendPremiumInfoAsync(session);
+        await worldPacketCoordinator.BroadcastUserInOutAsync(session, InOutType.Respawn);
+        await shoppingMallPacketCoordinator.SendUnreadAsync(session);
+        await savedMagicService.RecastAsync(session);
+        await collectionRaceService.SyncPlayerAsync(session);
+        await mailService.SendUnreadAsync(session);
+
+        if (session.Hp <= 0)
+            await SendReconnectDeathStateAsync(session);
     }
 
     private static async Task SendReconnectDeathStateAsync(UserSession session)
     {
         await session.Client.SendPacket(DeathPacketWriter.PlayerDeath(
             session.CharacterId, DeathPacketWriter.NoKiller));
-    }
-
-    private static async Task HandleVersionCheckAsync(IClient client, IOptions<GameServerSettings> settings)
-    {
-        await client.SendPacket(SessionPacketWriter.VersionCheck((short)settings.Value.Version));
     }
 
     private async Task HandleChatAsync(IClient client, Packet packet)
@@ -303,13 +395,28 @@ public class GamePacketHandler(
         var chatType = packet.ReadByte();
         var message = packet.ReadString();
 
-        logger.LogDebug("Chat from {Name}: IsGM={IsGM}, message={Message}", session.Name, session.IsGM, message);
         if (message.StartsWith('+') && (session.IsGM || adminPacketCoordinator.IsOpenToEveryone(message)))
         {
-            logger.LogInformation("Chat command from {Name}: {Message}", session.Name, message);
+            logger.LogInformation("Chat command {Command} from {Name}", LogSanitizer.Clean(CommandWordOf(message)), session.Name);
             await adminPacketCoordinator.HandleGmCommandAsync(session, message);
             return;
         }
+
+        logger.LogDebug("Chat from {Name}: IsGM={IsGM}, message={Message}",
+            session.Name, session.IsGM, LogSanitizer.Clean(message));
         await chatPacketCoordinator.HandleAsync(session, chatType, message);
+    }
+
+    private static string CommandWordOf(string message)
+    {
+        var separator = message.IndexOf(CommandArgumentSeparator);
+        return separator < 0 ? message : message[..separator];
+    }
+
+    private sealed class ConnectionState
+    {
+        public int CredentialFailures;
+        public long LastUnhandledWarning;
+        public UserSession? EnteredWorld;
     }
 }

@@ -1,10 +1,12 @@
-using FluentAssertions;
+﻿using FluentAssertions;
+using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Gameplay;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Common.Infrastructure.Persistence;
 using LibreKO.Game.Configuration;
 using LibreKO.Game.World;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -15,12 +17,16 @@ namespace LibreKO.Game.Tests;
 public class AccountLockTests : GameTestBase
 {
     private const int AccountId = 4711;
+    private const int CharacterId = 4712;
     private const int ServerId = 1;
+    private const int HandoverProbeMs = 200;
+    private const int ShortHandoverSeconds = 1;
+    private const int SavedMoney = 4_242;
 
     [Fact]
     public async Task AcquireAsync_RefusesASecondLiveConnectionForTheSameAccount()
     {
-        var (service, _, _) = CreateService();
+        var (service, _) = CreateService();
         var first = CreateClient(connected: true);
         var second = CreateClient(connected: true);
 
@@ -37,7 +43,7 @@ public class AccountLockTests : GameTestBase
     [Fact]
     public async Task AcquireAsync_ReportsTheCharacterOfAnInGameOccupant()
     {
-        var (service, _, provider) = CreateService();
+        var (service, provider) = CreateService();
         var first = CreateClient(connected: true);
         await service.AcquireAsync(first, AccountId);
 
@@ -54,39 +60,117 @@ public class AccountLockTests : GameTestBase
     [Fact]
     public async Task AcquireAsync_TakesOverAClaimWhoseConnectionIsGone()
     {
-        var (service, _, _) = CreateService();
+        var (service, _) = CreateService();
         var dropped = CreateClient(connected: false);
         var reconnecting = CreateClient(connected: true);
 
         await service.AcquireAsync(dropped, AccountId);
+        var takeover = service.AcquireAsync(reconnecting, AccountId);
+        await service.ReleaseAsync(dropped);
 
-        (await service.AcquireAsync(reconnecting, AccountId)).Granted.Should().BeTrue();
+        (await takeover).Granted.Should().BeTrue();
         service.Owns(reconnecting).Should().BeTrue();
         service.Owns(dropped).Should().BeFalse();
     }
 
     [Fact]
+    public async Task AcquireAsync_WaitsForADroppedHolderToFinishBeforeHandingOver()
+    {
+        var (service, _) = CreateService();
+        var dropped = CreateClient(connected: false);
+        await service.AcquireAsync(dropped, AccountId);
+
+        var takeover = service.AcquireAsync(CreateClient(connected: true), AccountId);
+        await Task.Delay(HandoverProbeMs);
+        takeover.IsCompleted.Should().BeFalse("the dropped holder is still saving its character");
+
+        await service.ReleaseAsync(dropped);
+
+        (await takeover).Granted.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task AcquireAsync_RefusesWhenTheDroppedHolderNeverFinishesLeaving()
+    {
+        var (service, _) = CreateService(handoverSeconds: ShortHandoverSeconds);
+        var dropped = CreateClient(connected: false);
+        await service.AcquireAsync(dropped, AccountId);
+
+        var refused = await service.AcquireAsync(CreateClient(connected: true), AccountId);
+
+        refused.Granted.Should().BeFalse();
+        refused.Occupant.Should().NotBeNull();
+        service.Owns(dropped).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task KickAsync_EvictsTheHolderAndFreesTheAccount()
     {
-        var (service, termination, _) = CreateService();
+        var (service, _) = CreateService();
         var holder = CreateClient(connected: true);
         await service.AcquireAsync(holder, AccountId);
+        holder.When(client => client.Disconnect()).Do(call => service.ReleaseAsync(holder));
 
         (await service.KickAsync(AccountId)).Should().Be(AccountKickCode.Done);
 
         await holder.Received(1).SendPacket(
             Arg.Is<Packet>(p => p.GetOpcode() == (byte)GameOpcodes.GS_KICKOUT),
             Arg.Any<CancellationToken>());
-        await termination.Received(1).LogoutAsync(holder, Arg.Any<CancellationToken>());
+        holder.Received(1).Disconnect();
         service.Owns(holder).Should().BeFalse();
 
         (await service.AcquireAsync(CreateClient(connected: true), AccountId)).Granted.Should().BeTrue();
     }
 
     [Fact]
+    public async Task KickAsync_HandsTheAccountOverOnlyAfterTheHoldersFinalSave()
+    {
+        var probe = new SaveChangesProbe();
+        var (service, provider) = CreateService(probe);
+        var holder = CreateClient(connected: true);
+        await service.AcquireAsync(holder, AccountId);
+        var session = provider.GetRequiredService<SessionManager>().CreateSession(holder, CharacterId, AccountId);
+        session.Name = "Aurelia";
+        session.Money = SavedMoney;
+        var termination = provider.GetRequiredService<ISessionTerminationService>();
+        holder.When(client => client.Disconnect()).Do(call => Task.Run(async () =>
+        {
+            await termination.DisconnectAsync(holder);
+            await service.ReleaseAsync(holder);
+        }));
+
+        var finalSaveReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFinalSave = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        probe.BeforeSave = async db =>
+        {
+            if (!db.ChangeTracker.Entries<Character>().Any(entry => entry.State == EntityState.Modified))
+                return;
+            finalSaveReached.TrySetResult();
+            await releaseFinalSave.Task;
+        };
+
+        var kick = service.KickAsync(AccountId);
+        await finalSaveReached.Task;
+        var login = service.AcquireAsync(CreateClient(connected: true), AccountId);
+        await Task.Delay(HandoverProbeMs);
+
+        kick.IsCompleted.Should().BeFalse();
+        login.IsCompleted.Should().BeFalse("the account must not change hands before the final save lands");
+
+        releaseFinalSave.SetResult();
+
+        (await kick).Should().Be(AccountKickCode.Done);
+        (await login).Granted.Should().BeTrue();
+        await using var scope = provider.CreateAsyncScope();
+        var stored = await scope.ServiceProvider.GetRequiredService<AppDbContext>().Characters
+            .AsNoTracking().SingleAsync(c => c.Id == CharacterId);
+        stored.Money.Should().Be(SavedMoney);
+    }
+
+    [Fact]
     public async Task KickAsync_ReportsNotOnlineWhenNobodyHoldsTheAccount()
     {
-        var (service, _, _) = CreateService();
+        var (service, _) = CreateService();
 
         (await service.KickAsync(AccountId)).Should().Be(AccountKickCode.NotOnline);
     }
@@ -94,7 +178,7 @@ public class AccountLockTests : GameTestBase
     [Fact]
     public async Task ReleaseAsync_FreesTheAccountForTheNextConnection()
     {
-        var (service, _, _) = CreateService();
+        var (service, _) = CreateService();
         var holder = CreateClient(connected: true);
         await service.AcquireAsync(holder, AccountId);
 
@@ -107,12 +191,14 @@ public class AccountLockTests : GameTestBase
     [Fact]
     public async Task ReleaseAsync_OfAnEvictedClientLeavesTheNewHolderAlone()
     {
-        var (service, _, _) = CreateService();
+        var (service, _) = CreateService();
         var first = CreateClient(connected: false);
         var second = CreateClient(connected: true);
 
         await service.AcquireAsync(first, AccountId);
-        await service.AcquireAsync(second, AccountId);
+        var takeover = service.AcquireAsync(second, AccountId);
+        await service.ReleaseAsync(first);
+        await takeover;
         await service.ReleaseAsync(first);
 
         service.Owns(second).Should().BeTrue();
@@ -121,7 +207,7 @@ public class AccountLockTests : GameTestBase
     [Fact]
     public async Task AcquireAsync_MirrorsTheClaimOnTheAccountRow()
     {
-        var (service, _, provider) = CreateService();
+        var (service, provider) = CreateService();
         var holder = CreateClient(connected: true);
 
         await service.AcquireAsync(holder, AccountId);
@@ -134,7 +220,7 @@ public class AccountLockTests : GameTestBase
     [Fact]
     public async Task ClearOwnClaimsAsync_ClearsRowsLeftBehindByAPreviousRun()
     {
-        var (service, _, provider) = CreateService();
+        var (service, provider) = CreateService();
         await using (var scope = provider.CreateAsyncScope())
         {
             var accounts = scope.ServiceProvider.GetRequiredService<IAccountRepository>();
@@ -154,31 +240,39 @@ public class AccountLockTests : GameTestBase
         return account?.OnlineServerId;
     }
 
-    private static (AccountLockService Service, ISessionTerminationService Termination, ServiceProvider Provider) CreateService()
+    private static (AccountLockService Service, ServiceProvider Provider) CreateService(
+        SaveChangesProbe? probe = null,
+        int handoverSeconds = PlayerSettings.DefaultSessionHandoverTimeoutSeconds)
     {
-        var provider = CreateProvider(db => db.Accounts.Add(new LibreKO.Common.Domain.Entities.Account
-        {
-            Id = AccountId,
-            Login = "claimant",
-            Password = "hash",
-        }));
+        var provider = CreateProvider(
+            db =>
+            {
+                db.Accounts.Add(new Account
+                {
+                    Id = AccountId,
+                    Login = "claimant",
+                    Password = "hash",
+                });
+                db.Characters.Add(new Character { Id = CharacterId, AccountId = AccountId, Name = "Aurelia" });
+            },
+            configureServices: services => probe?.Register(services));
 
-        var termination = Substitute.For<ISessionTerminationService>();
         var servers = Substitute.For<IServerRepository>();
         servers.GetServers().Returns(Task.FromResult(new List<LibreKO.Common.Domain.Entities.Server>
         {
             new() { Id = ServerId, Name = "Beramus Legacy", IpAddress = "127.0.0.1", LanIpAddress = "127.0.0.1", Port = 15001 },
         }));
 
+        var settings = new GameServerSettings { ServerId = ServerId };
+        settings.Player.SessionHandoverTimeoutSeconds = handoverSeconds;
         var service = new AccountLockService(
             provider.GetRequiredService<IServiceScopeFactory>(),
             servers,
-            termination,
             provider.GetRequiredService<SessionManager>(),
-            Options.Create(new GameServerSettings { ServerId = ServerId }),
+            Options.Create(settings),
             NullLogger<AccountLockService>.Instance);
 
-        return (service, termination, provider);
+        return (service, provider);
     }
 
     private static IClient CreateClient(bool connected)

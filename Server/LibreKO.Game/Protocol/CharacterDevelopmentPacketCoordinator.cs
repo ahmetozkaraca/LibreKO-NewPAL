@@ -22,9 +22,17 @@ public class CharacterDevelopmentPacketCoordinator(
     SessionManager sessionManager,
     IGameDataService gameDataService,
     IJobChangeService jobChangeService,
+    IUserNotificationService userNotificationService,
     ILogger<CharacterDevelopmentPacketCoordinator> logger) : ICharacterDevelopmentPacketCoordinator
 {
     private const byte JobChangeMinimumLevel = 10;
+
+    private const int RebirthStatBytes = 5;
+    private const int RebirthResetCost = 100_000_000;
+    private const int RebirthQualificationScroll = 900_579_000;
+    private const int NoScrollSlot = -1;
+    private const short FirstRebirthQuest = 1119;
+    private const short LastRebirthQuest = 1122;
 
     private const int StatPresetBodyLength = 7;
     private const int SkillPresetBodyLength = 5;
@@ -302,6 +310,9 @@ public class CharacterDevelopmentPacketCoordinator(
             return;
 
         var subOpcode = (ClassChangeSubOpcode)packet.ReadByte();
+        if (subOpcode != ClassChangeSubOpcode.Eligibility && !IsAtRedistributionNpc(session))
+            return;
+
         switch (subOpcode)
         {
             case ClassChangeSubOpcode.Eligibility:
@@ -341,114 +352,134 @@ public class CharacterDevelopmentPacketCoordinator(
 
     private async Task HandleRebStatChangeAsync(UserSession session, Packet packet)
     {
-        if (packet.RemainingBytes < 5)
+        if (packet.RemainingBytes < RebirthStatBytes)
         {
             await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatChange, 0);
             return;
         }
 
-        var recStr = packet.ReadByte();
-        var recSta = packet.ReadByte();
-        var recDex = packet.ReadByte();
-        var recInt = packet.ReadByte();
-        var recCha = packet.ReadByte();
+        var gained = new RebirthPoints(
+            packet.ReadByte(), packet.ReadByte(), packet.ReadByte(), packet.ReadByte(), packet.ReadByte());
+        var levelExperience = gameDataService.GetMaxExpForLevel(session.Level);
+        var scrollSlot = gained.Total == RebirthBonus.PointsPerRebirth
+            ? session.WithLock(player => ApplyRebirth(player, gained, levelExperience))
+            : NoScrollSlot;
 
-        if (session.RebirthLevel >= RebirthBonus.MaxRebirthLevel
-            || recStr + recSta + recDex + recInt + recCha != RebirthBonus.PointsPerRebirth)
+        if (scrollSlot == NoScrollSlot)
         {
             await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatChange, 0);
             return;
         }
 
-        var scrollSlot = FindRebirthScrollSlot(session);
-        if (scrollSlot < 0)
-        {
-            await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatChange, 0);
-            return;
-        }
-
-        session.RebStr = (byte)Math.Min(byte.MaxValue, session.RebStr + recStr);
-        session.RebSta = (byte)Math.Min(byte.MaxValue, session.RebSta + recSta);
-        session.RebDex = (byte)Math.Min(byte.MaxValue, session.RebDex + recDex);
-        session.RebIntel = (byte)Math.Min(byte.MaxValue, session.RebIntel + recInt);
-        session.RebMagic = (byte)Math.Min(byte.MaxValue, session.RebMagic + recCha);
-        session.RebirthLevel++;
-        session.Experience = 0;
-
-        session.Inventory[scrollSlot].Count--;
-        if (session.Inventory[scrollSlot].Count <= 0)
-            session.Inventory[scrollSlot].Clear();
-
-        if (session.RebirthLevel < RebirthBonus.MaxRebirthLevel)
-        {
-            for (short qid = 1119; qid <= 1122; qid++)
-            {
-                session.Quest.QuestMap.Remove(qid);
-                session.Quest.RemoveQuestKillCounts(qid);
-            }
-        }
-
+        var scroll = session.Inventory[scrollSlot];
+        await userNotificationService.SendStackChangeAsync(
+            session, (byte)scrollSlot, scroll.ItemId, scroll.Count, scroll.Durability);
+        await userNotificationService.SendGoldLossAsync(session, RebirthPacketCoordinator.RebirthGoldCost);
+        await session.Client.SendPacket(LoyaltyChangePacketWriter.Totals(session.Loyalty, session.MonthlyLoyalty));
+        await session.Client.SendPacket(ExperiencePacketWriter.Current(session.Experience));
         await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatChange, 1);
         logger.LogInformation(
             "{Name} rebirth +1 (now {Level}): +str={Str} sta={Sta} dex={Dex} int={Int} cha={Cha}",
-            session.Name, session.RebirthLevel, recStr, recSta, recDex, recInt, recCha);
+            session.Name, session.RebirthLevel, gained.Strength, gained.Stamina, gained.Dexterity,
+            gained.Intelligence, gained.Magic);
+    }
+
+    private readonly record struct RebirthPoints(byte Strength, byte Stamina, byte Dexterity, byte Intelligence, byte Magic)
+    {
+        public int Total => Strength + Stamina + Dexterity + Intelligence + Magic;
+    }
+
+    private static int ApplyRebirth(UserSession player, RebirthPoints gained, long levelExperience)
+    {
+        if (!RebirthPacketCoordinator.MeetsRequirements(player, levelExperience))
+            return NoScrollSlot;
+
+        var scrollSlot = FindRebirthScrollSlot(player);
+        if (scrollSlot == NoScrollSlot)
+            return NoScrollSlot;
+
+        player.Money -= RebirthPacketCoordinator.RebirthGoldCost;
+        player.Loyalty -= RebirthPacketCoordinator.RebirthLoyaltyCost;
+        player.Inventory[scrollSlot].Count--;
+        if (player.Inventory[scrollSlot].Count <= 0)
+            player.Inventory[scrollSlot].Clear();
+
+        player.RebStr = (byte)Math.Min(byte.MaxValue, player.RebStr + gained.Strength);
+        player.RebSta = (byte)Math.Min(byte.MaxValue, player.RebSta + gained.Stamina);
+        player.RebDex = (byte)Math.Min(byte.MaxValue, player.RebDex + gained.Dexterity);
+        player.RebIntel = (byte)Math.Min(byte.MaxValue, player.RebIntel + gained.Intelligence);
+        player.RebMagic = (byte)Math.Min(byte.MaxValue, player.RebMagic + gained.Magic);
+        player.RebirthLevel++;
+        player.Experience = 0;
+
+        if (player.RebirthLevel < RebirthBonus.MaxRebirthLevel)
+        {
+            for (var questId = FirstRebirthQuest; questId <= LastRebirthQuest; questId++)
+            {
+                player.Quest.QuestMap.Remove(questId);
+                player.Quest.RemoveQuestKillCounts(questId);
+            }
+        }
+
+        return scrollSlot;
     }
 
     private async Task HandleRebStatResetAsync(UserSession session, Packet packet)
     {
-        if (packet.RemainingBytes < 5)
+        if (packet.RemainingBytes < RebirthStatBytes)
         {
             await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatReset, 0);
             return;
         }
 
-        var recStr = packet.ReadByte();
-        var recSta = packet.ReadByte();
-        var recDex = packet.ReadByte();
-        var recInt = packet.ReadByte();
-        var recCha = packet.ReadByte();
-
-        if (session.RebirthLevel == 0
-            || recStr + recSta + recDex + recInt + recCha != session.RebirthLevel * RebirthBonus.PointsPerRebirth)
-        {
-            await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatReset, 0);
-            return;
-        }
+        var spread = new RebirthPoints(
+            packet.ReadByte(), packet.ReadByte(), packet.ReadByte(), packet.ReadByte(), packet.ReadByte());
 
         var freeReset = IsResetFree(session);
-        if (!freeReset)
+        var cost = freeReset ? 0 : RebirthResetCost;
+        var applied = session.WithLock(player =>
         {
-            const int rebirthResetCost = 100_000_000;
-            if (session.Money < rebirthResetCost)
-            {
-                await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatReset, 0);
-                return;
-            }
-            session.Money -= rebirthResetCost;
+            if (player.RebirthLevel == 0
+                || spread.Total != player.RebirthLevel * RebirthBonus.PointsPerRebirth
+                || player.Money < cost)
+                return false;
+
+            player.Money -= cost;
+            player.RebStr = spread.Strength;
+            player.RebSta = spread.Stamina;
+            player.RebDex = spread.Dexterity;
+            player.RebIntel = spread.Intelligence;
+            player.RebMagic = spread.Magic;
+            return true;
+        });
+
+        if (!applied)
+        {
+            await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatReset, 0);
+            return;
         }
 
-        session.RebStr = recStr;
-        session.RebSta = recSta;
-        session.RebDex = recDex;
-        session.RebIntel = recInt;
-        session.RebMagic = recCha;
-
+        if (cost > 0)
+            await userNotificationService.SendGoldLossAsync(session, cost);
         await SendRebResultAsync(session, ClassChangeSubOpcode.RebirthStatReset, 1);
         logger.LogInformation(
             "{Name} rebirth reset: str={Str} sta={Sta} dex={Dex} int={Int} cha={Cha} (free={Free})",
-            session.Name, recStr, recSta, recDex, recInt, recCha, freeReset);
+            session.Name, spread.Strength, spread.Stamina, spread.Dexterity, spread.Intelligence, spread.Magic, freeReset);
     }
 
     private static int FindRebirthScrollSlot(UserSession session)
     {
-        const int qualificationOfRebirth = 900_579_000;
         for (var i = InventoryConstants.SlotMax; i < InventoryConstants.SlotMax + InventoryConstants.HaveMax; i++)
         {
-            if (session.Inventory[i].ItemId == qualificationOfRebirth && session.Inventory[i].Count > 0)
+            if (session.Inventory[i].ItemId == RebirthQualificationScroll && session.Inventory[i].Count > 0)
                 return i;
         }
-        return -1;
+        return NoScrollSlot;
     }
+
+    private bool IsAtRedistributionNpc(UserSession session)
+        => NpcDialogContext.ActiveNpc(sessionManager, session) is { } npc
+            && (npc.NpcType == NpcData.TypeClassChange || npc.NpcId == NpcData.RedistributionMerchant);
 
     private static async Task SendRebResultAsync(UserSession session, ClassChangeSubOpcode subOpcode, byte result)
     {

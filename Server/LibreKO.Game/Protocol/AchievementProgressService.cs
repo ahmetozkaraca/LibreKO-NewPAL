@@ -1,3 +1,4 @@
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Game.Protocol.Writers;
@@ -25,6 +26,8 @@ public class AchievementProgressService(
 {
     private static readonly byte[] RonarkZones =
         [BattleZoneManager.ZONE_RONARK_LAND, BattleZoneManager.ZONE_RONARK_LAND_BASE];
+
+    private readonly ConcurrentDictionary<(int CharacterId, int AchievementId), byte> _claimsInFlight = new();
 
     public Task SendListAsync(UserSession session, IReadOnlyList<int>? requestedIds = null)
     {
@@ -133,13 +136,40 @@ public class AchievementProgressService(
 
     public async Task<bool> CompleteAsync(UserSession session, AchievementData definition)
     {
+        var claim = (session.CharacterId, definition.Id);
+        if (!_claimsInFlight.TryAdd(claim, 0))
+        {
+            await session.Client.SendPacket(
+                AchievementPacketWriter.ClaimResult(definition.Id, AchievementPacketWriter.ClaimNotAvailable));
+            return false;
+        }
+
+        try
+        {
+            return await ClaimAsync(session, definition);
+        }
+        finally
+        {
+            _claimsInFlight.TryRemove(claim, out _);
+        }
+    }
+
+    private async Task<bool> ClaimAsync(UserSession session, AchievementData definition)
+    {
+        if (session.WithLock(player => player.Achievements.IsClaimed(definition.Id)))
+        {
+            await session.Client.SendPacket(
+                AchievementPacketWriter.ClaimResult(definition.Id, AchievementPacketWriter.ClaimNotAvailable));
+            return false;
+        }
+
         var result = definition.RewardItemId != 0
             ? await GrantRewardAsync(session, definition)
             : AchievementPacketWriter.ClaimIssued;
 
         if (result == AchievementPacketWriter.ClaimIssued)
         {
-            session.Achievements.MarkClaimed(definition.Id);
+            session.WithLock(player => player.Achievements.MarkClaimed(definition.Id));
             logger.LogInformation("{Name} completed achievement {Id} ({Achievement})",
                 session.Name, definition.Id, definition.Name);
 

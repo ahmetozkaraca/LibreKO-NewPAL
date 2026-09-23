@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.World;
@@ -27,7 +27,23 @@ public class RegionManager
     private static long RegionKey(ushort room, byte zoneId, int rx, int rz) =>
         ((long)room << 40) | ((long)zoneId << 32) | ((long)(rx & 0xFFFF) << 16) | (long)(rz & 0xFFFF);
 
-    public void AddToRegion(UserSession session)
+    public static bool IsInWorld(UserSession session) => session.RegisteredRegionKey != NoRegionKey;
+
+    public void AddToRegion(UserSession session) => session.WithLock(Register);
+
+    public void RemoveFromRegion(UserSession session) => session.WithLock(Unregister);
+
+    public bool UpdateRegion(UserSession session) => session.WithLock(s =>
+    {
+        if (s.RegionX == s.NewRegionX && s.RegionZ == s.NewRegionZ)
+            return false;
+
+        Unregister(s);
+        Register(s);
+        return true;
+    });
+
+    private void Register(UserSession session)
     {
         var key = RegionKey(session.Room, session.ZoneId, session.NewRegionX, session.NewRegionZ);
         var region = _regions.GetOrAdd(key, _ => new ConcurrentDictionary<int, UserSession>());
@@ -38,26 +54,13 @@ public class RegionManager
     }
 
     // Keyed by where the session was registered, never recomputed: a zone change moves both.
-    public void RemoveFromRegion(UserSession session)
+    private void Unregister(UserSession session)
     {
         var key = session.RegisteredRegionKey;
         if (key == NoRegionKey) return;
         if (_regions.TryGetValue(key, out var region))
             region.TryRemove(new KeyValuePair<int, UserSession>(session.CharacterId, session));
         session.RegisteredRegionKey = NoRegionKey;
-    }
-
-    public bool UpdateRegion(UserSession session)
-    {
-        var newRx = session.NewRegionX;
-        var newRz = session.NewRegionZ;
-
-        if (session.RegionX == newRx && session.RegionZ == newRz)
-            return false;
-
-        RemoveFromRegion(session);
-        AddToRegion(session);
-        return true;
     }
 
     public IEnumerable<UserSession> GetNearbyUsers(UserSession session)
@@ -87,8 +90,12 @@ public class RegionManager
         // SendPacket enqueues and returns synchronously (a background writer does the
         // socket I/O), so there's nothing to await. Fire-and-forget avoids allocating a
         // List<Task> + WhenAll per broadcast — millions of allocs/sec under dense load.
+        var concealed = sender.IsInvisible;
         foreach (var nearby in GetNearbyUsers(sender))
-            _ = nearby.Client.SendPacket(packet);
+        {
+            if (!concealed || StealthSight.Detects(nearby, sender))
+                _ = nearby.Client.SendPacket(packet);
+        }
 
         if (!excludeSender)
             _ = sender.Client.SendPacket(packet);
@@ -118,7 +125,9 @@ public class RegionManager
 
     public void RemoveNpc(NpcInstance npc)
     {
-        _npcs.TryRemove(npc.UniqueId, out _);
+        if (!_npcs.TryRemove(new KeyValuePair<int, NpcInstance>(npc.UniqueId, npc)))
+            return;
+
         _engagedNpcs.TryRemove(npc.UniqueId, out _);
         if (_npcRegions.TryGetValue(RegionKey(npc.Room, npc.ZoneId, npc.RegionX, npc.RegionZ), out var region))
             region.TryRemove(npc.UniqueId, out _);
@@ -258,27 +267,40 @@ public class RegionManager
     {
         var nowTicks = DateTime.UtcNow.Ticks;
         foreach (var npc in _engagedNpcs.Values)
+            npc.WithLock(engaged => ForgetTarget(engaged, characterId, nowTicks));
+    }
+
+    private static void ForgetTarget(NpcInstance npc, int characterId, long nowTicks)
+    {
+        if (npc.TargetUserId != characterId)
+            return;
+
+        npc.TargetUserId = 0;
+        npc.IsTracing = false;
+        npc.IsMoving = false;
+
+        if (npc.State == NpcState.Casting && !npc.HealTargetIsNpc)
         {
-            if (npc.TargetUserId != characterId)
-                continue;
-
-            npc.TargetUserId = 0;
-            npc.IsTracing = false;
-            npc.IsMoving = false;
-
-            if (npc.State == NpcState.Casting && !npc.HealTargetIsNpc)
-            {
-                npc.ActiveSkillId = 0;
-                npc.ActiveTargetId = 0;
-                npc.CastEndTicks = 0;
-            }
-
-            if (npc.State is NpcState.Attacking or NpcState.Fighting or NpcState.Casting)
-            {
-                npc.State = NpcState.Returning;
-                npc.StateChangeTicks = nowTicks;
-            }
+            npc.ActiveSkillId = 0;
+            npc.ActiveTargetId = 0;
+            npc.CastEndTicks = 0;
         }
+
+        if (npc.State is NpcState.Attacking or NpcState.Fighting or NpcState.Casting)
+        {
+            npc.State = NpcState.Returning;
+            npc.StateChangeTicks = nowTicks;
+        }
+    }
+
+    public static readonly TimeSpan CorpseLinger = TimeSpan.FromSeconds(30);
+
+    public IEnumerable<NpcInstance> GetDeadNpcsReadyToRetire(long nowTicks)
+    {
+        return _npcs.Values.Where(n =>
+            n.IsDead
+            && !n.CanRespawn
+            && nowTicks - n.DeathTimeTicks >= CorpseLinger.Ticks);
     }
 
     public IEnumerable<NpcInstance> GetDeadNpcsReadyToRespawn(long nowTicks)

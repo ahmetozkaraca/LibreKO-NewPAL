@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -88,11 +88,16 @@ public class KnightsTests : GameTestBase
         recruit.Name = "Recruit";
         recruit.Nation = AccountNation.Karus;
 
+        var application = new Packet(GameOpcodes.GS_KNIGHTS_PROCESS);
+        application.WriteByte((byte)KnightsSubOpcode.Join);
+        application.WriteShort(clanId);
+
         var packet = new Packet(GameOpcodes.GS_KNIGHTS_PROCESS);
         packet.WriteByte(0x06);
         packet.WriteString("Recruit");
 
         var coordinator = provider.GetRequiredService<IKnightsPacketCoordinator>();
+        await coordinator.HandleProcessAsync(recruitClient, application);
         await coordinator.HandleProcessAsync(leaderClient, packet);
 
         recruit.KnightsId.Should().Be(clanId);

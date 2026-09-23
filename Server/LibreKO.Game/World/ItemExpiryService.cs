@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities.GameData;
+﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Game.Protocol.Writers;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -33,11 +33,13 @@ public class ItemExpiryService(
     {
         foreach (var session in sessionManager.GetAll())
         {
-            ItemExpiry.Sweep(session.Warehouse, nowUnixSeconds);
-            ItemExpiry.Sweep(session.VipWarehouse, nowUnixSeconds);
-
-            var cleared = ItemExpiry.Sweep(session.Inventory, nowUnixSeconds,
-                InventoryConstants.InventoryStart, InventoryConstants.HaveMax);
+            var cleared = session.WithLock(s =>
+            {
+                ItemExpiry.Sweep(s.Warehouse, nowUnixSeconds);
+                ItemExpiry.Sweep(s.VipWarehouse, nowUnixSeconds);
+                return ItemExpiry.Sweep(s.Inventory, nowUnixSeconds,
+                    InventoryConstants.InventoryStart, InventoryConstants.HaveMax);
+            });
             if (cleared.Count == 0)
                 continue;
 

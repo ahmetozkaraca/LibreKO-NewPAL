@@ -96,6 +96,9 @@ namespace LibreKO.Common.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Login")
+                        .IsUnique();
+
                     b.ToTable("Accounts", (string)null);
                 });
 
@@ -319,6 +322,77 @@ namespace LibreKO.Common.Migrations
                         .IsUnique();
 
                     b.ToTable("Characters", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.CharacterRewardQuest", b =>
+                {
+                    b.Property<int>("CharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("QuestId")
+                        .HasColumnType("int");
+
+                    b.Property<DateOnly>("PeriodStart")
+                        .HasColumnType("date");
+
+                    b.Property<DateTime?>("AcceptedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("ClaimedAt")
+                        .IsConcurrencyToken()
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<int>("Kills")
+                        .HasColumnType("int");
+
+                    b.HasKey("CharacterId", "QuestId", "PeriodStart");
+
+                    b.ToTable("CharacterRewardQuests", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.DailyRewardClaim", b =>
+                {
+                    b.Property<int>("AccountId")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("Pool")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<DateOnly>("Day")
+                        .HasColumnType("date");
+
+                    b.Property<int>("CharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ClaimedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("Kind")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.HasKey("AccountId", "Pool", "Day");
+
+                    b.ToTable("DailyRewardClaims", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.EventCoinWallet", b =>
+                {
+                    b.Property<int>("CharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Coins")
+                        .IsConcurrencyToken()
+                        .HasColumnType("int");
+
+                    b.HasKey("CharacterId");
+
+                    b.ToTable("EventCoinWallets", (string)null);
                 });
 
             modelBuilder.Entity("LibreKO.Common.Domain.Entities.Friendship", b =>
@@ -2438,6 +2512,148 @@ namespace LibreKO.Common.Migrations
                     b.ToTable("PusItems", (string)null);
                 });
 
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardPrizeData", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("Kind")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<byte>("MaxLevel")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<byte>("MinLevel")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<byte>("Pool")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<int>("Weight")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Pool");
+
+                    b.ToTable("RewardPrizes", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestData", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("Board")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<short>("DurationDays")
+                        .HasColumnType("smallint");
+
+                    b.Property<int>("KillCount")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("MaxLevel")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<byte>("MinLevel")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<bool>("PartyShared")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<byte>("Recurrence")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<byte>("StartDay")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<byte>("StartMonth")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("RewardQuests", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestItemData", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("QuestId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("QuestId", "ItemId")
+                        .IsUnique();
+
+                    b.ToTable("RewardQuestItems", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestRewardData", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("Kind")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<int>("QuestId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("QuestId");
+
+                    b.ToTable("RewardQuestRewards", (string)null);
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestTargetData", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("NpcId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("QuestId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NpcId");
+
+                    b.HasIndex("QuestId", "NpcId")
+                        .IsUnique();
+
+                    b.ToTable("RewardQuestTargets", (string)null);
+                });
+
             modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.ServerResourceData", b =>
                 {
                     b.Property<int>("ResourceId")
@@ -3170,6 +3386,36 @@ namespace LibreKO.Common.Migrations
                     b.ToTable("Patches", (string)null);
                 });
 
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.RouletteSpin", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("int");
+
+                    b.Property<byte>("Kind")
+                        .HasColumnType("tinyint unsigned");
+
+                    b.Property<DateTime>("SpunAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CharacterId", "SpunAt");
+
+                    b.ToTable("RouletteSpins", (string)null);
+                });
+
             modelBuilder.Entity("LibreKO.Common.Domain.Entities.Server", b =>
                 {
                     b.Property<int>("Id")
@@ -3441,6 +3687,33 @@ namespace LibreKO.Common.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.CharacterRewardQuest", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.Character", null)
+                        .WithMany()
+                        .HasForeignKey("CharacterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.DailyRewardClaim", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.Account", null)
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.EventCoinWallet", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.Character", null)
+                        .WithOne()
+                        .HasForeignKey("LibreKO.Common.Domain.Entities.EventCoinWallet", "CharacterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("LibreKO.Common.Domain.Entities.Friendship", b =>
                 {
                     b.HasOne("LibreKO.Common.Domain.Entities.Character", "Character")
@@ -3505,11 +3778,47 @@ namespace LibreKO.Common.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestItemData", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.GameData.RewardQuestData", null)
+                        .WithMany()
+                        .HasForeignKey("QuestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestRewardData", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.GameData.RewardQuestData", null)
+                        .WithMany()
+                        .HasForeignKey("QuestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.GameData.RewardQuestTargetData", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.GameData.RewardQuestData", null)
+                        .WithMany()
+                        .HasForeignKey("QuestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("LibreKO.Common.Domain.Entities.MailAttachment", b =>
                 {
                     b.HasOne("LibreKO.Common.Domain.Entities.Mail", null)
                         .WithMany("Attachments")
                         .HasForeignKey("MailId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("LibreKO.Common.Domain.Entities.RouletteSpin", b =>
+                {
+                    b.HasOne("LibreKO.Common.Domain.Entities.Character", null)
+                        .WithMany()
+                        .HasForeignKey("CharacterId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

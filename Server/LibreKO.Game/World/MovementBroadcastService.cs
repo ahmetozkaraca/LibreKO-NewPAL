@@ -1,5 +1,6 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Configuration;
+using LibreKO.Game.Protocol;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,6 +10,8 @@ namespace LibreKO.Game.World;
 
 public class MovementBroadcastService(
     SessionManager sessionManager,
+    IWorldMovementService worldMovementService,
+    IZoneTransitionService zoneTransitionService,
     IOptions<GameServerSettings> settings,
     ILogger<MovementBroadcastService> logger) : BackgroundService
 {
@@ -26,6 +29,7 @@ public class MovementBroadcastService(
             try
             {
                 FlushMovers();
+                await SettleAsync();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -46,7 +50,18 @@ public class MovementBroadcastService(
                 session.CharacterId, session.MoveOldWillX, session.MoveOldWillZ,
                 session.MoveOldWillY, session.MoveOldSpeed, session.MoveOldEcho);
 
-            _ = sessionManager.Regions.SendToRegion(session, result, excludeSender: false);
+            _ = sessionManager.Regions.SendToRegion(session, result);
         }
+    }
+
+    public async Task SettleAsync()
+    {
+        foreach (var session in sessionManager.GetAll())
+        {
+            if (session.RegionX != session.NewRegionX || session.RegionZ != session.NewRegionZ)
+                await worldMovementService.RefreshRegionAsync(session);
+        }
+
+        await zoneTransitionService.CompleteOverdueArrivalsAsync();
     }
 }

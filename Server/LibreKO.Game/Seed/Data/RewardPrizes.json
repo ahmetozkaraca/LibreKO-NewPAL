@@ -1,0 +1,202 @@
+[
+  {
+    "Id": 1,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 30,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 2000
+  },
+  {
+    "Id": 2,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 25,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 5000
+  },
+  {
+    "Id": 3,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 15,
+    "Kind": 2,
+    "ItemId": 389013000,
+    "Count": 5
+  },
+  {
+    "Id": 4,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 12,
+    "Kind": 2,
+    "ItemId": 389018000,
+    "Count": 5
+  },
+  {
+    "Id": 5,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 8,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 20000
+  },
+  {
+    "Id": 6,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 6,
+    "Kind": 2,
+    "ItemId": 379016000,
+    "Count": 1
+  },
+  {
+    "Id": 7,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 3,
+    "Kind": 2,
+    "ItemId": 379129000,
+    "Count": 3
+  },
+  {
+    "Id": 8,
+    "Pool": 1,
+    "MinLevel": 1,
+    "MaxLevel": 83,
+    "Weight": 1,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 100000
+  },
+  {
+    "Id": 101,
+    "Pool": 2,
+    "MinLevel": 10,
+    "MaxLevel": 39,
+    "Weight": 40,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 3000
+  },
+  {
+    "Id": 102,
+    "Pool": 2,
+    "MinLevel": 10,
+    "MaxLevel": 39,
+    "Weight": 30,
+    "Kind": 2,
+    "ItemId": 389012000,
+    "Count": 5
+  },
+  {
+    "Id": 103,
+    "Pool": 2,
+    "MinLevel": 10,
+    "MaxLevel": 39,
+    "Weight": 20,
+    "Kind": 2,
+    "ItemId": 389017000,
+    "Count": 5
+  },
+  {
+    "Id": 104,
+    "Pool": 2,
+    "MinLevel": 10,
+    "MaxLevel": 39,
+    "Weight": 10,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 15000
+  },
+  {
+    "Id": 105,
+    "Pool": 2,
+    "MinLevel": 40,
+    "MaxLevel": 83,
+    "Weight": 40,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 10000
+  },
+  {
+    "Id": 106,
+    "Pool": 2,
+    "MinLevel": 40,
+    "MaxLevel": 83,
+    "Weight": 30,
+    "Kind": 2,
+    "ItemId": 389014000,
+    "Count": 5
+  },
+  {
+    "Id": 107,
+    "Pool": 2,
+    "MinLevel": 40,
+    "MaxLevel": 83,
+    "Weight": 20,
+    "Kind": 2,
+    "ItemId": 389019000,
+    "Count": 5
+  },
+  {
+    "Id": 108,
+    "Pool": 2,
+    "MinLevel": 40,
+    "MaxLevel": 83,
+    "Weight": 9,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 50000
+  },
+  {
+    "Id": 109,
+    "Pool": 2,
+    "MinLevel": 40,
+    "MaxLevel": 83,
+    "Weight": 1,
+    "Kind": 2,
+    "ItemId": 379021000,
+    "Count": 1
+  },
+  {
+    "Id": 201,
+    "Pool": 3,
+    "MinLevel": 10,
+    "MaxLevel": 29,
+    "Weight": 1,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 5000
+  },
+  {
+    "Id": 202,
+    "Pool": 3,
+    "MinLevel": 30,
+    "MaxLevel": 59,
+    "Weight": 1,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 10000
+  },
+  {
+    "Id": 203,
+    "Pool": 3,
+    "MinLevel": 60,
+    "MaxLevel": 83,
+    "Weight": 1,
+    "Kind": 0,
+    "ItemId": 0,
+    "Count": 20000
+  }
+]

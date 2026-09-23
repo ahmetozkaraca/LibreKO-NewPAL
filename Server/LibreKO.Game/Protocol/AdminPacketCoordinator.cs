@@ -25,6 +25,7 @@ public class AdminPacketCoordinator(
     IOptions<GameServerSettings> settings,
     SessionManager sessionManager,
     ISessionTerminationService sessionTerminationService,
+    IAccountLockService accountLockService,
     IZoneTransitionService zoneTransitionService,
     IWorldPacketCoordinator worldPacketCoordinator,
     IPlayerProgressionService playerProgressionService,
@@ -76,7 +77,7 @@ public class AdminPacketCoordinator(
 
             case 5: // OPERATOR_CUTOFF - Disconnect target
                 if (target != null)
-                    await sessionTerminationService.LogoutAsync(target.Client);
+                    await DisconnectAsync(target.Client);
                 break;
 
             case 7: // OPERATOR_SUMMON - Summon target to GM
@@ -496,9 +497,15 @@ public class AdminPacketCoordinator(
             return;
         }
 
-        await sessionTerminationService.LogoutAsync(target.Client);
+        await DisconnectAsync(target.Client);
         await SendNoticeAsync(session, $"Kicked {target.Name}.");
         logger.LogInformation("GM {Gm} kicked {Target}", session.Name, target.Name);
+    }
+
+    private async Task DisconnectAsync(IClient client)
+    {
+        await sessionTerminationService.LogoutAsync(client);
+        client.Disconnect();
     }
 
     private async Task HandleKillAsync(UserSession session, string arg)
@@ -1082,7 +1089,12 @@ public class AdminPacketCoordinator(
             return;
         }
 
-        await zoneTransitionService.ChangeZoneAsync(target, PrisonZoneId, PrisonStartX, PrisonStartZ);
+        if (!await zoneTransitionService.ChangeZoneAsync(target, PrisonZoneId, PrisonStartX, PrisonStartZ))
+        {
+            await SendNoticeAsync(session, $"Could not send {target.Name} to prison.");
+            return;
+        }
+
         await SendNoticeAsync(session, $"{target.Name} sent to prison.");
         logger.LogInformation("GM {Gm} sent {Target} to prison", session.Name, target.Name);
     }
@@ -1130,8 +1142,9 @@ public class AdminPacketCoordinator(
         account.Authority = ban ? AccountAuthority.Banned : AccountAuthority.Normal;
         await accountRepo.UpdateAsync(account);
 
-        if (ban && target != null)
-            await sessionTerminationService.LogoutAsync(target.Client);
+        var holder = ban ? target?.Client ?? accountLockService.HolderOf(account.Id) : null;
+        if (holder != null)
+            await DisconnectAsync(holder);
 
         await SendNoticeAsync(session, $"Account {account.Login} {(ban ? "banned" : "unbanned")}.");
         logger.LogInformation("GM {Gm} {Action} account {Login}", session.Name, ban ? "banned" : "unbanned", account.Login);

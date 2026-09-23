@@ -3,26 +3,21 @@ using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Game.Protocol.Writers;
 using LibreKO.Game.World;
-using Microsoft.Extensions.Logging;
 
 namespace LibreKO.Game.Protocol;
 
 public class MagicOverTimeService(
     SessionManager sessionManager,
     IGameDataService gameDataService,
-    IMagicItemUsageService magicItemUsageService,
     ICombatLifecycleService combatLifecycleService,
     ICombatNotificationService combatNotificationService,
-    IEventSystemsPacketCoordinator eventSystemsPacketCoordinator,
-    IUserNotificationService userNotificationService,
-    ILogger<MagicOverTimeService> logger)
+    IEventSystemsPacketCoordinator eventSystemsPacketCoordinator)
 {
-    private const byte PotionItemGroup = 9;
     private const byte OverTimeTickSeconds = 2;
 
-    private const int ItemGrantedSkillIdBase = 400000;
     private const int PercentScale = 100;
     private const int ManaDrainCasterShare = 2;
+    private const byte EmptyAngerGauge = 0;
 
     private static byte AttributeToPartyStatus(byte attribute) => (byte)((MagicAttribute)attribute switch
     {
@@ -30,7 +25,9 @@ public class MagicOverTimeService(
         MagicAttribute.Poison => PartyStatusIcon.Poison,
         _ => PartyStatusIcon.OverTimeDamage,
     });
-    public async Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data)
+
+    public async Task ExecuteAsync(
+        UserSession caster, MagicData magic, int skillId, int targetId, int[] data, MagicCharge charge)
     {
         if (!MagicTypeLookup.TryResolve(gameDataService.MagicType3Table, magic, skillId, out var type3Data))
         {
@@ -38,29 +35,11 @@ public class MagicOverTimeService(
             return;
         }
 
-        if (magic.UseItem != 0)
+        var spendsAnger = (MagicDirectType)type3Data.DirectType == MagicDirectType.AngerExplosion;
+        if (spendsAnger && !caster.HasFullAngerGauge)
         {
-            if ((magic.ItemGroup == PotionItemGroup && !caster.CanUsePotions)
-                || !magicItemUsageService.CanUseSkillItems(caster, magic))
-            {
-                logger.LogWarning(
-                    "Skill {SkillId} refused for {Name}: item {ItemId} is {Reason} (class {Class}, level {Level})",
-                    skillId, caster.Name, magic.ConsumedItem,
-                    magicItemUsageService.CheckItem(caster, magic.ConsumedItem), caster.Class, caster.Level);
-                await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
-                return;
-            }
-        }
-
-        if ((MagicDirectType)type3Data.DirectType == MagicDirectType.AngerExplosion)
-        {
-            if (!caster.HasFullAngerGauge)
-            {
-                await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
-                return;
-            }
-
-            await eventSystemsPacketCoordinator.UpdateAngerGaugeAsync(caster, 0);
+            await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
+            return;
         }
 
         var isHeal = (SkillMoral)magic.Moral is SkillMoral.Self or SkillMoral.FriendWithMe
@@ -69,11 +48,14 @@ public class MagicOverTimeService(
         var npcTargets = new List<NpcInstance>();
         ResolveOverTimeTargets(caster, magic, type3Data, targetId, data, isHeal, playerTargets, npcTargets);
 
-        if (targetId != -1 && playerTargets.Count == 0 && npcTargets.Count == 0)
+        if ((targetId != -1 && playerTargets.Count == 0 && npcTargets.Count == 0) || !await charge.TryPayAsync())
         {
             await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
             return;
         }
+
+        if (spendsAnger)
+            await eventSystemsPacketCoordinator.UpdateAngerGaugeAsync(caster, EmptyAngerGauge);
 
         var actualTargetIds = new HashSet<int>();
 
@@ -87,12 +69,6 @@ public class MagicOverTimeService(
         {
             await ApplyOverTimeToNpcAsync(caster, npcTarget, skillId, type3Data, isHeal);
             actualTargetIds.Add(npcTarget.UniqueId);
-        }
-
-        if (!await magicItemUsageService.TryConsumeSkillItemAsync(caster, magic))
-        {
-            await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
-            return;
         }
 
         var isAreaEffect = IsAreaEffect(type3Data, targetId, data);
@@ -156,11 +132,11 @@ public class MagicOverTimeService(
 
         if (isHeal)
         {
-            var playerTarget = targetId == caster.CharacterId
+            var playerTarget = (SkillMoral)magic.Moral == SkillMoral.Self || targetId == caster.CharacterId
                 ? caster
-                : sessionManager.GetByCharacterId(targetId) ?? caster;
+                : sessionManager.GetByCharacterId(targetId);
 
-            if (playerTarget.Hp > 0)
+            if (playerTarget is { Hp: > 0 })
                 playerTargets.Add(playerTarget);
             return;
         }
@@ -234,7 +210,7 @@ public class MagicOverTimeService(
 
         if (isHeal)
         {
-            await RestorePlayerAsync(caster, target, type3Data, directType);
+            await RestorePlayerAsync(target, type3Data, directType);
         }
         else
         {
@@ -247,24 +223,26 @@ public class MagicOverTimeService(
             }
             else
             {
-                var immediateDamage = GmMode.Taken(target, GmMode.Dealt(caster, target.Hp,
-                    CalculateImmediateDamageForPlayer(caster, target, skillId, type3Data, directType)));
-                if (immediateDamage > 0)
+                var outcome = target.ApplyDamage(GmMode.Taken(target, GmMode.Dealt(caster, target.Hp,
+                    CalculateImmediateDamageForPlayer(caster, target, skillId, type3Data, directType))));
+                if (outcome.Dealt > 0)
                 {
-                    target.Hp = (short)Math.Max(0, target.Hp - immediateDamage);
                     await combatLifecycleService.SendHpChangeAsync(target, caster.CharacterId);
-                    await combatLifecycleService.SendPlayerTargetHpAsync(caster, target, immediateDamage);
+                    await combatLifecycleService.SendPlayerTargetHpAsync(caster, target, outcome.Dealt);
 
                     if (directType is MagicDirectType.DamageAbsorb or MagicDirectType.PercentDrain)
-                        await RestoreCasterHealthAsync(caster, immediateDamage);
-
-                    if (target.Hp <= 0)
-                    {
-                        target.ActiveOverTimeEffects.TryRemove(skillId, out _);
-                        await combatLifecycleService.HandlePlayerDeathAsync(target, caster);
-                        return;
-                    }
+                        await RestoreCasterHealthAsync(caster, outcome.Dealt);
                 }
+
+                if (outcome.Killed)
+                {
+                    target.ActiveOverTimeEffects.TryRemove(skillId, out _);
+                    await combatLifecycleService.HandlePlayerDeathAsync(target, caster);
+                    return;
+                }
+
+                if (target.Hp <= 0)
+                    return;
             }
         }
 
@@ -301,48 +279,41 @@ public class MagicOverTimeService(
             ? PercentOfHealth(npc.Hp, npc.MaxHp, type3Data.FirstDamage)
             : type3Data.FirstDamage;
 
-        if (delta != 0)
+        if (delta > 0)
         {
-            if (delta > 0)
-            {
-                npc.Hp = Math.Min(npc.MaxHp, npc.Hp + delta);
-            }
-            else
-            {
-                var damage = ScalesWithMagicAttack(directType, skillId)
-                    ? MagicCombatHelper.GetMagicDamage(caster, npc, -delta, type3Data.Attribute, gameDataService)
-                    : -delta;
-                damage = GmMode.Dealt(caster, npc.Hp, damage);
-                npc.Hp = Math.Max(0, npc.Hp - damage);
-                npc.RecordDamage(caster.CharacterId, damage, caster, id => sessionManager.GetByCharacterId(id));
-                await combatLifecycleService.SendNpcTargetHpAsync(caster, npc, damage);
+            npc.Heal(delta);
+        }
+        else if (delta < 0)
+        {
+            var damage = ScalesWithMagicAttack(directType, skillId)
+                ? MagicCombatHelper.GetMagicDamage(caster, npc, -delta, type3Data.Attribute, gameDataService)
+                : -delta;
+            var outcome = npc.ApplyDamage(GmMode.Dealt(caster, npc.Hp, damage));
+            if (outcome.Dealt > 0)
+                npc.RecordDamage(caster.CharacterId, outcome.Dealt, caster, id => sessionManager.GetByCharacterId(id));
+            await combatLifecycleService.SendNpcTargetHpAsync(caster, npc, outcome.Dealt);
 
-                if (npc.Hp <= 0)
-                {
-                    npc.ActiveOverTimeEffects.TryRemove(skillId, out _);
-                    await combatLifecycleService.HandleNpcDeathAsync(npc, caster);
-                    return;
-                }
+            if (outcome.Killed)
+            {
+                npc.ActiveOverTimeEffects.TryRemove(skillId, out _);
+                await combatLifecycleService.HandleNpcDeathAsync(npc, caster);
+                return;
             }
+
+            if (!npc.IsAlive)
+                return;
         }
 
         var durationTotal = CalculateTickAmountForNpc(caster, npc, type3Data);
         ScheduleOverTimeEffect(npc.ActiveOverTimeEffects, skillId, caster.CharacterId, durationTotal, type3Data.Duration);
     }
 
-    private async Task RestorePlayerAsync(
-        UserSession caster, UserSession target, MagicType3Data type3Data, MagicDirectType directType)
+    private async Task RestorePlayerAsync(UserSession target, MagicType3Data type3Data, MagicDirectType directType)
     {
-        if (directType is MagicDirectType.HealthPurchase or MagicDirectType.ManaPurchase)
-            await ChargeRestorationAsync(caster, type3Data.TimeDamage);
-
         if (directType is MagicDirectType.Mana or MagicDirectType.ManaShell or MagicDirectType.ManaPurchase)
         {
-            if (type3Data.FirstDamage > 0)
-            {
-                target.Mp = (short)Math.Min(target.MaxMp, target.Mp + type3Data.FirstDamage);
+            if (type3Data.FirstDamage > 0 && RestoreMana(target, type3Data.FirstDamage))
                 await combatLifecycleService.SendMspChangeAsync(target);
-            }
 
             return;
         }
@@ -351,38 +322,38 @@ public class MagicOverTimeService(
             ? PercentOfHealth(target.Hp, target.MaxHp, type3Data.FirstDamage)
             : type3Data.FirstDamage;
 
-        if (restored > 0)
-        {
-            target.Hp = (short)Math.Min(target.MaxHp, target.Hp + restored);
+        if (restored > 0 && target.Heal(restored) > 0)
             await combatLifecycleService.SendHpChangeAsync(target);
-        }
     }
 
-    private async Task ChargeRestorationAsync(UserSession caster, int cost)
-    {
-        if (cost <= 0)
-            return;
+    private static bool RestoreMana(UserSession target, int amount) =>
+        target.WithLock(session =>
+        {
+            if (session.Hp <= 0 || session.Mp >= session.MaxMp)
+                return false;
 
-        caster.Money = Math.Max(0, caster.Money - cost);
-        await userNotificationService.SendGoldLossAsync(caster, cost);
-    }
+            session.Mp = (short)Math.Min(session.MaxMp, session.Mp + amount);
+            return true;
+        });
 
     private async Task RestoreCasterHealthAsync(UserSession caster, int amount)
     {
-        if (amount <= 0 || caster.Hp <= 0)
-            return;
-
-        caster.Hp = (short)Math.Min(caster.MaxHp, caster.Hp + amount);
-        await combatLifecycleService.SendHpChangeAsync(caster);
+        if (amount > 0 && caster.Heal(amount) > 0)
+            await combatLifecycleService.SendHpChangeAsync(caster);
     }
 
     private async Task DrainPlayerManaAsync(UserSession caster, UserSession target, MagicType3Data type3Data)
     {
-        var drained = Math.Min((int)target.Mp, Math.Abs(type3Data.FirstDamage));
+        var drained = target.WithLock(session =>
+        {
+            var amount = Math.Min((int)session.Mp, Math.Abs(type3Data.FirstDamage));
+            if (amount > 0)
+                session.Mp = (short)(session.Mp - amount);
+            return amount;
+        });
         if (drained <= 0)
             return;
 
-        target.Mp = (short)(target.Mp - drained);
         await combatLifecycleService.SendMspChangeAsync(target);
         await RestoreCasterHealthAsync(caster, drained / ManaDrainCasterShare);
     }
@@ -394,7 +365,7 @@ public class MagicOverTimeService(
 
     private static bool ScalesWithMagicAttack(MagicDirectType directType, int skillId) =>
         directType is MagicDirectType.Health or MagicDirectType.DamageAbsorb
-        && skillId < ItemGrantedSkillIdBase;
+        && skillId < MagicSkillRequirement.ItemSkillFirstId;
 
     private int CalculateImmediateDamageForPlayer(
         UserSession caster,

@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
@@ -13,6 +13,8 @@ public sealed class WarpListPacketWriter
     public const byte ResultNotQualified = 7;
     public const byte ResultTradeCooldown = 8;
     public const byte ResultServerFull = 9;
+
+    public const short NoUserLimit = 0;
 
     public readonly record struct Entry(
         short WarpId, string Name, string Announce, short ZoneId, short MaxUsers, uint Fee);

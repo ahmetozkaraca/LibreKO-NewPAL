@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
@@ -6,16 +6,6 @@ public sealed class ZoneChangePacketWriter
 {
 
     public const ushort NoBattleZone = ushort.MaxValue;
-
-    public static Packet Loading(short zoneId, short x, short z, short y)
-    {
-        var packet = Sub(ZoneChangeSubOpcode.Loading);
-        packet.WriteShort(zoneId);
-        packet.WriteShort(x);
-        packet.WriteShort(z);
-        packet.WriteShort(y);
-        return packet;
-    }
 
     public static Packet Ready() => Sub(ZoneChangeSubOpcode.Ready);
 

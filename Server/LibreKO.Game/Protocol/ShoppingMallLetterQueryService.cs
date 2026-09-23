@@ -19,8 +19,6 @@ public class ShoppingMallLetterQueryService(IServiceScopeFactory scopeFactory,
     ILogger<ShoppingMallLetterQueryService> logger) : IShoppingMallLetterQueryService
 {
     private const int LetterLifetimeDays = 30;
-    private const byte LetterTypePlain = 1;
-    private const byte LetterStatusRead = 2;
 
     public async Task SendUnreadAsync(UserSession session)
     {
@@ -90,8 +88,8 @@ public class ShoppingMallLetterQueryService(IServiceScopeFactory scopeFactory,
         }
 
         letter.ReadDate ??= DateTime.UtcNow;
-        if (letter.Type == LetterTypePlain)
-            letter.Status = LetterStatusRead;
+        if (letter.Type == ShoppingMallLetterProtocol.LetterTypeText)
+            letter.Status = ShoppingMallLetterProtocol.LetterStatusRead;
 
         await db.SaveChangesAsync();
 

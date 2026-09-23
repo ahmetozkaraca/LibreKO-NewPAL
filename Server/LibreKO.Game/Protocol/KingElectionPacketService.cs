@@ -233,7 +233,7 @@ public class KingElectionPacketService(
 
         using var scope = scopeFactory.CreateScope();
         var repo = scope.ServiceProvider.GetRequiredService<IKingElectionRepository>();
-        var existing = await repo.FindCandidateAsync((byte)session.Nation, KingPacketConstants.ElectionListCandidate, nomineeName);
+        var existing = await repo.FindCandidateAsync((byte)session.Nation, KingPacketConstants.ElectionListCandidate, nominee.Name);
 
         if (existing != null)
         {
@@ -415,7 +415,8 @@ public class KingElectionPacketService(
             return;
         }
 
-        var alreadyVoted = await repo.HasVotedAsync((byte)session.Nation, session.Name);
+        var voter = session.AccountId.ToString();
+        var alreadyVoted = await repo.HasVotedAsync((byte)session.Nation, voter);
 
         if (alreadyVoted)
         {
@@ -425,12 +426,12 @@ public class KingElectionPacketService(
 
         await repo.AddVoteAsync(new KingBallotBox
         {
-            AccountId = session.AccountId.ToString(),
+            AccountId = voter,
             CharId = session.Name,
             Nation = (byte)session.Nation,
-            CandidacyId = candidateName
+            CandidacyId = candidate.Name
         });
-        logger.LogInformation("{Name} voted for {CandidateName} in nation {Nation}", session.Name, candidateName, session.Nation);
+        logger.LogInformation("{Name} voted for {CandidateName} in nation {Nation}", session.Name, candidate.Name, session.Nation);
 
         await session.Client.SendPacket(PollResult(pollOpcode, KingPacketWriter.Accepted));
     }

@@ -1,4 +1,5 @@
-﻿using LibreKO.Common.Domain.Entities;
+﻿using System.Collections.Concurrent;
+using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -25,8 +26,16 @@ public class KnightsMembershipPacketService(
     IServiceScopeFactory scopeFactory,
     IKnightsRuntimeService knightsRuntimeService,
     IMagicItemUsageService itemUsage,
+    TimeProvider timeProvider,
     ILogger<KnightsMembershipPacketService> logger) : IKnightsMembershipPacketService
 {
+    private const byte TraineeFame = 5;
+    private static readonly TimeSpan JoinRequestLifetime = TimeSpan.FromMinutes(5);
+
+    private readonly record struct JoinRequest(short ClanId, DateTimeOffset ExpiresAt);
+
+    private readonly ConcurrentDictionary<int, JoinRequest> _joinRequests = new();
+
     private async Task<int> RefundDonationAsync(KnightsEntity? clan, UserSession member)
     {
         var donated = member.KnightsPoints;
@@ -129,6 +138,12 @@ public class KnightsMembershipPacketService(
             return;
         }
 
+        if (!session.WithLock(PayClanFoundingFee))
+        {
+            await session.Client.SendPacket(KnightsPacketWriter.CreateResult(KnightsCreateResult.NotEnoughCoins));
+            return;
+        }
+
         var clan = new KnightsEntity
         {
             Name = clanName,
@@ -140,7 +155,6 @@ public class KnightsMembershipPacketService(
 
         await knightsRepo.CreateAsync(clan);
 
-        session.Money -= KnightsPacketConstants.ClanCoinRequirement;
         session.KnightsId = (short)clan.Id;
         session.KnightsFame = 1;
         session.KnightsName = clanName;
@@ -177,6 +191,12 @@ public class KnightsMembershipPacketService(
             return;
         }
 
+        if (clan.Nation != (byte)session.Nation)
+        {
+            await session.Client.SendPacket(KnightsPacketWriter.MembershipResult(KnightsSubOpcode.Join, KnightsResult.DifferentNation));
+            return;
+        }
+
         var leader = sessionManager.GetByName(clan.Chief);
         if (leader == null)
         {
@@ -184,9 +204,27 @@ public class KnightsMembershipPacketService(
             return;
         }
 
+        var now = timeProvider.GetUtcNow();
+        foreach (var pending in _joinRequests)
+        {
+            if (pending.Value.ExpiresAt < now)
+                _joinRequests.TryRemove(pending);
+        }
+
+        _joinRequests[session.CharacterId] = new JoinRequest(clanId, now + JoinRequestLifetime);
+
         var request = KnightsPacketWriter.JoinRequestForwarded(
             session.CharacterId, clanId, session.Name);
         await leader.Client.SendPacket(request);
+    }
+
+    private bool TryTakeJoinRequest(UserSession applicant, short clanId)
+    {
+        if (!_joinRequests.TryGetValue(applicant.CharacterId, out var request) || request.ClanId != clanId)
+            return false;
+
+        return _joinRequests.TryRemove(new KeyValuePair<int, JoinRequest>(applicant.CharacterId, request))
+            && request.ExpiresAt >= timeProvider.GetUtcNow();
     }
 
     public async Task HandleWithdrawAsync(UserSession session)
@@ -208,7 +246,7 @@ public class KnightsMembershipPacketService(
 
         if (clan != null)
         {
-            clan.Members = (short)Math.Max(0, clan.Members - 1);
+            sessionManager.Knights.WithClan(clan.Id, ReleaseSeat, false);
             await knightsRepo.UpdateAsync(clan);
         }
 
@@ -268,7 +306,7 @@ public class KnightsMembershipPacketService(
             }
         }
 
-        clan.Members = (short)Math.Max(0, clan.Members - 1);
+        sessionManager.Knights.WithClan(clan.Id, ReleaseSeat, false);
 
         if (target != null)
         {
@@ -408,16 +446,34 @@ public class KnightsMembershipPacketService(
             return;
         }
 
-        if (clan.Members >= KnightsPacketConstants.MaxClanUsers)
+        if (!TryTakeJoinRequest(target, session.KnightsId))
+        {
+            await session.Client.SendPacket(KnightsPacketWriter.MembershipResult(KnightsSubOpcode.Admit, KnightsResult.NoSuchUser));
+            return;
+        }
+
+        if (!sessionManager.Knights.WithClan(clan.Id, ReserveSeat, false))
         {
             await session.Client.SendPacket(KnightsPacketWriter.MembershipResult(KnightsSubOpcode.Admit, KnightsResult.ClanFull));
             return;
         }
 
-        target.KnightsId = session.KnightsId;
-        target.KnightsFame = 5;
-        target.KnightsName = clan.Name;
-        clan.Members++;
+        var enlisted = target.WithLock(applicant =>
+        {
+            if (applicant.KnightsId > 0)
+                return false;
+
+            applicant.KnightsId = clan.Id;
+            applicant.KnightsFame = TraineeFame;
+            applicant.KnightsName = clan.Name;
+            return true;
+        });
+        if (!enlisted)
+        {
+            sessionManager.Knights.WithClan(clan.Id, ReleaseSeat, false);
+            await session.Client.SendPacket(KnightsPacketWriter.MembershipResult(KnightsSubOpcode.Admit, KnightsResult.AlreadyInClan));
+            return;
+        }
 
         using var scope = scopeFactory.CreateScope();
         var knightsRepo = scope.ServiceProvider.GetRequiredService<IKnightsRepository>();
@@ -447,7 +503,7 @@ public class KnightsMembershipPacketService(
 
         var targetName = packet.ReadString();
         var target = sessionManager.GetByName(targetName);
-        if (target == null || target.Nation != session.Nation)
+        if (target == null || target.Nation != session.Nation || !TryTakeJoinRequest(target, session.KnightsId))
             return;
 
         var response = KnightsPacketWriter.MembershipResult(KnightsSubOpcode.Reject, KnightsResult.UserDeclined);
@@ -461,9 +517,28 @@ public class KnightsMembershipPacketService(
         }
     }
 
-    private static Packet CreateProcessResponse(KnightsSubOpcode subOpcode)
+    private static bool PayClanFoundingFee(UserSession founder)
     {
-        return KnightsPacketWriter.ProcessResponse(subOpcode);
+        if (founder.Money < KnightsPacketConstants.ClanCoinRequirement)
+            return false;
+
+        founder.Money -= KnightsPacketConstants.ClanCoinRequirement;
+        return true;
+    }
+
+    private static bool ReserveSeat(KnightsEntity clan)
+    {
+        if (clan.Members >= KnightsPacketConstants.MaxClanUsers)
+            return false;
+
+        clan.Members++;
+        return true;
+    }
+
+    private static bool ReleaseSeat(KnightsEntity clan)
+    {
+        clan.Members = (short)Math.Max(0, clan.Members - 1);
+        return true;
     }
 
     private async Task<bool> HasValidClanMembershipAsync(UserSession session, IKnightsRepository knightsRepo)

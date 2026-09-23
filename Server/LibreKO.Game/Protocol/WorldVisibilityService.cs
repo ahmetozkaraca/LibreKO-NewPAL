@@ -21,6 +21,8 @@ public interface IWorldVisibilityService
     Task BroadcastDisplayTitleAsync(UserSession session);
     Task BroadcastUserInOutAsync(UserSession session, InOutType type);
     Task BroadcastRegionTransitionAsync(UserSession session, int oldRegionX, int oldRegionZ);
+    Task ShowToAsync(UserSession user, IReadOnlyCollection<UserSession> viewers);
+    Task HideFromAsync(UserSession user, IReadOnlyCollection<UserSession> viewers);
 }
 
 public class WorldVisibilityService(
@@ -35,7 +37,7 @@ public class WorldVisibilityService(
         if (session == null)
             return;
 
-        var nearbyUsers = sessionManager.Regions.GetNearbyUsers(session).ToList();
+        var nearbyUsers = VisibleUsersAround(session);
         var payloadBytes = packet.RemainingBytes;
 
         if (packet.RemainingBytes < 2)
@@ -93,7 +95,7 @@ public class WorldVisibilityService(
         logger.LogDebug("SendNearbyUsers for {Name} zone={Zone} pos=({X},{Z}) region=({RX},{RZ})",
             session.Name, session.ZoneId, session.X, session.Z, session.RegionX, session.RegionZ);
 
-        var nearbyUsers = sessionManager.Regions.GetNearbyUsers(session).ToList();
+        var nearbyUsers = VisibleUsersAround(session);
         var nearbyNpcs = sessionManager.Regions.GetNearbyNpcs(session)
             .Where(npc => npc.IsAlive)
             .ToList();
@@ -208,7 +210,7 @@ public class WorldVisibilityService(
 
     public async Task SendRegionUserListAsync(UserSession session)
     {
-        var nearbyUsers = sessionManager.Regions.GetNearbyUsers(session).ToList();
+        var nearbyUsers = VisibleUsersAround(session);
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogDebug(
@@ -239,7 +241,7 @@ public class WorldVisibilityService(
     public async Task HandleBottomUserListAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null) return;
+        if (session == null || packet.RemainingBytes < sizeof(byte)) return;
 
         var subOpcode = packet.ReadByte();
 
@@ -292,7 +294,8 @@ public class WorldVisibilityService(
         return sessionManager.GetAll()
             .Where(u => u.ZoneId == session.ZoneId
                         && u.CharacterId != session.CharacterId
-                        && (session.IsGM || !u.IsGM))
+                        && (session.IsGM || !u.IsGM)
+                        && StealthSight.CanSee(session, u))
             .Select(u => (User: u, DistSq: SquaredDistance(session, u)))
             .Where(x => session.IsGM || x.DistSq <= BottomUserListMaxDistanceSq)
             .OrderBy(x => x.DistSq)
@@ -357,8 +360,11 @@ public class WorldVisibilityService(
     {
         var oldNearby = sessionManager.Regions
             .GetNearbyUsersAt(session.Room, session.ZoneId, oldRegionX, oldRegionZ, session.CharacterId)
+            .Where(u => StealthSight.CanSee(u, session))
             .ToHashSet();
-        var newNearby = sessionManager.Regions.GetNearbyUsers(session).ToHashSet();
+        var newNearby = sessionManager.Regions.GetNearbyUsers(session)
+            .Where(u => StealthSight.CanSee(u, session))
+            .ToHashSet();
 
         var gainedSight = newNearby.Where(u => !oldNearby.Contains(u)).ToList();
         var lostSight = oldNearby.Where(u => !newNearby.Contains(u)).ToList();
@@ -370,28 +376,40 @@ public class WorldVisibilityService(
                 string.Join(",", gainedSight.Select(u => u.Name)),
                 string.Join(",", lostSight.Select(u => u.Name)));
 
-        if (gainedSight.Count > 0)
-        {
-            var inPacket = BuildUserInOutPacket(session, InOutType.In);
-            await Task.WhenAll(gainedSight.Select(u => u.Client.SendPacket(inPacket)));
-            if (session.IsGM)
-            {
-                var gmFx = AdminPanelPacketWriter.GmFx(session.CharacterId, session.GmModeEnabled);
-                await Task.WhenAll(gainedSight.Select(u => u.Client.SendPacket(gmFx)));
-            }
-            if (session.InCombatStance)
-            {
-                var stance = BuildCombatStancePacket(session);
-                await Task.WhenAll(gainedSight.Select(u => u.Client.SendPacket(stance)));
-            }
-        }
+        await ShowToAsync(session, gainedSight);
+        await HideFromAsync(session, lostSight);
+    }
 
-        if (lostSight.Count > 0)
+    public async Task ShowToAsync(UserSession user, IReadOnlyCollection<UserSession> viewers)
+    {
+        if (viewers.Count == 0)
+            return;
+
+        var inPacket = BuildUserInOutPacket(user, InOutType.In);
+        await Task.WhenAll(viewers.Select(viewer => viewer.Client.SendPacket(inPacket)));
+        if (user.IsGM)
         {
-            var outPacket = BuildUserInOutPacket(session, InOutType.Out);
-            await Task.WhenAll(lostSight.Select(u => u.Client.SendPacket(outPacket)));
+            var gmFx = AdminPanelPacketWriter.GmFx(user.CharacterId, user.GmModeEnabled);
+            await Task.WhenAll(viewers.Select(viewer => viewer.Client.SendPacket(gmFx)));
+        }
+        if (user.InCombatStance)
+        {
+            var stance = BuildCombatStancePacket(user);
+            await Task.WhenAll(viewers.Select(viewer => viewer.Client.SendPacket(stance)));
         }
     }
+
+    public async Task HideFromAsync(UserSession user, IReadOnlyCollection<UserSession> viewers)
+    {
+        if (viewers.Count == 0)
+            return;
+
+        var outPacket = BuildUserInOutPacket(user, InOutType.Out);
+        await Task.WhenAll(viewers.Select(viewer => viewer.Client.SendPacket(outPacket)));
+    }
+
+    private List<UserSession> VisibleUsersAround(UserSession session)
+        => [.. sessionManager.Regions.GetNearbyUsers(session).Where(user => StealthSight.CanSee(session, user))];
 
     private Packet BuildUserInOutPacket(UserSession session, InOutType type) =>
         UserInfoPacketWriter.InOut(

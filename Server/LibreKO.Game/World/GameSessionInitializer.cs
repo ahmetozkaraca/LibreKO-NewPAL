@@ -31,6 +31,21 @@ public class GameSessionInitializer(
         if (character == null || account == null)
             return null;
 
+        if (account.Authority == AccountAuthority.Banned)
+        {
+            logger.LogWarning("Refusing to start the game for banned account {AccountId}", account.Id);
+            return null;
+        }
+
+        if (character.AccountId != account.Id || character.DeletionTime != null)
+        {
+            logger.LogWarning(
+                "Refusing to start the game with character {CharacterId}: deleted or not owned by account {AccountId}",
+                character.Id,
+                account.Id);
+            return null;
+        }
+
         var originalZoneId = character.MapId;
         if (CharacterReconnectZoneRepair.TryRepair(character, account.Nation, gameData))
         {

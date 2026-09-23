@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
 using LibreKO.Game.Protocol.Writers;
@@ -46,13 +46,20 @@ public class MerchantLifecycleService(
         {
             openResult = MinimumMerchantLevel;
         }
+        else if (session.Trade.IsBuyingMerchantPreparing || session.IsGathering)
+        {
+            openResult = OpenWhileMerchanting;
+        }
         else
         {
             openResult = OpenAccepted;
-            session.Trade.MerchantTargetUserId = -1;
-            session.Trade.IsSellingMerchantPreparing = true;
-            for (var i = 0; i < session.Trade.MerchantItems.Length; i++)
-                session.Trade.MerchantItems[i] = new MerchantItem();
+            session.WithLock(s =>
+            {
+                s.Trade.MerchantTargetUserId = -1;
+                s.Trade.IsSellingMerchantPreparing = true;
+                for (var i = 0; i < s.Trade.MerchantItems.Length; i++)
+                    s.Trade.MerchantItems[i] = new MerchantItem();
+            });
         }
 
         await session.Client.SendPacket(MerchantPacketWriter.OpenResult(
@@ -64,16 +71,23 @@ public class MerchantLifecycleService(
 
     public async Task CloseAsync(UserSession session, MerchantInOut? merchantInOutType)
     {
-        if (!session.Trade.IsMerchanting && !session.Trade.IsSellingMerchantPreparing && !HasMerchantItems(session))
+        var closed = session.WithLock(s =>
+        {
+            if (!s.Trade.IsMerchanting && !s.Trade.IsSellingMerchantPreparing && !HasMerchantItems(s))
+                return false;
+
+            for (var i = 0; i < s.Trade.MerchantItems.Length; i++)
+                s.Trade.MerchantItems[i] = new MerchantItem();
+
+            s.Trade.MerchantState = MerchantMode.None;
+            s.Trade.IsSellingMerchantPreparing = false;
+            s.Trade.MerchantTargetUserId = -1;
+            s.Trade.MerchantAdvert = string.Empty;
+            return true;
+        });
+
+        if (!closed)
             return;
-
-        for (var i = 0; i < session.Trade.MerchantItems.Length; i++)
-            session.Trade.MerchantItems[i] = new MerchantItem();
-
-        session.Trade.MerchantState = MerchantMode.None;
-        session.Trade.IsSellingMerchantPreparing = false;
-        session.Trade.MerchantTargetUserId = -1;
-        session.Trade.MerchantAdvert = string.Empty;
 
         if (!merchantInOutType.HasValue)
             return;
@@ -85,11 +99,27 @@ public class MerchantLifecycleService(
     public async Task InsertAsync(UserSession session, Packet packet)
     {
         var advertMessage = packet.ReadString();
-        var staged = session.Trade.MerchantItems.Count(item => item is { IsEmpty: false });
+        var staged = 0;
         var refusal =
             advertMessage.Length > MerchantPacketConstants.MaxAdvertLength ? $"advert is {advertMessage.Length} characters"
-            : staged == 0 ? "no items staged"
+            : !session.Trade.IsSellingMerchantPreparing || session.Trade.IsMerchanting ? "the stall setup is not open"
+            : session.Trade.IsTrading || session.IsGathering ? "busy"
             : null;
+
+        refusal ??= session.WithLock(s =>
+        {
+            staged = s.Trade.MerchantItems.Count(item => item is { IsEmpty: false });
+            if (staged == 0)
+                return "no items staged";
+
+            if (s.Trade.MerchantItems.Any(item => item is { IsEmpty: false } && !item.IsStillHeldIn(s.Inventory[item.OriginalSlot])))
+                return "a staged item is no longer where it was listed";
+
+            s.Trade.MerchantState = MerchantMode.Selling;
+            s.Trade.IsSellingMerchantPreparing = true;
+            s.Trade.MerchantAdvert = advertMessage;
+            return null;
+        });
 
         if (refusal != null)
         {
@@ -101,10 +131,6 @@ public class MerchantLifecycleService(
         logger.LogDebug(
             "Merchant insert accepted for {Name}: advert \"{Advert}\", {Staged} staged, character {CharacterId}",
             session.Name, advertMessage, staged, session.CharacterId);
-
-        session.Trade.MerchantState = MerchantMode.Selling;
-        session.Trade.IsSellingMerchantPreparing = true;
-        session.Trade.MerchantAdvert = advertMessage;
 
         var broadcast = MerchantPacketWriter.StallInserted(
             MerchantPacketWriter.Succeeded, advertMessage, session.CharacterId,

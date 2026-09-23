@@ -103,6 +103,7 @@ public class TradeTests : GameTestBase
         bagSlot.ItemId = itemId;
         bagSlot.Count = 3;
         bagSlot.Durability = 25;
+        session.Trade.IsSellingMerchantPreparing = true;
 
         var add = new Packet(GameOpcodes.GS_MERCHANT);
         add.WriteByte((byte)MerchantSubOpcode.ItemAdd);
@@ -165,6 +166,9 @@ public class TradeTests : GameTestBase
             Price = 1000,
             OriginalSlot = InventoryConstants.SlotMax
         };
+        merchantA.Inventory[InventoryConstants.SlotMax].ItemId = itemId;
+        merchantA.Inventory[InventoryConstants.SlotMax].Count = 1;
+        merchantA.Inventory[InventoryConstants.SlotMax].Durability = 10;
 
         var merchantBClient = Substitute.For<IClient>();
         merchantBClient.Id.Returns(Guid.NewGuid());
@@ -179,6 +183,9 @@ public class TradeTests : GameTestBase
             Price = 2000,
             OriginalSlot = InventoryConstants.SlotMax
         };
+        merchantB.Inventory[InventoryConstants.SlotMax].ItemId = itemId;
+        merchantB.Inventory[InventoryConstants.SlotMax].Count = 1;
+        merchantB.Inventory[InventoryConstants.SlotMax].Durability = 20;
 
         var coordinator = provider.GetRequiredService<IMerchantPacketCoordinator>();
 
@@ -246,6 +253,9 @@ public class TradeTests : GameTestBase
             Price = 2000,
             OriginalSlot = InventoryConstants.SlotMax
         };
+        merchant.Inventory[InventoryConstants.SlotMax].ItemId = itemId;
+        merchant.Inventory[InventoryConstants.SlotMax].Count = 1;
+        merchant.Inventory[InventoryConstants.SlotMax].Durability = 20;
 
         var coordinator = provider.GetRequiredService<IMerchantPacketCoordinator>();
 
@@ -609,11 +619,12 @@ public class TradeTests : GameTestBase
         session.Warehouse[0].ItemId = itemId;
         session.Warehouse[0].Count = 1;
         session.Warehouse[0].Durability = 50;
+        var warehouseNpc = SpawnWarehouseKeeper(sessionManager);
 
         // Wire layout (Input 2): [u8 opcode][u32 npcId][u32 itemId][u8 page][u8 src][u8 dst][i32 count].
         var packet = new Packet(GameOpcodes.GS_WAREHOUSE);
         packet.WriteByte(2);
-        packet.WriteInt(1000);
+        packet.WriteInt(warehouseNpc.UniqueId);
         packet.WriteInt(itemId);
         packet.WriteByte(0);
         packet.WriteByte(0);
@@ -697,11 +708,12 @@ public class TradeTests : GameTestBase
         var session = sessionManager.CreateSession(client, characterId: 73, accountId: 83);
         session.Money = 5000;
         session.WarehouseMoney = 1000;
+        var warehouseNpc = SpawnWarehouseKeeper(sessionManager);
 
         // Wire layout (Input 2): [u8 opcode][u32 npcId][u32 itemId][u8 page][u8 src][u8 dst][i32 count].
         var packet = new Packet(GameOpcodes.GS_WAREHOUSE);
         packet.WriteByte(2);
-        packet.WriteInt(1000);          // npc id
+        packet.WriteInt(warehouseNpc.UniqueId);          // npc id
         packet.WriteInt(900000000);     // item id (Gold sentinel)
         packet.WriteByte(0);
         packet.WriteByte(0);
@@ -734,11 +746,12 @@ public class TradeTests : GameTestBase
         var session = sessionManager.CreateSession(client, characterId: 74, accountId: 84);
         session.Money = 1000;
         session.WarehouseMoney = 5000;
+        var warehouseNpc = SpawnWarehouseKeeper(sessionManager);
 
         // Wire layout (Output 3): [u8 opcode][u32 npcId][u32 itemId][u8 page][u8 src][u8 dst][i32 count].
         var packet = new Packet(GameOpcodes.GS_WAREHOUSE);
         packet.WriteByte(3);
-        packet.WriteInt(1000);
+        packet.WriteInt(warehouseNpc.UniqueId);
         packet.WriteInt(900000000);
         packet.WriteByte(0);
         packet.WriteByte(0);
@@ -758,6 +771,14 @@ public class TradeTests : GameTestBase
 
     private const byte ExchangeAddSub = 3;
     private const float OutOfTradeRangeOffset = 1000f;
+
+    private static NpcInstance SpawnWarehouseKeeper(SessionManager sessionManager) =>
+        sessionManager.Regions.SpawnNpc(new NpcInstance
+        {
+            NpcType = NpcData.TypeWarehouse,
+            MaxHp = 1,
+            Hp = 1
+        });
 
     [Fact]
     public async Task ExchangeTransferService_AddAsync_RejectsNegativeCountInsteadOfInflatingStack()

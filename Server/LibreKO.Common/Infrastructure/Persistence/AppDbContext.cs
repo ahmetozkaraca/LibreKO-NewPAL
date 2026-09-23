@@ -27,6 +27,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<KingBallotBox> KingBallotBox { get; set; }
     public DbSet<SheriffReportEntity> SheriffReports { get; set; }
     public DbSet<SheriffVoteEntity> SheriffVotes { get; set; }
+    public DbSet<CharacterRewardQuest> CharacterRewardQuests { get; set; }
+    public DbSet<EventCoinWallet> EventCoinWallets { get; set; }
+    public DbSet<RouletteSpin> RouletteSpins { get; set; }
+    public DbSet<DailyRewardClaim> DailyRewardClaims { get; set; }
 
     // Static game data
     public DbSet<LevelUpData> LevelUp { get; set; }
@@ -77,6 +81,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<LotteryEventData> LotteryEvents { get; set; }
     public DbSet<LotteryRewardData> LotteryRewards { get; set; }
     public DbSet<LotteryScheduleData> LotterySchedules { get; set; }
+    public DbSet<RewardQuestData> RewardQuests { get; set; }
+    public DbSet<RewardQuestTargetData> RewardQuestTargets { get; set; }
+    public DbSet<RewardQuestItemData> RewardQuestItems { get; set; }
+    public DbSet<RewardQuestRewardData> RewardQuestRewards { get; set; }
+    public DbSet<RewardPrizeData> RewardPrizes { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

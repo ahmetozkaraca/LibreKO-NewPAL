@@ -225,8 +225,19 @@ public class ScriptItemService(
 
     public void GoldGain(int _uid, int amount)
     {
-        session.Money = Math.Min(session.Money + amount, int.MaxValue);
-        QueueGoldChange(1, amount);
+        if (amount <= 0)
+            return;
+
+        var credited = session.WithLock(player =>
+        {
+            var room = Math.Max(0L, (long)ExchangePacketConstants.CoinMax - player.Money);
+            var gained = (int)Math.Min(amount, room);
+            player.Money += gained;
+            return gained;
+        });
+
+        if (credited > 0)
+            QueueGoldChange(GoldChangePacketWriter.Gained, credited);
     }
 
     public void GoldLose(int _uid, int amount)

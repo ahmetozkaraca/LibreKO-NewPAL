@@ -66,7 +66,8 @@ public abstract class GameTestBase
     protected static ServiceProvider CreateProvider(
         Action<AppDbContext> seed,
         Action<IGameDataService>? configureGameData = null,
-        Action<GameServerSettings>? configureSettings = null)
+        Action<GameServerSettings>? configureSettings = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var dbRoot = new InMemoryDatabaseRoot();
         var dbName = $"GameTests_{Guid.NewGuid():N}";
@@ -83,6 +84,7 @@ public abstract class GameTestBase
         services.AddScoped<IKnightsAllianceRepository, KnightsAllianceRepository>();
         services.AddScoped<IKingElectionRepository, KingElectionRepository>();
         services.AddScoped<ISheriffReportRepository, SheriffReportRepository>();
+        services.AddScoped<IRewardStateRepository, RewardStateRepository>();
         services.AddSingleton<IHostEnvironment>(TestHostEnvironmentFactory.Create());
         services.AddScoped<IPreGameService, PreGameService>();
         services.AddScoped<IGameSessionInitializer, GameSessionInitializer>();
@@ -113,6 +115,7 @@ public abstract class GameTestBase
         services.AddSingleton<ICombatNotificationService, CombatNotificationService>();
         services.AddSingleton<ICombatRewardService, CombatRewardService>();
         services.AddSingleton<ICombatLifecycleService, CombatLifecycleService>();
+        services.AddSingleton<INpcKillObserver, WarNpcKillObserver>();
         services.AddSingleton<IExchangeLifecycleService, ExchangeLifecycleService>();
         services.AddSingleton<IExchangeTransferService, ExchangeTransferService>();
         services.AddSingleton<IItemEquipmentEffectService, ItemEquipmentEffectService>();
@@ -141,6 +144,8 @@ public abstract class GameTestBase
         services.AddSingleton<IMagicCombatEffectService, MagicCombatEffectService>();
         services.AddSingleton<IMagicExecutionService, MagicExecutionService>();
         services.AddSingleton<IMagicItemUsageService, MagicItemUsageService>();
+        services.AddSingleton<IMagicCostService, MagicCostService>();
+        services.AddSingleton<IMagicTargetingService, MagicTargetingService>();
         services.AddSingleton<IMagicMovementEffectService, MagicMovementEffectService>();
         services.AddSingleton<IMagicStatusEffectService, MagicStatusEffectService>();
         services.AddSingleton<IMagicTimingService, MagicTimingService>();
@@ -148,6 +153,13 @@ public abstract class GameTestBase
         services.AddSingleton<IStealthService, StealthService>();
         services.AddSingleton<IQuestNpcInteractionService, QuestNpcInteractionService>();
         services.AddSingleton<IQuestProgressionService, QuestProgressionService>();
+        services.AddSingleton<IRewardRandom, RewardRandom>();
+        services.AddSingleton<IPrizeDrawService, PrizeDrawService>();
+        services.AddSingleton<IRewardGrantService, RewardGrantService>();
+        services.AddSingleton<IRewardStateService, RewardStateService>();
+        services.AddSingleton<IRewardQuestService, RewardQuestService>();
+        services.AddSingleton<IRewardDrawService, RewardDrawService>();
+        services.AddSingleton<INpcKillObserver, RewardQuestKillObserver>();
         services.AddSingleton<IWorldMovementService, WorldMovementService>();
         services.AddSingleton<IWorldObjectEventService, WorldObjectEventService>();
         services.AddSingleton<IWorldVisibilityService, WorldVisibilityService>();
@@ -185,6 +197,7 @@ public abstract class GameTestBase
         gameData.KingSystemTable.Returns(new Dictionary<byte, KingSystemData>());
         configureGameData?.Invoke(gameData);
         services.AddSingleton(gameData);
+        configureServices?.Invoke(services);
 
         var provider = services.BuildServiceProvider();
         using var scope = provider.CreateScope();

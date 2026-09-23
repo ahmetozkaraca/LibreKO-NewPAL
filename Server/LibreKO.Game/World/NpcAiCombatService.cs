@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Services;
+﻿using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol.Writers;
@@ -158,11 +158,11 @@ public class NpcAiCombatService(
                         if (damage > damageCap)
                             damage = damageCap;
 
-                        damage = GmMode.Taken(target, Math.Clamp(damage, 0, CombatUtils.MaxDamage));
+                        var outcome = target.ApplyDamage(GmMode.Taken(target, Math.Clamp(damage, 0, CombatUtils.MaxDamage)));
+                        damage = outcome.Dealt;
                         if (damage > 0)
                         {
-                            target.Hp = (short)Math.Max(0, target.Hp - damage);
-                            attackResult = target.Hp > 0 ? AttackResult.Succeeded : AttackResult.TargetDead;
+                            attackResult = outcome.Killed ? AttackResult.TargetDead : AttackResult.Succeeded;
 
                             logger.LogDebug(
                                 "NPC physical attack applied: npc={NpcId}/{UniqueId} npcName=\"{NpcName}\" target={TargetId}/{TargetName} totalHit={TotalHit} tempAc={TempAc} hitBase={HitBase} hitRateRatio={HitRateRatio} hitResult={HitResult} damage={Damage} hpAfter={HpAfter}",

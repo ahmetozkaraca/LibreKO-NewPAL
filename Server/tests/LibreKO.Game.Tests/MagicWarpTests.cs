@@ -14,11 +14,15 @@ namespace LibreKO.Game.Tests;
 
 public class MagicWarpTests : GameTestBase
 {
-    private const int EscapeId = 209035;
-    private const int SummonFriendId = 209004;
-    private const int DescentId = 205650;
-    private const int WildAdventId = 208770;
+    private const int EscapeId = 109035;
+    private const int SummonFriendId = 109004;
+    private const int DescentId = 105650;
+    private const int WildAdventId = 108770;
+    private const short MageNovice = 109;
+    private const short WarriorNovice = 105;
+    private const short RogueMaster = 108;
     private const byte Moradon = 21;
+    private const byte RonarkLand = BattleZoneManager.ZONE_RONARK_LAND;
     private const short BindEventIndex = 7;
 
     [Fact]
@@ -92,12 +96,7 @@ public class MagicWarpTests : GameTestBase
 
         var (sessionManager, caster, client) = CreateCaster(provider);
         var friend = CreateOther(sessionManager, AccountNation.Karus, x: 800, z: 800);
-
-        var party = sessionManager.Parties.CreateParty((short)caster.CharacterId);
-        party.MemberIds[1] = (short)friend.CharacterId;
-        caster.PartyIndex = party.Index;
-        caster.IsPartyLeader = true;
-        friend.PartyIndex = party.Index;
+        PartyUp(sessionManager, caster, friend);
 
         await Cast(provider, client, EscapeId, caster, caster.CharacterId);
 
@@ -116,6 +115,7 @@ public class MagicWarpTests : GameTestBase
         caster.Z = 260;
 
         var friend = CreateOther(sessionManager, AccountNation.Karus, x: 700, z: 700);
+        PartyUp(sessionManager, caster, friend);
 
         await Cast(provider, client, SummonFriendId, caster, friend.CharacterId);
 
@@ -131,7 +131,9 @@ public class MagicWarpTests : GameTestBase
             Warp(gameData, DescentId, SkillMoral.Party, MagicWarpType.MoveToTarget));
 
         var (sessionManager, caster, client) = CreateCaster(provider);
+        caster.Class = WarriorNovice;
         var friend = CreateOther(sessionManager, AccountNation.Karus, x: 640, z: 480);
+        PartyUp(sessionManager, caster, friend);
 
         await Cast(provider, client, DescentId, caster, friend.CharacterId);
 
@@ -151,10 +153,14 @@ public class MagicWarpTests : GameTestBase
 
         var (sessionManager, caster, client) = CreateCaster(provider);
         var foe = CreateOther(sessionManager, AccountNation.ElMorad, x: 640, z: 480);
+        caster.ZoneId = RonarkLand;
+        foe.ZoneId = RonarkLand;
 
+        caster.Class = WarriorNovice;
         await Cast(provider, client, DescentId, caster, foe.CharacterId);
         caster.X.Should().BeApproximately(100, 0.5f, "a party warp does not reach across nations");
 
+        caster.Class = RogueMaster;
         await Cast(provider, client, WildAdventId, caster, foe.CharacterId);
         caster.X.Should().BeApproximately(640, 0.5f);
     }
@@ -166,7 +172,8 @@ public class MagicWarpTests : GameTestBase
             Id = skillId,
             Type1 = 8,
             Moral = (byte)moral,
-            Range = 10000
+            Range = 10000,
+            ItemGroup = MagicWeaponRequirement.NoWeaponNeeded
         });
 
         var rows = new Dictionary<int, MagicType8Data>(
@@ -196,7 +203,7 @@ public class MagicWarpTests : GameTestBase
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var caster = sessionManager.CreateSession(client, characterId: 900, accountId: 950);
         caster.Name = "Caster";
-        caster.Class = 205;
+        caster.Class = MageNovice;
         caster.Level = 70;
         caster.Nation = AccountNation.Karus;
         caster.ZoneId = Moradon;
@@ -234,17 +241,16 @@ public class MagicWarpTests : GameTestBase
         ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId)
         => Cast(provider, client, skillId, caster, targetId, new int[7]);
 
-    private static async Task Cast(
-        ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId, int[] data)
-    {
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(skillId);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(targetId);
-        foreach (var value in data)
-            packet.WriteInt(value);
+    private static Task Cast(
+        ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId, int[] data) =>
+        provider.GetRequiredService<IMagicPacketCoordinator>().CastAsync(client, skillId, caster.CharacterId, targetId, data);
 
-        await provider.GetRequiredService<IMagicPacketCoordinator>().HandleAsync(client, packet);
+    private static void PartyUp(SessionManager sessionManager, UserSession leader, UserSession member)
+    {
+        var party = sessionManager.Parties.CreateParty((short)leader.CharacterId);
+        party.MemberIds[1] = (short)member.CharacterId;
+        leader.PartyIndex = party.Index;
+        leader.IsPartyLeader = true;
+        member.PartyIndex = party.Index;
     }
 }

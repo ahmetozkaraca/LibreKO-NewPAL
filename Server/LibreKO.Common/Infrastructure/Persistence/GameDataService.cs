@@ -42,6 +42,8 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
         = Enumerable.Empty<MiningFishingItemData>().ToLookup(x => (GatherType.Mining, GatherTool.Plain, GatherWarStatus.Peace));
     public IReadOnlyDictionary<int, EventTriggerData> EventTriggerTable { get; private set; } = new Dictionary<int, EventTriggerData>();
     private IReadOnlyDictionary<(short NpcType, int TrapNumber), int> _eventTriggersByNpc = new Dictionary<(short, int), int>();
+    private IReadOnlyDictionary<(int SellingGroup, byte Line, byte Index), SellingGroupItemData> _sellingGroupItems =
+        new Dictionary<(int, byte, byte), SellingGroupItemData>();
     public IReadOnlyDictionary<(short Index, bool IsMonster), NpcItemData> NpcItemTable { get; private set; } = new Dictionary<(short, bool), NpcItemData>();
     public IReadOnlyDictionary<int, int[]> MakeItemGroupTable { get; private set; } = new Dictionary<int, int[]>();
     public IReadOnlyDictionary<int, AttendanceRewardData> AttendanceRewardTable { get; private set; } = new Dictionary<int, AttendanceRewardData>();
@@ -54,6 +56,11 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
     public IReadOnlyDictionary<int, LotteryEventData> LotteryEventTable { get; private set; } = new Dictionary<int, LotteryEventData>();
     public ILookup<int, LotteryRewardData> LotteryRewardsByEvent { get; private set; } = Enumerable.Empty<LotteryRewardData>().ToLookup(x => x.LotteryId);
     public ILookup<int, LotteryScheduleData> LotterySchedulesByEvent { get; private set; } = Enumerable.Empty<LotteryScheduleData>().ToLookup(x => x.LotteryId);
+    public IReadOnlyDictionary<int, RewardQuestData> RewardQuestTable { get; private set; } = new Dictionary<int, RewardQuestData>();
+    public ILookup<int, RewardQuestTargetData> RewardQuestTargetsByNpc { get; private set; } = Enumerable.Empty<RewardQuestTargetData>().ToLookup(x => x.NpcId);
+    public ILookup<int, RewardQuestItemData> RewardQuestItemsByQuest { get; private set; } = Enumerable.Empty<RewardQuestItemData>().ToLookup(x => x.QuestId);
+    public ILookup<int, RewardQuestRewardData> RewardQuestRewardsByQuest { get; private set; } = Enumerable.Empty<RewardQuestRewardData>().ToLookup(x => x.QuestId);
+    public ILookup<PrizePool, RewardPrizeData> RewardPrizesByPool { get; private set; } = Enumerable.Empty<RewardPrizeData>().ToLookup(x => x.Pool);
     public ILookup<int, ItemOpData> ItemOpsByItemId { get; private set; } = Enumerable.Empty<ItemOpData>().ToLookup(x => x.ItemId);
     public IReadOnlyDictionary<int, string> ServerResourceTable { get; private set; } = new Dictionary<int, string>();
     public IReadOnlyDictionary<byte, PremiumItemData> PremiumItemTable { get; private set; } = new Dictionary<byte, PremiumItemData>();
@@ -196,6 +203,11 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
         return ServerResourceTable.TryGetValue(resourceId, out var res) ? res : null;
     }
 
+    public SellingGroupItemData? GetSellingGroupItem(int sellingGroup, byte line, byte index)
+    {
+        return _sellingGroupItems.TryGetValue((sellingGroup, line, index), out var item) ? item : null;
+    }
+
     public int GetPremiumProperty(byte premiumType, PremiumPropertyType property)
     {
         if (premiumType == 0)
@@ -277,6 +289,9 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
             MiningFishingItemsByPool = miningFishingItems.ToLookup(x => (x.Type, x.UseItemType, x.WarStatus));
             logger.LogInformation("Loaded {Count} mining and fishing reward entries", miningFishingItems.Count);
 
+            _sellingGroupItems = LoadSeedDictionary(
+                new SellingGroupItemSeed(), x => (x.SellingGroup, x.Line, x.Index), "selling group entries");
+
             var eventTriggers = await LoadListAsync(db.EventTriggers, "event trigger entries", cancellationToken);
             EventTriggerTable = eventTriggers.ToDictionary(x => x.Index);
             _eventTriggersByNpc = eventTriggers
@@ -314,6 +329,11 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
             LotteryEventTable = await LoadDictionaryAsync(db.LotteryEvents, x => x.Id, "lottery events", cancellationToken);
             LotteryRewardsByEvent = await LoadLookupAsync(db.LotteryRewards.OrderBy(x => x.Place), x => x.LotteryId, "lottery rewards", cancellationToken);
             LotterySchedulesByEvent = await LoadLookupAsync(db.LotterySchedules, x => x.LotteryId, "lottery schedules", cancellationToken);
+            RewardQuestTable = await LoadDictionaryAsync(db.RewardQuests, x => x.Id, "reward quests", cancellationToken);
+            RewardQuestTargetsByNpc = await LoadLookupAsync(db.RewardQuestTargets, x => x.NpcId, "reward quest targets", cancellationToken);
+            RewardQuestItemsByQuest = await LoadLookupAsync(db.RewardQuestItems, x => x.QuestId, "reward quest item requirements", cancellationToken);
+            RewardQuestRewardsByQuest = await LoadLookupAsync(db.RewardQuestRewards, x => x.QuestId, "reward quest rewards", cancellationToken);
+            RewardPrizesByPool = await LoadLookupAsync(db.RewardPrizes, x => x.Pool, "reward prizes", cancellationToken);
             SiegeWarfare = await db.SiegeWarfare.AsNoTracking().OrderBy(x => x.CastleIndex).FirstOrDefaultAsync(cancellationToken);
             if (SiegeWarfare != null)
                 logger.LogInformation("Loaded siege warfare data (castle owner: clan {ClanId})", SiegeWarfare.MasterKnights);

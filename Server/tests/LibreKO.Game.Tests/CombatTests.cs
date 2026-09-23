@@ -425,7 +425,7 @@ public class CombatTests : GameTestBase
         var attacker = sessionManager.CreateSession(client, characterId: 915, accountId: 916);
         attacker.Name = "Chaser";
         attacker.ZoneId = 21;
-        attacker.X = 52;
+        attacker.X = 55;
         attacker.Z = 50;
         attacker.Hp = 100;
         attacker.MaxHp = 100;
@@ -817,6 +817,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 4,
                     Moral = 1,
                     Etc = 0
@@ -848,7 +849,7 @@ public class CombatTests : GameTestBase
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var session = sessionManager.CreateSession(client, characterId: 530, accountId: 630);
         session.Name = "Mage";
-        session.Class = 101;
+        session.Class = 202;
         session.Level = 20;
         session.Strength = 50;
         session.Stamina = 50;
@@ -858,6 +859,8 @@ public class CombatTests : GameTestBase
         session.ZoneId = 1;
         session.X = 20;
         session.Z = 20;
+        session.Hp = 100;
+        session.MaxHp = 100;
         sessionManager.Regions.AddToRegion(session);
 
         var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
@@ -869,6 +872,8 @@ public class CombatTests : GameTestBase
             packet.WriteInt(0);
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, session.CharacterId, session.CharacterId);
+        sentPackets.Clear();
         await coordinator.HandleAsync(client, packet);
 
         session.ActiveBuffs.Should().ContainKey(skillId);
@@ -888,6 +893,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 2,
                     Moral = 7,
                     UseItem = arrowItemId,
@@ -924,6 +930,8 @@ public class CombatTests : GameTestBase
         session.ZoneId = 1;
         session.X = 20;
         session.Z = 20;
+        session.Hp = 100;
+        session.MaxHp = 100;
         session.MaxMp = 100;
         session.Mp = 20;
         session.Inventory[InventoryConstants.InventoryStart].ItemId = arrowItemId;
@@ -931,16 +939,23 @@ public class CombatTests : GameTestBase
         session.Inventory[InventoryConstants.InventoryStart].Durability = 1;
         sessionManager.Regions.AddToRegion(session);
 
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Flying);
-        packet.WriteInt(skillId);
-        packet.WriteInt(session.CharacterId);
-        packet.WriteInt(session.CharacterId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
+        var worm = sessionManager.Regions.SpawnNpc(new NpcInstance
+        {
+            IsMonster = true,
+            NpcId = 750,
+            Name = "Worm",
+            ZoneId = 1,
+            X = 22,
+            Z = 20,
+            SpawnX = 22,
+            SpawnZ = 20,
+            Hp = 1000,
+            MaxHp = 1000
+        });
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        await coordinator.HandleAsync(client, packet);
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, session.CharacterId, worm.UniqueId);
+        await coordinator.SendAsync(client, MagicProcessOpcode.Flying, skillId, session.CharacterId, worm.UniqueId);
 
         session.Mp.Should().Be(13);
         session.Inventory[InventoryConstants.InventoryStart].Count.Should().Be(9);
@@ -969,6 +984,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 1,
                     Moral = 7,
                     Msp = 4
@@ -1005,6 +1021,8 @@ public class CombatTests : GameTestBase
         warrior.Nation = AccountNation.Karus;
         warrior.X = 20;
         warrior.Z = 20;
+        warrior.Hp = 100;
+        warrior.MaxHp = 100;
         warrior.MaxMp = 100;
         warrior.Mp = 20;
         warrior.Stats = new DerivedStats
@@ -1039,6 +1057,8 @@ public class CombatTests : GameTestBase
             packet.WriteInt(0);
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, warrior.CharacterId, target.CharacterId);
+        sentPackets.Clear();
         await coordinator.HandleAsync(client, packet);
 
         warrior.Mp.Should().Be(16);
@@ -1059,6 +1079,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 1,
                     Moral = 7,
                     Msp = 4
@@ -1095,6 +1116,8 @@ public class CombatTests : GameTestBase
         warrior.Nation = AccountNation.Karus;
         warrior.X = 20;
         warrior.Z = 20;
+        warrior.Hp = 100;
+        warrior.MaxHp = 100;
         warrior.MaxMp = 100;
         warrior.Mp = 20;
         warrior.Stats = new DerivedStats
@@ -1161,6 +1184,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 3,
                     Moral = 2,
                     Msp = 100,
@@ -1185,7 +1209,7 @@ public class CombatTests : GameTestBase
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var session = sessionManager.CreateSession(client, characterId: 541, accountId: 641);
-        session.Class = 201;
+        session.Class = 207;
         session.Level = 20;
         session.ZoneId = 1;
         session.X = 20;
@@ -1205,6 +1229,8 @@ public class CombatTests : GameTestBase
             packet.WriteInt(0);
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, session.CharacterId, session.CharacterId);
+        sentPackets.Clear();
         await coordinator.HandleAsync(client, packet);
 
         session.Hp.Should().Be(90);
@@ -1227,6 +1253,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(defenseId).Returns(new MagicData
                 {
                     Id = defenseId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 4,
                     Moral = 1
                 });
@@ -1257,6 +1284,8 @@ public class CombatTests : GameTestBase
         session.ZoneId = 1;
         session.X = 20;
         session.Z = 20;
+        session.Hp = 100;
+        session.MaxHp = 100;
         session.ActiveBuffs[scrollId] = new ActiveBuff
         {
             MagicId = scrollId,
@@ -1432,6 +1461,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 3,
                     Moral = 1,
                     Msp = 6,
@@ -1456,7 +1486,7 @@ public class CombatTests : GameTestBase
 
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var session = sessionManager.CreateSession(client, characterId: 542, accountId: 642);
-        session.Class = 201;
+        session.Class = 207;
         session.Level = 20;
         session.ZoneId = 1;
         session.X = 20;
@@ -1566,6 +1596,8 @@ public class CombatTests : GameTestBase
             packet.WriteInt(0);
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, session.CharacterId, session.CharacterId);
+        sentPackets.Clear();
         await coordinator.HandleAsync(client, packet);
 
         session.Mp.Should().Be(170);
@@ -1618,7 +1650,6 @@ public class CombatTests : GameTestBase
                     Duration = 1,
                     ReqLevelMax = 83
                 });
-                gameData.GetCoefficient(101).Returns(CreateBasicCoefficient(101));
             });
 
         var client = Substitute.For<IClient>();
@@ -1650,6 +1681,8 @@ public class CombatTests : GameTestBase
             packet.WriteInt(0);
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, session.CharacterId, session.CharacterId);
+        sentPackets.Clear();
         await coordinator.HandleAsync(client, packet);
 
         session.Hp.Should().Be(280);
@@ -1725,6 +1758,8 @@ public class CombatTests : GameTestBase
         session.ZoneId = 1;
         session.X = 20;
         session.Z = 20;
+        session.Hp = 100;
+        session.MaxHp = 100;
         session.Inventory[InventoryConstants.InventoryStart].ItemId = potionItemId;
         session.Inventory[InventoryConstants.InventoryStart].Count = 3;
         session.Inventory[InventoryConstants.InventoryStart].Durability = 1;
@@ -1740,6 +1775,8 @@ public class CombatTests : GameTestBase
             packet.WriteInt(0);
 
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
+        await coordinator.SendAsync(client, MagicProcessOpcode.Casting, skillId, session.CharacterId, session.CharacterId);
+        sentPackets.Clear();
         await coordinator.HandleAsync(client, packet);
 
         session.ActiveBuffs.Should().ContainKey(skillId);
@@ -2004,7 +2041,8 @@ public class CombatTests : GameTestBase
             },
             skillId,
             npc.UniqueId,
-            new int[7]);
+            new int[7],
+            MagicCharge.Prepaid);
 
         npc.DamageMap.Should().ContainKey(session.CharacterId);
         npc.DamageMap[session.CharacterId].Should().Be(80);
@@ -2123,7 +2161,8 @@ public class CombatTests : GameTestBase
                 },
                 skillId,
                 (short)worm.UniqueId,
-                new int[7]);
+                new int[7],
+                MagicCharge.Prepaid);
         }
 
         worm.Hp.Should().BeLessThan(worm.MaxHp);
@@ -2197,7 +2236,8 @@ public class CombatTests : GameTestBase
             },
             skillId,
             worm.UniqueId,
-            new int[7]);
+            new int[7],
+            MagicCharge.Prepaid);
 
         worm.Hp.Should().Be(200);
         worm.ActiveOverTimeEffects.Should().ContainKey(skillId);
@@ -2305,7 +2345,8 @@ public class CombatTests : GameTestBase
             },
             skillId,
             -1,
-            [(short)nearbyWorm.X, 0, (short)nearbyWorm.Z, 0, 0, 0, 0]);
+            [(short)nearbyWorm.X, 0, (short)nearbyWorm.Z, 0, 0, 0, 0],
+            MagicCharge.Prepaid);
 
         nearbyWorm.Hp.Should().BeLessThan(1000);
         farWorm.Hp.Should().Be(1000);
@@ -2399,7 +2440,8 @@ public class CombatTests : GameTestBase
             },
             skillId,
             -1,
-            [1553, 15, 407, -101, 4, 0, 0]);
+            [1553, 15, 407, -101, 4, 0, 0],
+            MagicCharge.Prepaid);
 
         nearbyWorm.Hp.Should().BeLessThan(1000);
         farWorm.Hp.Should().Be(1000);
@@ -2417,6 +2459,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 3,
                     Moral = 7,
                     Etc = 0
@@ -2443,7 +2486,7 @@ public class CombatTests : GameTestBase
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var mage = sessionManager.CreateSession(client, characterId: 562, accountId: 662);
         mage.Name = "Mage";
-        mage.Class = 101;
+        mage.Class = 209;
         mage.ZoneId = 21;
         mage.X = 542;
         mage.Z = 377;
@@ -2468,16 +2511,8 @@ public class CombatTests : GameTestBase
             EvadeRate = 1
         });
 
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Fail);
-        packet.WriteInt(skillId);
-        packet.WriteInt(mage.CharacterId);
-        packet.WriteInt(worm.UniqueId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        await coordinator.HandleAsync(client, packet);
+        await coordinator.CastAsync(client, skillId, mage.CharacterId, worm.UniqueId);
 
         worm.ActiveOverTimeEffects.Should().ContainKey(skillId);
 
@@ -2496,7 +2531,7 @@ public class CombatTests : GameTestBase
     }
 
     [Fact]
-    public async Task MagicPacketCoordinator_HandleAsync_Type3Subtype4OverridesQueuedAreaExecution()
+    public async Task MagicPacketCoordinator_HandleAsync_Type3AreaCastLandsAroundItsCentreBeforeTheHandlerReturns()
     {
         const int skillId = 209533;
 
@@ -2507,6 +2542,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 3,
                     Moral = 10,
                     Etc = 0
@@ -2534,7 +2570,7 @@ public class CombatTests : GameTestBase
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var mage = sessionManager.CreateSession(client, characterId: 563, accountId: 663);
         mage.Name = "Mage";
-        mage.Class = 101;
+        mage.Class = 209;
         mage.ZoneId = 21;
         mage.X = 542;
         mage.Z = 377;
@@ -2593,31 +2629,10 @@ public class CombatTests : GameTestBase
             EvadeRate = 1
         });
 
-        var effectingPacket = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        effectingPacket.WriteByte((byte)MagicProcessOpcode.Effecting);
-        effectingPacket.WriteInt(skillId);
-        effectingPacket.WriteInt(mage.CharacterId);
-        effectingPacket.WriteInt(primaryWorm.UniqueId);
-        for (var i = 0; i < 7; i++)
-            effectingPacket.WriteInt(0);
-
-        var finalizePacket = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        finalizePacket.WriteByte((byte)MagicProcessOpcode.Fail);
-        finalizePacket.WriteInt(skillId);
-        finalizePacket.WriteInt(mage.CharacterId);
-        finalizePacket.WriteInt(primaryWorm.UniqueId);
-        finalizePacket.WriteInt((short)primaryWorm.X);
-        finalizePacket.WriteInt(5);
-        finalizePacket.WriteInt((short)primaryWorm.Z);
-        finalizePacket.WriteInt(-101);
-        finalizePacket.WriteInt(1);
-        finalizePacket.WriteInt(0);
-        finalizePacket.WriteInt(0);
-
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        await coordinator.HandleAsync(client, effectingPacket);
-        await coordinator.HandleAsync(client, finalizePacket);
-        await Task.Delay(250);
+        await coordinator.CastAsync(
+            client, skillId, mage.CharacterId, MagicTargetingService.AreaTargetId,
+            (short)primaryWorm.X, 5, (short)primaryWorm.Z);
 
         primaryWorm.Hp.Should().BeLessThan(1000);
         nearbyWorm.Hp.Should().BeLessThan(1000);
@@ -2636,6 +2651,7 @@ public class CombatTests : GameTestBase
                 gameData.GetMagic(skillId).Returns(new MagicData
                 {
                     Id = skillId,
+                    ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
                     Type1 = 3,
                     Moral = 10,
                     Etc = 0
@@ -2664,7 +2680,7 @@ public class CombatTests : GameTestBase
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var mage = sessionManager.CreateSession(client, characterId: 5631, accountId: 6631);
         mage.Name = "Mage";
-        mage.Class = 101;
+        mage.Class = 209;
         mage.ZoneId = 21;
         mage.X = 542;
         mage.Z = 377;
@@ -2691,21 +2707,10 @@ public class CombatTests : GameTestBase
             EvadeRate = 1
         });
 
-        var finalizePacket = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        finalizePacket.WriteByte((byte)MagicProcessOpcode.Fail);
-        finalizePacket.WriteInt(skillId);
-        finalizePacket.WriteInt(mage.CharacterId);
-        finalizePacket.WriteInt(doomedWorm.UniqueId);
-        finalizePacket.WriteInt((short)doomedWorm.X);
-        finalizePacket.WriteInt(5);
-        finalizePacket.WriteInt((short)doomedWorm.Z);
-        finalizePacket.WriteInt(-101);
-        finalizePacket.WriteInt(1);
-        finalizePacket.WriteInt(0);
-        finalizePacket.WriteInt(0);
-
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
-        await coordinator.HandleAsync(client, finalizePacket);
+        await coordinator.CastAsync(
+            client, skillId, mage.CharacterId, MagicTargetingService.AreaTargetId,
+            (short)doomedWorm.X, 5, (short)doomedWorm.Z);
 
         doomedWorm.Hp.Should().Be(0);
 
@@ -2761,7 +2766,7 @@ public class CombatTests : GameTestBase
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var mage = sessionManager.CreateSession(client, characterId: 564, accountId: 664);
         mage.Name = "Mage";
-        mage.Class = 101;
+        mage.Class = 209;
         mage.ZoneId = 21;
         mage.X = 675.7f;
         mage.Z = 426.7f;

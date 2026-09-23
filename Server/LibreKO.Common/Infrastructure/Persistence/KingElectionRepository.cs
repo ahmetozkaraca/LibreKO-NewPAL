@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using Microsoft.EntityFrameworkCore;
 
@@ -69,10 +69,10 @@ public class KingElectionRepository(AppDbContext context) : IKingElectionReposit
         await context.SaveChangesAsync();
     }
 
-    public async Task<bool> HasVotedAsync(byte nation, string charName)
+    public async Task<bool> HasVotedAsync(byte nation, string accountId)
     {
         return await context.KingBallotBox.AnyAsync(e =>
-            e.Nation == nation && e.CharId == charName);
+            e.Nation == nation && e.AccountId == accountId);
     }
 
     public async Task AddVoteAsync(KingBallotBox vote)

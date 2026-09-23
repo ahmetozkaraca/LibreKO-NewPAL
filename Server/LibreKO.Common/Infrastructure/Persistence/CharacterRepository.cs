@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -30,13 +30,6 @@ public class CharacterRepository(AppDbContext context) : ICharacterRepository
     {
         context.Characters.Update(character);
         await context.SaveChangesAsync();
-    }
-
-    public async Task<int> UpdateQuestDataAsync(int characterId, byte[] questData)
-    {
-        return await context.Characters
-            .Where(c => c.Id == characterId)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(c => c.QuestData, questData));
     }
 
     public async Task<bool> IsNameTaken(string name)

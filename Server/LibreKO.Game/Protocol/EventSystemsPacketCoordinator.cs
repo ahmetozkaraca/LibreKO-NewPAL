@@ -17,6 +17,7 @@ public interface IEventSystemsPacketCoordinator
     Task HandleMapEventAsync(IClient client, Packet packet);
     Task OpenBattleZoneAsync(byte type, byte zone);
     Task CloseBattleZoneAsync();
+    Task DeclareBattleWinnerAsync(byte winnerNation);
     Task AssignRivalAsync(UserSession player, UserSession rival);
     Task RemoveRivalAsync(UserSession player);
     Task UpdateAngerGaugeAsync(UserSession player, byte gauge);
@@ -29,7 +30,7 @@ public class EventSystemsPacketCoordinator(
     IGameDataService gameDataService,
     IZoneTransitionService zoneTransitionService,
     EventSchedulerService eventSchedulerService,
-    ILoyaltyService loyaltyService,
+    IViolationMonitor violationMonitor,
     ILogger<EventSystemsPacketCoordinator> logger) : IEventSystemsPacketCoordinator
 {
     private const byte TempleEventMonsterStone = 6;
@@ -44,9 +45,6 @@ public class EventSystemsPacketCoordinator(
     private const byte BattleEventResult = 3;
     private const byte BattleEventMaxUser = 4;
     private const byte BattleEventKillUser = 5;
-
-    private const int WarderKillLoyalty = 500;
-    private const int GatekeeperKillLoyalty = 1000;
 
     private const byte PvpAssignRival = 1;
     private const byte PvpRemoveRival = 2;
@@ -93,18 +91,11 @@ public class EventSystemsPacketCoordinator(
                 break;
 
             case BattleMapEventResult:
-                HandleBattleMapEventResult(packet);
-                break;
-
             case BattleEventResult:
-                await HandleBattleEventResultAsync(session, packet);
-                break;
-
             case BattleEventMaxUser:
-                await HandleBattleEventMaxUserAsync(session, packet);
-                break;
-
             case BattleEventKillUser:
+                violationMonitor.Report(session, ViolationKind.ForgedEvent,
+                    $"claimed the server-only battle event {subOpcode}");
                 break;
 
             default:
@@ -171,7 +162,7 @@ public class EventSystemsPacketCoordinator(
 
         var winner = battle.DetermineWinner();
         if (winner > 0)
-            await AnnounceBattleResultAsync(winner);
+            await DeclareBattleWinnerAsync(winner);
 
         battle.CloseBattleZone();
 
@@ -234,6 +225,9 @@ public class EventSystemsPacketCoordinator(
 
     private async Task HandleMonsterStoneAsync(UserSession session)
     {
+        if (session.Trade.LocksInventory)
+            return;
+
         var slotIndex = -1;
         for (var index = InventoryConstants.SlotMax; index < InventoryConstants.SlotMax + InventoryConstants.HaveMax; index++)
         {
@@ -310,55 +304,7 @@ public class EventSystemsPacketCoordinator(
         await session.Client.SendPacket(packet);
     }
 
-    private void HandleBattleMapEventResult(Packet packet)
-    {
-        var battle = sessionManager.Battle;
-        if (!battle.IsBattleActive || packet.RemainingBytes < 1)
-            return;
-
-        var nation = packet.ReadByte();
-        if (nation == 1)
-            battle.KarusOpenFlag = true;
-        else if (nation == 2)
-            battle.ElmoradOpenFlag = true;
-    }
-
-    private async Task HandleBattleEventResultAsync(UserSession session, Packet packet)
-    {
-        var battle = sessionManager.Battle;
-        if (!battle.IsBattleActive || packet.RemainingBytes < 1)
-            return;
-
-        packet.ReadByte();
-        var winnerNation = battle.RegisterNpcKill((byte)session.Nation);
-        if (winnerNation > 0)
-        {
-            battle.Victory = winnerNation;
-            await AnnounceBattleResultAsync(winnerNation);
-        }
-
-        battle.BattleSaved = true;
-    }
-
-    private async Task HandleBattleEventMaxUserAsync(UserSession session, Packet packet)
-    {
-        var battle = sessionManager.Battle;
-        if (!battle.IsBattleActive || packet.RemainingBytes < 1)
-            return;
-
-        var npcType = packet.ReadByte();
-        var loyaltyReward = npcType switch
-        {
-            >= 3 and <= 6 => WarderKillLoyalty,
-            7 or 8 => GatekeeperKillLoyalty,
-            _ => 0
-        };
-
-        if (loyaltyReward > 0)
-            await loyaltyService.ChangeAsync(session, loyaltyReward);
-    }
-
-    private async Task AnnounceBattleResultAsync(byte winnerNation)
+    public async Task DeclareBattleWinnerAsync(byte winnerNation)
     {
         var winnerPacket = EventPacketWriter.BattleDeclare(
             BattleEventResult, BattleZoneManager.DECLARE_WINNER, winnerNation);

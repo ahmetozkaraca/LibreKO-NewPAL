@@ -1,4 +1,4 @@
-using LibreKO.Game.Protocol;
+﻿using LibreKO.Game.Protocol;
 
 namespace LibreKO.Game.World;
 
@@ -21,6 +21,7 @@ public class TradeState
     public bool IsSellingMerchantPreparing { get; set; }
     public bool IsBuyingMerchantPreparing { get; set; }
     public bool IsMerchantPreparing => IsSellingMerchantPreparing || IsBuyingMerchantPreparing;
+    public bool LocksInventory => IsTrading || IsMerchanting || IsMerchantPreparing;
     public bool PremiumMerchant { get; set; }
     public string MerchantAdvert { get; set; } = string.Empty;
     public int MerchantTargetUserId { get; set; } = -1;

@@ -20,6 +20,8 @@ public class MagicAreaTests : GameTestBase
     private const byte RonarkLand = BattleZoneManager.ZONE_RONARK_LAND;
     private const byte AreaRadius = 30;
     private const short SleepSeconds = 20;
+    private const short WarriorNovice = 105;
+    private static readonly TimeSpan PastTheBurstFloor = TimeSpan.FromMilliseconds(300);
 
     [Fact]
     public async Task SleepWingPutsTheMonsterToSleepAndTellsEveryoneNearby()
@@ -76,6 +78,7 @@ public class MagicAreaTests : GameTestBase
             new MagicType7Data { Id = BindingId, TargetChange = (byte)MagicAreaTargetChange.Provoke, Damage = 10, Duration = 9 }));
 
         var (sessionManager, caster, client) = CreateCaster(provider);
+        caster.Class = WarriorNovice;
         var monster = SpawnMonster(sessionManager, x: 101, z: 100);
 
         await Cast(provider, client, BindingId, caster, monster.UniqueId);
@@ -87,10 +90,15 @@ public class MagicAreaTests : GameTestBase
     [Fact]
     public async Task BindingCanPullAMonsterOffAnotherPlayer()
     {
-        using var provider = CreateProvider(_ => { }, gameData => Type7(gameData, BindingId,
-            new MagicType7Data { Id = BindingId, TargetChange = (byte)MagicAreaTargetChange.Provoke, Damage = 10, Duration = 9 }));
+        var clock = new ManualClock();
+        using var provider = CreateProvider(
+            _ => { },
+            gameData => Type7(gameData, BindingId,
+                new MagicType7Data { Id = BindingId, TargetChange = (byte)MagicAreaTargetChange.Provoke, Damage = 10, Duration = 9 }),
+            configureServices: services => services.AddSingleton<TimeProvider>(clock));
 
         var (sessionManager, caster, client) = CreateCaster(provider);
+        caster.Class = WarriorNovice;
         var ally = CreateVictim(sessionManager);
         ally.Nation = AccountNation.Karus;
 
@@ -101,6 +109,7 @@ public class MagicAreaTests : GameTestBase
             monster.TargetUserId = ally.CharacterId;
             monster.State = NpcState.Fighting;
 
+            clock.Advance(PastTheBurstFloor);
             await Cast(provider, client, BindingId, caster, monster.UniqueId);
 
             if (monster.TargetUserId == caster.CharacterId)
@@ -117,6 +126,7 @@ public class MagicAreaTests : GameTestBase
             new MagicType7Data { Id = BindingId, TargetChange = (byte)MagicAreaTargetChange.Provoke, Damage = 10, Duration = 9 }));
 
         var (sessionManager, caster, client) = CreateCaster(provider);
+        caster.Class = WarriorNovice;
         var victim = CreateVictim(sessionManager);
 
         await Cast(provider, client, BindingId, caster, victim.CharacterId);
@@ -153,7 +163,8 @@ public class MagicAreaTests : GameTestBase
             Id = skillId,
             Type1 = 7,
             Moral = row.Radius > 0 ? (byte)10 : (byte)7,
-            Range = 25
+            Range = 25,
+            ItemGroup = MagicWeaponRequirement.NoWeaponNeeded
         });
         gameData.MagicType7Table.Returns(new Dictionary<int, MagicType7Data> { [skillId] = row });
     }
@@ -225,17 +236,7 @@ public class MagicAreaTests : GameTestBase
         return victim;
     }
 
-    private static async Task Cast(
-        ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId)
-    {
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(skillId);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(targetId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await provider.GetRequiredService<IMagicPacketCoordinator>().HandleAsync(client, packet);
-    }
+    private static Task Cast(
+        ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId) =>
+        provider.GetRequiredService<IMagicPacketCoordinator>().CastAsync(client, skillId, caster.CharacterId, targetId);
 }

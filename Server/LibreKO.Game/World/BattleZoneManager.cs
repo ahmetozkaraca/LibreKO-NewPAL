@@ -1,4 +1,4 @@
-using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Enums;
 
 namespace LibreKO.Game.World;
 
@@ -62,6 +62,16 @@ public class BattleZoneManager
     // NPC kill threshold for victory (zones 1-3)
     public const int NPC_KILL_VICTORY_COUNT = 3;
 
+    public const short SPECIAL_KARUS_WARDER1 = 90;
+    public const short SPECIAL_KARUS_WARDER2 = 91;
+    public const short SPECIAL_ELMORAD_WARDER1 = 92;
+    public const short SPECIAL_ELMORAD_WARDER2 = 93;
+    public const short SPECIAL_KARUS_GATEKEEPER = 98;
+    public const short SPECIAL_ELMORAD_GATEKEEPER = 99;
+
+    public const int WARDER_KILL_LOYALTY = 500;
+    public const int GATEKEEPER_KILL_LOYALTY = 1000;
+
     // Max users per nation in battle zone
     public const int MAX_BATTLE_ZONE_USERS = 150;
 
@@ -102,8 +112,11 @@ public class BattleZoneManager
     // PVP monument ownership per zone: zoneId -> nation (1=Karus, 2=Elmo)
     private readonly Dictionary<byte, byte> _pvpMonumentNation = [];
 
+    private readonly Lock _sync = new();
+
     public bool OpenBattleZone(byte type, byte zone)
     {
+        using var scope = _sync.EnterScope();
         if (BattleOpen != NO_BATTLE)
             return false;
 
@@ -134,11 +147,18 @@ public class BattleZoneManager
 
     public void CloseBattleZone()
     {
+        using var scope = _sync.EnterScope();
         BanishFlag = true;
-        Reset();
+        ResetCounters();
     }
 
     public void Reset()
+    {
+        using var scope = _sync.EnterScope();
+        ResetCounters();
+    }
+
+    private void ResetCounters()
     {
         BattleOpen = NO_BATTLE;
         BattleZone = 0;
@@ -181,29 +201,49 @@ public class BattleZoneManager
 
     public void RegisterDeath(byte victimNation)
     {
+        using var scope = _sync.EnterScope();
         if (victimNation == (byte)AccountNation.Karus)
             KarusDead++;
         else
             ElmoradDead++;
     }
 
-    public byte RegisterNpcKill(byte killerNation)
+    public static bool TryGetWarNpc(short specialType, out AccountNation owner, out int loyalty)
     {
-        if (killerNation == (byte)AccountNation.Karus)
-            KilledElmoNpc++;
-        else
-            KilledKarusNpc++;
-
-        // Zones 1-3 use NPC kill victory (3 kills)
-        if (BattleZone is ZONE_BATTLE1 or ZONE_BATTLE2 or ZONE_BATTLE3)
+        (owner, loyalty) = specialType switch
         {
-            if (KilledKarusNpc >= NPC_KILL_VICTORY_COUNT)
-                return 2; // Elmorad wins (killed 3 Karus NPCs)
-            if (KilledElmoNpc >= NPC_KILL_VICTORY_COUNT)
-                return 1; // Karus wins (killed 3 Elmo NPCs)
-        }
+            SPECIAL_KARUS_WARDER1 or SPECIAL_KARUS_WARDER2 => (AccountNation.Karus, WARDER_KILL_LOYALTY),
+            SPECIAL_ELMORAD_WARDER1 or SPECIAL_ELMORAD_WARDER2 => (AccountNation.ElMorad, WARDER_KILL_LOYALTY),
+            SPECIAL_KARUS_GATEKEEPER => (AccountNation.Karus, GATEKEEPER_KILL_LOYALTY),
+            SPECIAL_ELMORAD_GATEKEEPER => (AccountNation.ElMorad, GATEKEEPER_KILL_LOYALTY),
+            _ => (AccountNation.None, 0),
+        };
+        return owner != AccountNation.None;
+    }
 
-        return 0;
+    public byte RegisterNpcKill(AccountNation npcNation)
+    {
+        using var scope = _sync.EnterScope();
+        if (BattleOpen == NO_BATTLE)
+            return 0;
+
+        if (npcNation == AccountNation.Karus)
+            KilledKarusNpc++;
+        else
+            KilledElmoNpc++;
+
+        KarusOpenFlag |= KilledKarusNpc >= NPC_KILL_VICTORY_COUNT;
+        ElmoradOpenFlag |= KilledElmoNpc >= NPC_KILL_VICTORY_COUNT;
+
+        if (Victory != 0 || BattleZone is not (ZONE_BATTLE1 or ZONE_BATTLE2 or ZONE_BATTLE3))
+            return 0;
+
+        if (KilledKarusNpc >= NPC_KILL_VICTORY_COUNT)
+            Victory = (byte)AccountNation.ElMorad;
+        else if (KilledElmoNpc >= NPC_KILL_VICTORY_COUNT)
+            Victory = (byte)AccountNation.Karus;
+
+        return Victory;
     }
 
     public void CaptureMonument(byte nation)

@@ -17,6 +17,10 @@ internal static class ModelBuilderExtensions
         Configure<MailAttachment>(modelBuilder, "MailAttachments");
         Configure<UserDailyOp>(modelBuilder, "UserDailyOps");
         Configure<Warehouse>(modelBuilder, "Warehouses");
+        Configure<CharacterRewardQuest>(modelBuilder, "CharacterRewardQuests");
+        Configure<EventCoinWallet>(modelBuilder, "EventCoinWallets");
+        Configure<RouletteSpin>(modelBuilder, "RouletteSpins");
+        Configure<DailyRewardClaim>(modelBuilder, "DailyRewardClaims");
 
         Configure<KnightsEntity>(modelBuilder, "Knights");
         Configure<KnightsAllianceEntity>(modelBuilder, "KnightsAlliances");
@@ -76,6 +80,11 @@ internal static class ModelBuilderExtensions
         Configure<LotteryEventData>(modelBuilder, "LotteryEvents");
         Configure<LotteryRewardData>(modelBuilder, "LotteryRewards");
         Configure<LotteryScheduleData>(modelBuilder, "LotterySchedules");
+        Configure<RewardQuestData>(modelBuilder, "RewardQuests");
+        Configure<RewardQuestTargetData>(modelBuilder, "RewardQuestTargets");
+        Configure<RewardQuestItemData>(modelBuilder, "RewardQuestItems");
+        Configure<RewardQuestRewardData>(modelBuilder, "RewardQuestRewards");
+        Configure<RewardPrizeData>(modelBuilder, "RewardPrizes");
 
         Configure<Patch>(modelBuilder, "Patches");
         Configure<SeedState>(modelBuilder, "SeedStates");

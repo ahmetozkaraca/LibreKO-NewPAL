@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -23,7 +23,7 @@ public class InnPacketCoordinator(
     private const byte InnResultBad = 0;
 
     // charId -> saved inn zone id (the town bound as recall point). In-memory; resets on restart.
-    private static readonly Dictionary<int, ushort> InnSavedZone = new();
+    private readonly ConcurrentDictionary<int, ushort> InnSavedZone = new();
 
     public async Task HandleAsync(IClient client, Packet packet)
     {

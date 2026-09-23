@@ -1,6 +1,7 @@
 ﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
+using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
 using LibreKO.Game.World;
@@ -94,8 +95,13 @@ public class MagicSkillRequirementTests : GameTestBase
     {
         using var provider = CreateProvider(
             _ => { },
-            gameData => gameData.GetMagic(Blizzard)
-                .Returns(Magic(Blizzard, tree: 1106, skillLevel: 45, recastTenths: 153)));
+            gameData =>
+            {
+                var blizzard = Magic(Blizzard, tree: 1106, skillLevel: 45, recastTenths: 153);
+                blizzard.Moral = (byte)SkillMoral.Self;
+                blizzard.ItemGroup = MagicWeaponRequirement.NoWeaponNeeded;
+                gameData.GetMagic(Blizzard).Returns(blizzard);
+            });
 
         var client = Substitute.For<IClient>();
         client.Id.Returns(Guid.NewGuid());

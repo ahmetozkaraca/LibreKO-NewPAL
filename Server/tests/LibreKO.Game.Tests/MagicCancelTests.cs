@@ -14,7 +14,8 @@ public class MagicCancelTests : GameTestBase
 {
     private const int ArcShot = 102010;
     private const int MultipleShot = 102040;
-    private const int Healing = 211509;
+    private const int Healing = 111509;
+    private const short PriestNovice = 111;
 
     [Fact]
     public async Task CancellingADrawFreesTheCasterForTheNextSkill()
@@ -27,23 +28,24 @@ public class MagicCancelTests : GameTestBase
                 gameData.GetMagic(MultipleShot).Returns(Ranged(MultipleShot, castTenths: 10));
             });
         var (caster, client, sent) = CreateArcher(provider);
+        var monster = SpawnMonster(provider);
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
 
-        await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, ArcShot, caster, 0));
+        await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, ArcShot, caster, monster.UniqueId));
         Replies(sent).Should().Equal((MagicProcessOpcode.Casting, ArcShot));
         sent.Clear();
 
         await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Fail, ArcShot, caster, caster.CharacterId));
         sent.Clear();
 
-        await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, MultipleShot, caster, 0));
+        await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, MultipleShot, caster, monster.UniqueId));
         Replies(sent).Should().Equal(new[] { (MagicProcessOpcode.Casting, MultipleShot) },
             "a cancelled draw must not leave the caster marked as still casting");
         sent.Clear();
 
         await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Fail, MultipleShot, caster, caster.CharacterId));
         sent.Clear();
-        await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, ArcShot, caster, 0));
+        await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, ArcShot, caster, monster.UniqueId));
         Replies(sent).Should().Equal(new[] { (MagicProcessOpcode.Casting, ArcShot) },
             "cancelling refunds the skill's own cooldown too");
     }
@@ -56,8 +58,10 @@ public class MagicCancelTests : GameTestBase
             gameData => gameData.GetMagic(Healing).Returns(new MagicData
             {
                 Id = Healing, Type1 = 3, Moral = 2, Range = 20, CastTime = 15, ReCastTime = 0,
+                ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
             }));
         var (caster, client, sent) = CreateArcher(provider);
+        caster.Class = PriestNovice;
         var coordinator = provider.GetRequiredService<IMagicPacketCoordinator>();
 
         await coordinator.HandleAsync(client, Magic(MagicProcessOpcode.Casting, Healing, caster, caster.CharacterId));
@@ -78,7 +82,23 @@ public class MagicCancelTests : GameTestBase
         Range = 40,
         CastTime = (byte)castTenths,
         ReCastTime = 30,
+        ItemGroup = MagicWeaponRequirement.NoWeaponNeeded,
     };
+
+    private static NpcInstance SpawnMonster(ServiceProvider provider) =>
+        provider.GetRequiredService<SessionManager>().Regions.SpawnNpc(new NpcInstance
+        {
+            IsMonster = true,
+            NpcId = 750,
+            Name = "Worm",
+            ZoneId = 21,
+            X = 110,
+            Z = 100,
+            SpawnX = 110,
+            SpawnZ = 100,
+            Hp = 1000,
+            MaxHp = 1000,
+        });
 
     private static (UserSession Caster, IClient Client, List<Packet> Sent) CreateArcher(ServiceProvider provider)
     {

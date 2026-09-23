@@ -1,15 +1,30 @@
-namespace LibreKO.Game.World;
+﻿namespace LibreKO.Game.World;
 
 public class LootItem
 {
     public int ItemId { get; set; }
     public ushort Count { get; set; }
+    public short? Durability { get; set; }
+    public byte Flag { get; set; }
+    public long ExpiresAt { get; set; }
+
+    public ItemStack Landed(short freshDurability) =>
+        new(ItemId, Durability ?? freshDurability, Count, Flag, ExpiresAt);
+
+    public static LootItem Of(ItemStack stack) => new()
+    {
+        ItemId = stack.ItemId,
+        Count = stack.Count,
+        Durability = stack.Durability,
+        Flag = stack.Flag,
+        ExpiresAt = stack.ExpiresAt,
+    };
 }
 
 public class LootBundle
 {
     public const int MaxItems = 8;
-    public const float MaxLootRange = 121.0f; // 11 units squared
+    public const float LootRange = 11.0f;
     public const long OwnerExclusiveMs = 15_000; // 15 seconds owner-only looting
 
     private readonly Lock _sync = new();
@@ -17,14 +32,17 @@ public class LootBundle
     public int BundleId { get; set; }
     public List<LootItem> Items { get; } = [];
 
-    public bool TryClaimSlot(int slotIndex, int expectedItemId, out LootItem? claimed)
+    public bool TryClaimSlot(int slotIndex, int expectedItemId, out LootItem? claimed) =>
+        TryClaimSlot(slotIndex, expectedItemId, _ => true, out claimed);
+
+    public bool TryClaimSlot(int slotIndex, int expectedItemId, Func<LootItem, bool> accept, out LootItem? claimed)
     {
         claimed = null;
         using var scope = _sync.EnterScope();
         if (slotIndex < 0 || slotIndex >= Items.Count)
             return false;
         var item = Items[slotIndex];
-        if (item.ItemId != expectedItemId)
+        if (item.ItemId != expectedItemId || !accept(item))
             return false;
         Items.RemoveAt(slotIndex);
         claimed = item;
@@ -45,6 +63,7 @@ public class LootBundle
     public float X { get; set; }
     public float Z { get; set; }
     public float Y { get; set; }
+    public byte ZoneId { get; set; }
     public long DropTimeTicks { get; set; }
 
     // Owner tracking: only the owner (or their party) can loot during exclusive period
@@ -65,10 +84,6 @@ public class LootBundle
         return false;
     }
 
-    public float DistanceSquaredTo(float x, float z)
-    {
-        float dx = X - x;
-        float dz = Z - z;
-        return dx * dx + dz * dz;
-    }
+    public bool IsWithinReachOf(UserSession session)
+        => session.ZoneId == ZoneId && Reach.Within(session, X, Z, LootRange);
 }

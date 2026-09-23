@@ -1,15 +1,13 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Security.Cryptography;
 
 namespace LibreKO.Common.Infrastructure.Network;
 
 public sealed class PacketCipher
 {
-    private static ulong PrivateKey = 0x1207500120128966;
+    private const ulong PrivateKey = 0x1207500120128966;
 
     private readonly byte[] _keyBytes;
-
-    public static void SetPrivateKey(ulong key) => PrivateKey = key;
 
     public PacketCipher(BigInteger publicKey)
     {

@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities.GameData;
+﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Game.Protocol;
@@ -11,9 +11,18 @@ internal static class UserSessionMagicState
 
     private const byte StatusBuffMagicType = 4;
 
+    private const byte HostileToMonsters = 0;
+
     public static bool SurvivesDeath(UserSession session, int magicId, ActiveBuff buff, IGameDataService gameData) =>
         magicId >= SavedMagicIdMin
         || ((gameData.GetMagic(magicId)?.UseItem ?? 0) != 0 && buff.CasterId == session.CharacterId);
+
+    public static bool DisguiseForbidsAttack(UserSession session, IGameDataService gameData) =>
+        session.IsTransformed
+        && session.ActiveBuffs.Keys.Any(magicId =>
+            gameData.GetMagic(magicId) is { PrimaryType: MagicSkillType.Transform } magic
+            && MagicTypeLookup.TryResolve(gameData.MagicType6Table, magic, magicId, out var type6Data)
+            && type6Data.MonsterFriendly != HostileToMonsters);
 
     public static void ApplyBuffBonuses(UserSession session, IGameDataService gameData, CoefficientData coefficient)
     {
@@ -174,11 +183,13 @@ internal static class UserSessionMagicState
 
         dropped += session.ActiveOverTimeEffects.Count;
         session.ActiveOverTimeEffects.Clear();
-        session.PendingOverTimeExecution = null;
         session.CastingSkillId = 0;
         session.CastReadyTicks = 0;
         session.CastCommitTicks = 0;
         session.CastExpireTicks = 0;
+        session.AcceptedCasts.Clear();
+        session.PendingArrowHits.Clear();
+        session.CombatActions.CastBindings.Clear();
         RebuildSpecialStates(session, gameData);
         session.RecalculateStatsWithBuffs(gameData);
         return dropped;
@@ -225,7 +236,6 @@ internal static class UserSessionMagicState
     {
         session.ActiveBuffs.Clear();
         session.ActiveOverTimeEffects.Clear();
-        session.PendingOverTimeExecution = null;
         session.Invisibility = InvisibilityType.None;
         session.TransformId = 0;
 

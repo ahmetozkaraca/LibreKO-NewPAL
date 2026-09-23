@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities.GameData;
+﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -160,9 +160,8 @@ public class NpcAiMagicService(
             npc.Attack1,
             npc.Attack2);
 
-        damage = GmMode.Taken(target, Math.Clamp(damage, 0, CombatUtils.MaxDamage));
-        if (damage > 0)
-            target.Hp = (short)Math.Max(0, target.Hp - damage);
+        var outcome = target.ApplyDamage(GmMode.Taken(target, Math.Clamp(damage, 0, CombatUtils.MaxDamage)));
+        damage = outcome.Dealt;
 
         var effectPacket = CreateMagicProcessPacket(MagicEffecting, magic.Id, npc.UniqueId, target.CharacterId);
         await sessionManager.Regions.SendToRegion(target, effectPacket, excludeSender: false);
@@ -196,7 +195,8 @@ public class NpcAiMagicService(
         if (target.Hp > 0)
             return;
 
-        await npcAiDeathService.HandlePlayerKilledByNpcAsync(target, npc);
+        if (outcome.Killed)
+            await npcAiDeathService.HandlePlayerKilledByNpcAsync(target, npc);
         npcAiTargetingService.LoseTarget(npc, nowTicks);
     }
 
@@ -215,12 +215,7 @@ public class NpcAiMagicService(
             return;
 
         var buffType = (BuffType)type4Data.BuffType;
-        var existingKey = target.ActiveBuffs
-            .FirstOrDefault(entry => entry.Value.BuffType == buffType && buffType != BuffType.None).Key;
-        if (existingKey > 0)
-            target.ActiveBuffs.TryRemove(existingKey, out _);
-
-        target.ActiveBuffs[magic.Id] = new ActiveBuff
+        var debuff = new ActiveBuff
         {
             MagicId = magic.Id,
             CasterId = -npc.UniqueId,
@@ -253,7 +248,23 @@ public class NpcAiMagicService(
             BonusAttackSpeed = type4Data.AttackSpeed
         };
 
-        target.RecalculateStatsWithBuffs(gameData);
+        var applied = target.WithLock(victim =>
+        {
+            if (victim.Hp <= 0)
+                return false;
+
+            var existingKey = victim.ActiveBuffs
+                .FirstOrDefault(entry => entry.Value.BuffType == buffType && buffType != BuffType.None).Key;
+            if (existingKey > 0)
+                victim.ActiveBuffs.TryRemove(existingKey, out _);
+
+            victim.ActiveBuffs[magic.Id] = debuff;
+            victim.RecalculateStatsWithBuffs(gameData);
+            return true;
+        });
+        if (!applied)
+            return;
+
         await userNotificationService.SendStatUpdateAsync(target);
 
         var effectPacket = CreateMagicProcessPacket(
@@ -294,8 +305,7 @@ public class NpcAiMagicService(
             ? type3.FirstDamage > 0 ? type3.FirstDamage : healer.MaxHp / 5
             : healer.MaxHp / 5;
 
-        healAmount = Math.Max(1, healAmount);
-        target.Hp = Math.Min(target.MaxHp, target.Hp + healAmount);
+        target.Heal(Math.Max(1, healAmount));
 
         var effectPacket = CreateMagicProcessPacket(MagicEffecting, magic.Id, healer.UniqueId, target.UniqueId);
         await sessionManager.Regions.BroadcastFromNpc(healer, effectPacket);

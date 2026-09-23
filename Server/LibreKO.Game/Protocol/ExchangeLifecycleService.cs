@@ -18,7 +18,7 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
 {
     public async Task RequestAsync(UserSession session, Packet packet)
     {
-        if (session.Hp <= 0 || session.Trade.IsMerchanting)
+        if (session.Hp <= 0 || ExchangePacketConstants.IsBusyElsewhere(session))
         {
             await SendCancelAsync(session);
             return;
@@ -32,24 +32,12 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
 
         var destId = packet.ReadInt();
         var target = sessionManager.GetByCharacterId(destId);
-        if (target == null
-            || target.Trade.IsTrading
-            || target.Trade.IsMerchanting
-            || target.ZoneId != session.ZoneId
-            || target.Hp <= 0
-            || target.CharacterId == session.CharacterId
-            || target.AccountId == session.AccountId
-            || !ExchangePacketConstants.IsWithinTradeRange(session, target)
-            || (target.Nation != session.Nation
-                && !ZoneRules.Allows(session.ZoneId, ZoneFlags.TradeOtherNation)))
+        if (target == null || !CanTrade(session, target) || !TryPair(session, target))
         {
             await SendCancelAsync(session);
             return;
         }
 
-        session.Trade.ExchangeUser = target.CharacterId;
-        session.Trade.AskedForExchange = true;
-        target.Trade.ExchangeUser = session.CharacterId;
         logger.LogInformation("Trade requested by {Name} to {TargetId}", session.Name, target.CharacterId);
 
         await target.Client.SendPacket(ExchangePacketWriter.Partner(
@@ -58,54 +46,106 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
 
     public async Task AgreeAsync(UserSession session, Packet packet)
     {
-        if (!session.Trade.IsTrading || session.Hp <= 0 || session.Trade.IsMerchanting
+        if (!session.Trade.IsTrading || session.Hp <= 0 || ExchangePacketConstants.IsBusyElsewhere(session)
             || session.Trade.AskedForExchange)
             return;
 
         var agreed = packet.ReadByte();
-        var target = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
-        if (target == null)
+        var asker = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
+        if (asker == null || asker == session)
         {
-            session.Trade.ExchangeUser = -1;
+            session.WithLock(s => Release(s, start: false));
             return;
         }
 
-        if (agreed == 0
-            || target.Hp <= 0
-            || target.Trade.IsMerchanting
-            || target.CharacterId == session.CharacterId
-            || target.AccountId == session.AccountId
-            || !ExchangePacketConstants.IsWithinTradeRange(session, target)
-            || (target.Nation != session.Nation
-                && !ZoneRules.Allows(session.ZoneId, ZoneFlags.TradeOtherNation)))
+        var accepted = agreed != ExchangePacketWriter.Failed && CanTrade(session, asker);
+        var answered = false;
+        UserSession.WithBoth(session, asker, (me, other) =>
         {
-            session.Trade.ExchangeUser = -1;
-            target.Trade.ExchangeUser = -1;
-            agreed = 0;
-        }
-        else
-        {
-            session.InitExchange(true);
-            target.InitExchange(true);
-        }
+            if (!ExchangePacketConstants.ArePartners(me, other) || !other.Trade.AskedForExchange)
+            {
+                Release(me, start: false);
+                return;
+            }
 
-        await target.Client.SendPacket(ExchangePacketWriter.Result(
-            ExchangePacketConstants.ExchangeAgree, agreed));
+            Release(me, start: accepted);
+            Release(other, start: accepted);
+            answered = true;
+        });
+
+        if (!answered)
+            return;
+
+        await asker.Client.SendPacket(ExchangePacketWriter.Result(
+            ExchangePacketConstants.ExchangeAgree, accepted ? ExchangePacketWriter.Succeeded : ExchangePacketWriter.Failed));
+
+        if (!accepted && agreed != ExchangePacketWriter.Failed)
+            await SendCancelAsync(session);
     }
 
     public async Task CancelAsync(UserSession session, bool isOnDeath = false)
     {
-        if (!session.Trade.IsTrading || (!isOnDeath && session.Hp <= 0))
+        if (!session.Trade.IsTrading)
             return;
 
-        var target = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
-        session.InitExchange(false);
-        logger.LogInformation("Trade cancelled for {Name}", session.Name);
-
-        if (target != null)
+        var partner = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
+        var partnerReleased = false;
+        if (partner == null || partner == session)
         {
-            target.InitExchange(false);
-            await SendCancelAsync(target);
+            session.WithLock(s => Release(s, start: false));
+        }
+        else
+        {
+            UserSession.WithBoth(session, partner, (me, other) =>
+            {
+                partnerReleased = ExchangePacketConstants.ArePartners(me, other);
+                Release(me, start: false);
+                if (partnerReleased)
+                    Release(other, start: false);
+            });
+        }
+
+        logger.LogInformation("Trade cancelled for {Name} (death: {OnDeath})", session.Name, isOnDeath);
+
+        await SendCancelAsync(session);
+        if (partnerReleased)
+            await SendCancelAsync(partner!);
+    }
+
+    private static bool CanTrade(UserSession session, UserSession target) =>
+        target.CharacterId != session.CharacterId
+        && target.AccountId != session.AccountId
+        && target.Hp > 0
+        && !ExchangePacketConstants.IsBusyElsewhere(target)
+        && ExchangePacketConstants.IsWithinTradeRange(session, target)
+        && (target.Nation == session.Nation || ZoneRules.Allows(session.ZoneId, ZoneFlags.TradeOtherNation));
+
+    private static bool TryPair(UserSession asker, UserSession target)
+    {
+        var paired = false;
+        UserSession.WithBoth(asker, target, (a, t) =>
+        {
+            if (a.Trade.IsTrading || ItemTransfer.IsInventoryLocked(t))
+                return;
+
+            a.Trade.ExchangeUser = t.CharacterId;
+            a.Trade.AskedForExchange = true;
+            a.Trade.ExchangeOk = false;
+            t.Trade.ExchangeUser = a.CharacterId;
+            t.Trade.AskedForExchange = false;
+            t.Trade.ExchangeOk = false;
+            paired = true;
+        });
+        return paired;
+    }
+
+    private void Release(UserSession session, bool start)
+    {
+        var unreturned = session.InitExchange(start);
+        if (unreturned.Count > 0)
+        {
+            logger.LogError("Could not return {Count} escrowed items to {Name}: {Items}",
+                unreturned.Count, session.Name, string.Join(", ", unreturned.Select(item => $"{item.ItemId}x{item.Count}")));
         }
     }
 

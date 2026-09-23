@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities;
+﻿using LibreKO.Common.Domain.Entities;
 
 namespace LibreKO.Common.Domain.Services;
 
@@ -11,6 +11,6 @@ public interface IKingElectionRepository
     Task<bool> IsCandidateAsync(byte nation, byte candidateType, string name);
     Task<KingCandidacyNoticeBoard?> GetNoticeBoardEntryAsync(byte nation, string userId);
     Task UpsertNoticeBoardAsync(KingCandidacyNoticeBoard entry);
-    Task<bool> HasVotedAsync(byte nation, string charName);
+    Task<bool> HasVotedAsync(byte nation, string accountId);
     Task AddVoteAsync(KingBallotBox vote);
 }

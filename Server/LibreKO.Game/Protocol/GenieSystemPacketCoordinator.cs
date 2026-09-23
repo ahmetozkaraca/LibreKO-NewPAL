@@ -18,6 +18,7 @@ public class GenieSystemPacketCoordinator(
     ICombatPacketCoordinator combat,
     IMagicPacketCoordinator magic,
     IWorldPacketCoordinator world,
+    IPacketGuard packetGuard,
     ILogger<GenieSystemPacketCoordinator> logger) : IGenieSystemPacketCoordinator
 {
     public const int SpiritOfGenieItem = 810378000;
@@ -99,17 +100,22 @@ public class GenieSystemPacketCoordinator(
 
         switch (packet.ReadByte())
         {
-            case GenieSystemPacketWriter.Move:
+            case GenieSystemPacketWriter.Move when packetGuard.Admit(client, GameOpcodes.GS_MOVE):
                 await world.HandleMoveAsync(client, packet);
                 break;
-            case GenieSystemPacketWriter.Rotate:
+            case GenieSystemPacketWriter.Rotate when packetGuard.Admit(client, GameOpcodes.GS_ROTATE):
                 await world.HandleRotateAsync(client, packet);
                 break;
-            case GenieSystemPacketWriter.MainAttack:
+            case GenieSystemPacketWriter.MainAttack when packetGuard.Admit(client, GameOpcodes.GS_ATTACK):
                 await combat.HandleAttackAsync(client, packet);
                 break;
-            case GenieSystemPacketWriter.Magic:
+            case GenieSystemPacketWriter.Magic when packetGuard.Admit(client, GameOpcodes.GS_MAGIC_PROCESS):
                 await magic.HandleAsync(client, packet);
+                break;
+            case GenieSystemPacketWriter.Move:
+            case GenieSystemPacketWriter.Rotate:
+            case GenieSystemPacketWriter.MainAttack:
+            case GenieSystemPacketWriter.Magic:
                 break;
             default:
                 logger.LogDebug("Unhandled genie action from {Name}", session.Name);

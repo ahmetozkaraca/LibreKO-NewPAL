@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Entities.GameData;
+﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using Microsoft.Extensions.Logging;
 
@@ -64,6 +64,12 @@ public class MapManager(ILogger<MapManager> logger)
     {
         var map = GetMap(zoneId);
         return map?.GetHeight(x, z) ?? 0f;
+    }
+
+    public float? GetGroundHeight(short zoneId, float x, float z)
+    {
+        var height = GetMap(zoneId)?.GetHeight(x, z);
+        return height is null or float.MinValue ? null : height;
     }
 
     public bool IsValidPosition(short zoneId, float x, float z)

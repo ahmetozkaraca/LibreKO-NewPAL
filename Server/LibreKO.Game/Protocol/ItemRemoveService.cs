@@ -36,23 +36,30 @@ public class ItemRemoveService(
             return;
         }
 
-        if (session.IsGathering
-            || !itemInventoryRuleService.TryResolveRemoveIndex(type, position, out var absolutePosition, out var affectsEquipment))
+        if (!itemInventoryRuleService.TryResolveRemoveIndex(type, position, out var absolutePosition, out var affectsEquipment))
         {
             await SendItemRemoveResponseAsync(session, 0);
             return;
         }
 
-        var item = session.Inventory[absolutePosition];
-        if (item.ItemId != itemId || item.State == ItemFlag.Sealed)
+        var removed = session.WithLock(s =>
+        {
+            var item = s.Inventory[absolutePosition];
+            if (ItemTransfer.IsInventoryLocked(s) || item.IsEmpty || item.ItemId != itemId || item.State == ItemFlag.Sealed)
+                return false;
+
+            item.Clear();
+            return true;
+        });
+
+        if (!removed)
         {
             await SendItemRemoveResponseAsync(session, 0);
             return;
         }
 
-        var removedItemId = item.ItemId;
+        var removedItemId = itemId;
         logger.LogDebug("{Name} removed item {ItemId} from slot {Slot}", session.Name, removedItemId, absolutePosition);
-        item.Clear();
 
         if (affectsEquipment)
             await itemEquipmentEffectService.ApplyRemovalEffectsAsync(session, removedItemId);

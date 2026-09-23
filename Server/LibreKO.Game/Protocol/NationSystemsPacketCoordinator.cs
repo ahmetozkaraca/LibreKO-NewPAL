@@ -1,4 +1,5 @@
-﻿using LibreKO.Common.Domain.Services;
+﻿using LibreKO.Common.Domain.Entities.GameData;
+using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
@@ -25,6 +26,7 @@ public class NationSystemsPacketCoordinator(
     IKingGovernancePacketService kingGovernancePacketService,
     IBifrostEventService bifrostEventService,
     EventSchedulerService eventSchedulerService,
+    IUserNotificationService userNotificationService,
     ILogger<NationSystemsPacketCoordinator> logger) : INationSystemsPacketCoordinator
 {
 
@@ -33,9 +35,16 @@ public class NationSystemsPacketCoordinator(
     private const byte SiegeMoradonNpc = 3;
     private const byte SiegeDelosNpc = 4;
     private const byte SiegeRank = 5;
+    private const byte DelosCollectFunds = 2;
+    private const byte DelosViewTariffs = 3;
+    private const byte DelosMoradonTariff = 4;
+    private const byte DelosDelosTariff = 5;
+    private const byte CastleLordFame = 1;
     private const ushort SiegeTariffMax = 20;
     private const byte ZoneMoradon = (byte)ZoneId.Moradon;
     private const byte ZoneDelos = (byte)ZoneId.Delos;
+
+    private readonly Lock _siegeSync = new();
 
     public async Task HandleBifrostAsync(IClient client, Packet packet)
     {
@@ -212,58 +221,104 @@ public class NationSystemsPacketCoordinator(
         var siege = gameDataService.SiegeWarfare;
         if (siege == null) return;
 
-        bool isKing = IsCallerKing(session);
-
         switch (subType)
         {
-            case 2: // Collect funds — king gets Moradon+Delos tax, castellan gets dungeon charge.
-            {
-                if (isKing)
-                {
-                    var gold = (long)siege.MoradonTax + siege.DellosTax;
-                    if (session.Money + gold > 2_100_000_000L) return;
-                    session.Money += (int)gold;
-                    siege.MoradonTax = 0;
-                    siege.DellosTax = 0;
-                }
-                else
-                {
-                    var charge = siege.DungeonCharge;
-                    if (session.Money + (long)charge > 2_100_000_000L) return;
-                    session.Money += charge;
-                    siege.DungeonCharge = 0;
-                }
+            case DelosCollectFunds:
+                await CollectSiegeFundsAsync(session, siege);
                 break;
-            }
-            case 3: // View tariffs (non-king only)
+
+            case DelosViewTariffs:
             {
-                if (isKing) return;
+                if (IsCallerKing(session)) return;
                 var resp = SiegePacketWriter.Tariffs(
-                    SiegeDelosNpc, 3, (ushort)siege.CastleIndex, (ushort)siege.MoradonTariff,
+                    SiegeDelosNpc, DelosViewTariffs, (ushort)siege.CastleIndex, (ushort)siege.MoradonTariff,
                     (ushort)siege.DellosTariff, siege.DungeonCharge);
                 await session.Client.SendPacket(resp);
                 break;
             }
-            case 4: // Set Moradon tariff (castellan leader only, cap 20)
-            {
-                if (tariff > SiegeTariffMax || isKing) return;
-                siege.MoradonTariff = (short)tariff;
-                var resp = SiegePacketWriter.TariffChanged(SiegeDelosNpc, 4, tariff, ZoneMoradon);
-                await sessionManager.BroadcastToAll(resp);
-                logger.LogInformation("{Name} set Moradon tariff to {Tariff}", session.Name, tariff);
+
+            case DelosMoradonTariff:
+                await SetSiegeTariffAsync(session, siege, subType, tariff, ZoneMoradon);
                 break;
-            }
-            case 5: // Set Delos tariff
-            {
-                if (tariff > SiegeTariffMax || isKing) return;
-                siege.DellosTariff = (short)tariff;
-                var resp = SiegePacketWriter.TariffChanged(SiegeDelosNpc, 5, tariff, ZoneDelos);
-                await sessionManager.BroadcastToAll(resp);
-                logger.LogInformation("{Name} set Delos tariff to {Tariff}", session.Name, tariff);
+
+            case DelosDelosTariff:
+                await SetSiegeTariffAsync(session, siege, subType, tariff, ZoneDelos);
                 break;
-            }
         }
     }
+
+    private async Task CollectSiegeFundsAsync(UserSession session, SiegeWarfareData siege)
+    {
+        if (!NpcDialogContext.IsTalkingTo(sessionManager, session, NpcData.TypeCastleManager))
+            return;
+
+        var isKing = IsCallerKing(session);
+        if (!isKing && !IsCastleLord(session, siege))
+            return;
+
+        var collected = TakeSiegeFunds(session, siege, isKing);
+        if (collected <= 0)
+            return;
+
+        await userNotificationService.SendGoldGainAsync(session, collected);
+        logger.LogInformation("{Name} collected {Gold} coins of siege funds", session.Name, collected);
+    }
+
+    private int TakeSiegeFunds(UserSession session, SiegeWarfareData siege, bool isKing)
+    {
+        using var scope = _siegeSync.EnterScope();
+        var funds = isKing ? (long)siege.MoradonTax + siege.DellosTax : siege.DungeonCharge;
+        if (funds <= 0 || !session.WithLock(player => TryCredit(player, funds)))
+            return 0;
+
+        if (isKing)
+        {
+            siege.MoradonTax = 0;
+            siege.DellosTax = 0;
+        }
+        else
+        {
+            siege.DungeonCharge = 0;
+        }
+
+        return (int)funds;
+    }
+
+    private static bool TryCredit(UserSession player, long amount)
+    {
+        if (player.Money + amount > ExchangePacketConstants.CoinMax)
+            return false;
+
+        player.Money += (int)amount;
+        return true;
+    }
+
+    private async Task SetSiegeTariffAsync(UserSession session, SiegeWarfareData siege, byte subType, ushort tariff, byte zone)
+    {
+        if (tariff > SiegeTariffMax
+            || !IsCastleLord(session, siege)
+            || !NpcDialogContext.IsTalkingTo(sessionManager, session, NpcData.TypeCastleManager))
+            return;
+
+        StoreTariff(siege, zone, tariff);
+
+        await sessionManager.BroadcastToAll(SiegePacketWriter.TariffChanged(SiegeDelosNpc, subType, tariff, zone));
+        logger.LogInformation("{Name} set the tariff of zone {Zone} to {Tariff}", session.Name, zone, tariff);
+    }
+
+    private void StoreTariff(SiegeWarfareData siege, byte zone, ushort tariff)
+    {
+        using var scope = _siegeSync.EnterScope();
+        if (zone == ZoneMoradon)
+            siege.MoradonTariff = (short)tariff;
+        else
+            siege.DellosTariff = (short)tariff;
+    }
+
+    private static bool IsCastleLord(UserSession session, SiegeWarfareData siege)
+        => siege.MasterKnights > 0
+            && session.KnightsId == siege.MasterKnights
+            && session.KnightsFame == CastleLordFame;
 
     private async Task HandleSiegeRankAsync(UserSession session, byte subType)
     {
@@ -272,12 +327,7 @@ public class NationSystemsPacketCoordinator(
     }
 
     private bool IsCallerKing(UserSession session)
-    {
-        var kingData = kingSystemRuntimeService.GetKingData(session.Nation);
-        return kingData != null
-               && !string.IsNullOrEmpty(kingData.KingName)
-               && string.Equals(kingData.KingName, session.Name, StringComparison.OrdinalIgnoreCase);
-    }
+        => kingSystemRuntimeService.IsKing(session, kingSystemRuntimeService.GetKingData(session.Nation));
 
     public async Task HandleKingAsync(IClient client, Packet packet)
     {

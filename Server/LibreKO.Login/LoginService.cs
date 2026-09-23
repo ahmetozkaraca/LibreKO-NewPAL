@@ -1,22 +1,25 @@
+﻿using System.Net;
 using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Gameplay;
+using LibreKO.Common.Infrastructure.Logging;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Login.Configuration;
 using LibreKO.Login.Enums;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System.Text;
 using LibreKO.Login.Protocol.Writers;
 
 namespace LibreKO.Login;
+
+public sealed record LoginOutcome(Packet Response, LoginResult Result, int AccountId);
 
 public interface ILoginService
 {
     Task<Packet> VersionCheckAsync();
     Task<Packet> DownloadInfoAsync(short version);
-    Task<Packet> LoginAsync(string login, string password, LoginOpcodes responseOpcode = LoginOpcodes.LS_LOGIN, LoginRequestFlags flags = LoginRequestFlags.None);
+    Task<LoginOutcome> LoginAsync(string login, string password, IPAddress? address, LoginOpcodes responseOpcode = LoginOpcodes.LS_LOGIN, LoginRequestFlags flags = LoginRequestFlags.None);
     Task<Packet> ServerListAsync(short echo);
     Task<Packet> NewsAsync();
     Task<Packet> UnknownF7Async();
@@ -29,11 +32,15 @@ public class LoginService(
     IServerRepository serverRepository,
     IPatchRepository patchRepository,
     IKingRepository kingRepository,
+    LoginAttemptLimiter loginAttempts,
+    AccountCreationThrottle creationThrottle,
     IOptions<LoginServerSettings> settings,
     ILogger<LoginService> logger) : ILoginService
 {
     private const string NewsTitle = "LoginNotice";
     private const string NewsBody = "<empty>";
+
+    private static readonly SemaphoreSlim AccountCreationGate = new(1, 1);
 
     public Task<Packet> VersionCheckAsync()
     {
@@ -54,82 +61,123 @@ public class LoginService(
         return LoginPacketWriter.DownloadInfo(ftpSettings.Url, ftpSettings.Path, fileNames);
     }
 
-    public async Task<Packet> LoginAsync(string login, string password, LoginOpcodes responseOpcode = LoginOpcodes.LS_LOGIN, LoginRequestFlags flags = LoginRequestFlags.None)
+    public async Task<LoginOutcome> LoginAsync(string login, string password, IPAddress? address, LoginOpcodes responseOpcode = LoginOpcodes.LS_LOGIN, LoginRequestFlags flags = LoginRequestFlags.None)
     {
+        var loggedLogin = LogSanitizer.Clean(login);
+
+        if (!AccountCredentialRules.IsAcceptableLogin(login) || !AccountCredentialRules.IsAcceptablePassword(password))
+        {
+            loginAttempts.RecordFailure(address, login);
+            logger.LogWarning("Login attempt with malformed credentials for {Login} from {Address}", loggedLogin, address);
+            return Rejected(responseOpcode, LoginResult.InvalidPassword);
+        }
+
+        if (loginAttempts.IsLockedOut(address, login))
+        {
+            logger.LogDebug("Refused login for {Login} from {Address}: too many recent failures", loggedLogin, address);
+            return Rejected(responseOpcode, LoginResult.InvalidPassword);
+        }
+
         var account = await accountRepository.GetByLogin(login);
-        short remainingPremiumHours = 0;
-        Server? occupiedServer = null;
+        if (account == null && settings.Value.Account.AutoCreate)
+            account = await CreateAccountAsync(login, password, address);
 
-        LoginResult result;
-        if (account == null)
+        var verified = PasswordHasher.Verify(password, account?.Password);
+        if (account == null || !verified)
         {
-            // Auto-create account if enabled
-            if (settings.Value.Account.AutoCreate)
+            loginAttempts.RecordFailure(address, login);
+            logger.LogWarning("Failed login for {Login} from {Address}", loggedLogin, address);
+            return Rejected(responseOpcode, LoginResult.InvalidPassword);
+        }
+
+        loginAttempts.RecordSuccess(login);
+        if (PasswordHasher.NeedsRehash(account.Password))
+        {
+            await accountRepository.UpdatePasswordAsync(account, PasswordHasher.Hash(password));
+            logger.LogInformation("Upgraded the stored password of account {AccountId}", account.Id);
+        }
+
+        if (account.Authority == AccountAuthority.Banned)
+        {
+            logger.LogWarning("Banned account login attempt: {Login}", loggedLogin);
+            return Rejected(responseOpcode, LoginResult.AccountBlocked);
+        }
+
+        if (account.OnlineServerId is { } onlineServerId)
+        {
+            if (!flags.HasFlag(LoginRequestFlags.IgnoreOnlineClaim))
             {
-                account = new Account
-                {
-                    Login = login,
-                    Password = PasswordHasher.Hash(password),
-                    Authority = AccountAuthority.Normal,
-                    Nation = AccountNation.None,
-                    AccessDate = DateTime.UtcNow
-                };
-                await accountRepository.CreateAsync(account);
-                result = LoginResult.Success;
-                remainingPremiumHours = account.RemainingPremiumHours;
-                logger.LogInformation("Auto-created and logged in new account: {Login}", login);
-            }
-            else
-            {
-                result = LoginResult.IdNotFound;
-                logger.LogWarning("Login attempt with non-existing account: {Login}", login);
-            }
-        }
-        else if (!PasswordHasher.Verify(password, account.Password))
-        {
-            result = LoginResult.InvalidPassword;
-            logger.LogWarning("Invalid password attempt for account: {Login}", login);
-        }
-        else if (account.Authority == AccountAuthority.Banned)
-        {
-            result = LoginResult.AccountBlocked;
-            logger.LogWarning("Banned account login attempt: {Login}", login);
-        }
-        else if (account.OnlineServerId is { } onlineServerId
-                 && !flags.HasFlag(LoginRequestFlags.IgnoreOnlineClaim))
-        {
-            result = LoginResult.AlreadyInGame;
-            occupiedServer = (await serverRepository.GetServers())
-                .FirstOrDefault(server => server.Id == onlineServerId);
-            logger.LogInformation(
-                "Account {Login} is already connected to server {ServerId} since {Since:u}",
-                login, onlineServerId, account.OnlineSince);
-        }
-        else
-        {
-            if (account.OnlineServerId != null)
-            {
+                var occupiedServer = (await serverRepository.GetServers())
+                    .FirstOrDefault(server => server.Id == onlineServerId);
                 logger.LogInformation(
-                    "Clearing the online claim on account {Login} at the player's request (server {ServerId} did not answer)",
-                    login, account.OnlineServerId);
-                await accountRepository.ClearOnlineServerAsync(account.Id);
+                    "Account {Login} is already connected to server {ServerId} since {Since:u}",
+                    loggedLogin, onlineServerId, account.OnlineSince);
+                return new LoginOutcome(
+                    LoginPacketWriter.LoginOccupied(responseOpcode, LoginResult.AlreadyInGame, occupiedServer),
+                    LoginResult.AlreadyInGame,
+                    0);
             }
 
-            result = LoginResult.Success;
-            logger.LogInformation("Account logged in successfully: {Login}", login);
-            remainingPremiumHours = account.RemainingPremiumHours;
+            logger.LogInformation(
+                "Account {Login} signs in past the claim of server {ServerId} at the player's request; the claim stays with that server",
+                loggedLogin, onlineServerId);
         }
 
-        return result switch
-        {
-            LoginResult.Success => LoginPacketWriter.LoginSucceeded(
-                responseOpcode, result, remainingPremiumHours, login,
-                account?.Language ?? GameLanguage.English),
-            LoginResult.AlreadyInGame => LoginPacketWriter.LoginOccupied(
-                responseOpcode, result, occupiedServer),
-            _ => LoginPacketWriter.LoginRejected(responseOpcode, result),
-        };
+        logger.LogInformation("Account logged in successfully: {Login}", loggedLogin);
+        return new LoginOutcome(
+            LoginPacketWriter.LoginSucceeded(
+                responseOpcode, LoginResult.Success, account.RemainingPremiumHours, login, account.Language),
+            LoginResult.Success,
+            account.Id);
     }
+
+    private async Task<Account?> CreateAccountAsync(string login, string password, IPAddress? address)
+    {
+        var loggedLogin = LogSanitizer.Clean(login);
+        if (!AccountCredentialRules.IsValidNewLogin(login))
+        {
+            logger.LogWarning("Refused to auto-create account {Login}: invalid name", loggedLogin);
+            return null;
+        }
+
+        if (!creationThrottle.TryReserve(address))
+        {
+            logger.LogWarning("Refused to auto-create account {Login}: {Address} created too many accounts", loggedLogin, address);
+            return null;
+        }
+
+        var candidate = new Account
+        {
+            Login = login,
+            Password = PasswordHasher.Hash(password),
+            Authority = AccountAuthority.Normal,
+            Nation = AccountNation.None,
+            AccessDate = DateTime.UtcNow
+        };
+
+        await AccountCreationGate.WaitAsync();
+        try
+        {
+            var existing = await accountRepository.GetByLogin(login);
+            if (existing != null)
+                return existing;
+
+            if (await accountRepository.TryCreateAsync(candidate))
+            {
+                logger.LogInformation("Auto-created account {Login} (accountId={AccountId})", loggedLogin, candidate.Id);
+                return candidate;
+            }
+        }
+        finally
+        {
+            AccountCreationGate.Release();
+        }
+
+        return await accountRepository.GetByLogin(login);
+    }
+
+    private static LoginOutcome Rejected(LoginOpcodes responseOpcode, LoginResult result) =>
+        new(LoginPacketWriter.LoginRejected(responseOpcode, result), result, 0);
 
     public async Task<Packet> ServerListAsync(short echo)
     {

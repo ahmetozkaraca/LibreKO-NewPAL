@@ -397,3 +397,27 @@ public class LotteryScheduleSeed : SnapshotJsonSeed<LotteryScheduleData>
     protected override string JsonFileName => "LotterySchedules.json";
 }
 
+public class RewardQuestSeed : SnapshotJsonSeed<RewardQuestData>
+{
+    protected override string JsonFileName => "RewardQuests.json";
+}
+
+public class RewardQuestTargetSeed : SnapshotJsonSeed<RewardQuestTargetData>
+{
+    protected override string JsonFileName => "RewardQuestTargets.json";
+}
+
+public class RewardQuestItemSeed : SnapshotJsonSeed<RewardQuestItemData>
+{
+    protected override string JsonFileName => "RewardQuestItems.json";
+}
+
+public class RewardQuestRewardSeed : SnapshotJsonSeed<RewardQuestRewardData>
+{
+    protected override string JsonFileName => "RewardQuestRewards.json";
+}
+
+public class RewardPrizeSeed : SnapshotJsonSeed<RewardPrizeData>
+{
+    protected override string JsonFileName => "RewardPrizes.json";
+}

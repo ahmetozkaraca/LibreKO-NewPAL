@@ -12,6 +12,7 @@ public interface ICombatLifecycleService
     void SetNpcAggro(NpcInstance npc, UserSession attacker);
     Task HandleRegeneAsync(IClient client, UserSession session, byte _regeneType);
     Task HandleNpcDeathAsync(NpcInstance npc, UserSession killer);
+    Task HandleUnclaimedNpcDeathAsync(NpcInstance npc);
     Task HandlePlayerDeathAsync(UserSession victim, UserSession? killer);
     Task SendHpChangeAsync(UserSession session, int attackerId = -1);
     Task SendMspChangeAsync(UserSession session);
@@ -33,8 +34,11 @@ public class CombatLifecycleService(
     IZoneTransitionService zoneTransitionService,
     ISavedMagicService savedMagicService,
     IStealthService stealthService,
+    IEnumerable<INpcKillObserver> npcKillObservers,
     ILogger<CombatLifecycleService> logger) : ICombatLifecycleService
 {
+    private readonly INpcKillObserver[] _npcKillObservers = npcKillObservers.ToArray();
+
     public const int NoKillerId = -1;
 
     public void SetNpcAggro(NpcInstance npc, UserSession attacker)
@@ -42,10 +46,19 @@ public class CombatLifecycleService(
         if (npc.IsScarecrow)
             return;
 
-        var currentTarget = npc.TargetUserId > 0
-            ? sessionManager.GetByCharacterId(npc.TargetUserId)
-            : null;
-        if (currentTarget != null && currentTarget.Hp > 0 && currentTarget.ZoneId == npc.ZoneId)
+        var (currentTarget, previousTargetId, previousState) = npc.WithLock(target =>
+        {
+            var engaged = target.TargetUserId > 0
+                ? sessionManager.GetByCharacterId(target.TargetUserId)
+                : null;
+            var keepsTarget = engaged != null && engaged.Hp > 0 && engaged.ZoneId == target.ZoneId && target.IsAlive;
+            var before = (Target: keepsTarget ? engaged : null, TargetId: target.TargetUserId, State: target.State);
+            if (!keepsTarget && target.IsAlive)
+                target.EngageTarget(attacker, allowStateInterrupt: true);
+            return before;
+        });
+
+        if (currentTarget != null)
         {
             logger.LogDebug(
                 "NPC aggro unchanged: npc={NpcId}/{UniqueId} attacker={AttackerId}/{AttackerName} currentTarget={CurrentTargetId}/{CurrentTargetName} state={State}",
@@ -59,9 +72,9 @@ public class CombatLifecycleService(
             return;
         }
 
-        var previousTargetId = npc.TargetUserId;
-        var previousState = npc.State;
-        npc.EngageTarget(attacker, allowStateInterrupt: true);
+        if (!npc.IsAlive)
+            return;
+
         sessionManager.Regions.MarkNpcEngaged(npc);
         logger.LogDebug(
             "NPC aggro engaged: npc={NpcId}/{UniqueId} attacker={AttackerId}/{AttackerName} previousTarget={PreviousTargetId} previousState={PreviousState} newTarget={NewTargetId} newState={NewState}",
@@ -157,23 +170,37 @@ public class CombatLifecycleService(
         await SendHpChangeAsync(session);
     }
 
-    public async Task HandleNpcDeathAsync(NpcInstance npc, UserSession killer)
+    public async Task HandleUnclaimedNpcDeathAsync(NpcInstance npc) => await TryLayDownAsync(npc);
+
+    private async Task<bool> TryLayDownAsync(NpcInstance npc)
     {
-        if (npc.State == NpcState.Sleeping)
+        var wasSleeping = npc.State == NpcState.Sleeping;
+        if (!npc.TryBeginDeath(DateTime.UtcNow.Ticks))
+            return false;
+
+        if (wasSleeping)
             await sessionManager.Regions.BroadcastFromNpc(
                 npc,
                 MovementPacketWriter.StateChange(
                     npc.UniqueId, (byte)StateChangeType.Pose, (byte)NpcPoseState.Awake));
 
-        npc.DeathTimeTicks = DateTime.UtcNow.Ticks;
-        npc.State = NpcState.Dead;
-        npc.TargetUserId = 0;
-        npc.IsMoving = false;
-        npc.WakeTicks = 0;
+        npc.WithLock(corpse =>
+        {
+            corpse.TargetUserId = 0;
+            corpse.IsMoving = false;
+            corpse.WakeTicks = 0;
+        });
         sessionManager.Regions.MarkNpcIdle(npc);
 
         var deadPacket = DeathPacketWriter.NpcDeath(npc.UniqueId);
         await sessionManager.Regions.BroadcastFromNpc(npc, deadPacket);
+        return true;
+    }
+
+    public async Task HandleNpcDeathAsync(NpcInstance npc, UserSession killer)
+    {
+        if (!await TryLayDownAsync(npc))
+            return;
 
         var rewardRecipient = killer;
         if (npc.TopDamagerCharId > 0)
@@ -187,10 +214,26 @@ public class CombatLifecycleService(
         rewardRecipient.LastKilledNpcId = npc.NpcId;
 
         await combatRewardService.AwardNpcKillAsync(npc, rewardRecipient);
+
+        foreach (var observer in _npcKillObservers)
+        {
+            try
+            {
+                await observer.OnNpcKilledAsync(npc, killer, rewardRecipient);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "NPC kill observer {Observer} failed for npc {NpcId}/{UniqueId}",
+                    observer.GetType().Name, npc.NpcId, npc.UniqueId);
+            }
+        }
     }
 
     public async Task HandlePlayerDeathAsync(UserSession victim, UserSession? killer)
     {
+        if (!victim.TryBeginDeath())
+            return;
+
         if (victim.Trade.IsTrading)
             await exchangePacketCoordinator.CancelAsync(victim, isOnDeath: true);
 

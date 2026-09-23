@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
@@ -56,13 +56,14 @@ public class MagicTimingTests
         for (var arrow = 0; arrow < 3; arrow++)
         {
             clock.Advance(TimeSpan.FromMilliseconds(120));
-            timing.CheckRelease(session, volley).Should().Be(MagicTimingVerdict.Allowed, $"arrow {arrow + 1} of the volley");
-            timing.OnReleaseAccepted(session, volley);
+            timing.IsVolleyInFlight(session, volley.Id).Should().BeTrue($"arrow {arrow + 1} of the volley");
+            timing.OnVolleyHit(session, volley.Id);
         }
 
-        session.CastingSkillId.Should().Be(0, "the last arrow closes the cast");
+        session.CastingSkillId.Should().Be(0, "releasing the draw closes the cast");
         session.PendingArrowHits.Should().BeEmpty();
-        timing.CheckRelease(session, volley).Should().Be(MagicTimingVerdict.OnCooldown, "a fourth hit is not part of the volley");
+        timing.IsVolleyInFlight(session, volley.Id).Should().BeFalse("a fourth hit is not part of the volley");
+        timing.CheckRelease(session, volley).Should().Be(MagicTimingVerdict.OnCooldown, "and the draw cannot be released twice");
     }
 
     [Fact]

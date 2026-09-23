@@ -27,13 +27,8 @@ public class ExchangeTransferService(
             return;
 
         var target = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
-        if (target == null || target.Hp <= 0 || session.Hp <= 0)
-        {
-            await exchangeLifecycleService.CancelAsync(session);
-            return;
-        }
-
-        if (!ExchangePacketConstants.IsWithinTradeRange(session, target))
+        if (target == null || target.Hp <= 0 || session.Hp <= 0
+            || !ExchangePacketConstants.IsWithinTradeRange(session, target))
         {
             await exchangeLifecycleService.CancelAsync(session);
             return;
@@ -43,82 +38,33 @@ public class ExchangeTransferService(
         var itemId = packet.ReadInt();
         var count = packet.ReadInt();
 
-        if (count <= 0)
+        var isGold = itemId == InventoryConstants.ItemGold;
+        var itemData = isGold ? null : gameDataService.GetItem(itemId);
+        if (count <= 0
+            || (!isGold && (itemData == null || pos >= InventoryConstants.HaveMax || count > InventoryConstants.MaxStackCount)))
         {
             await SendAddFailAsync(session);
             return;
         }
 
-        var itemData = itemId != InventoryConstants.ItemGold ? gameDataService.GetItem(itemId) : null;
-
-        if (itemId != InventoryConstants.ItemGold && !IsTradableItem(itemData, itemId, pos))
+        var partners = true;
+        ExchangeItem? offered = null;
+        UserSession.WithBoth(session, target, (me, partner) =>
         {
-            await SendAddFailAsync(session);
-            return;
-        }
+            partners = ExchangePacketConstants.ArePartners(me, partner);
+            if (!partners || me.Trade.ExchangeOk || ExchangePacketConstants.IsBusyElsewhere(me))
+                return;
 
-        var outcome = session.WithLock(s =>
-        {
-            if (s.Trade.ExchangeOk)
-                return (Success: false, Duration: (short)0);
-
-            var addNew = true;
-            var duration = (short)0;
-
-            if (itemId == InventoryConstants.ItemGold)
-            {
-                if (count <= 0 || count > s.Money)
-                    return (Success: false, Duration: (short)0);
-
-                var existing = s.Trade.ExchangeItemList.Find(entry => entry.ItemId == InventoryConstants.ItemGold);
-                if (existing != null)
-                {
-                    existing.Count += count;
-                    addNew = false;
-                }
-
-                s.Money -= count;
-            }
-            else
-            {
-                var slot = s.Inventory[InventoryConstants.SlotMax + pos];
-                if (slot.ItemId != itemId || slot.Count < count || !slot.IsTradable)
-                    return (Success: false, Duration: (short)0);
-
-                duration = slot.Durability;
-
-                if (itemData!.Countable != 0)
-                {
-                    var existing = s.Trade.ExchangeItemList.Find(entry => entry.ItemId == itemId);
-                    if (existing != null)
-                    {
-                        existing.Count += count;
-                        addNew = false;
-                    }
-                }
-
-                slot.Count -= (ushort)count;
-            }
-
-            var hasGold = s.Trade.ExchangeItemList.Exists(entry => entry.ItemId == InventoryConstants.ItemGold);
-            if (s.Trade.ExchangeItemList.Count > (hasGold ? 13 : 12))
-                return (Success: false, Duration: (short)0);
-
-            if (addNew)
-            {
-                s.Trade.ExchangeItemList.Add(new ExchangeItem
-                {
-                    ItemId = itemId,
-                    Durability = duration,
-                    Count = count,
-                    SrcPos = (byte)(InventoryConstants.SlotMax + pos)
-                });
-            }
-
-            return (Success: true, Duration: duration);
+            offered = isGold ? EscrowGold(me, count) : EscrowItem(me, pos, itemId, (ushort)count, itemData!);
         });
 
-        if (!outcome.Success)
+        if (!partners)
+        {
+            await exchangeLifecycleService.CancelAsync(session);
+            return;
+        }
+
+        if (offered == null)
         {
             await SendAddFailAsync(session);
             return;
@@ -128,11 +74,14 @@ public class ExchangeTransferService(
             ExchangePacketConstants.ExchangeAdd, ExchangePacketWriter.Succeeded));
 
         await target.Client.SendPacket(ExchangePacketWriter.ItemOffered(
-            ExchangePacketConstants.ExchangeOtherAdd, itemId, count, outcome.Duration));
+            ExchangePacketConstants.ExchangeOtherAdd, itemId, count, offered.Durability));
     }
 
     public async Task DecideAsync(UserSession session)
     {
+        if (!session.Trade.IsTrading)
+            return;
+
         var target = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
         if (target == null || target.Hp <= 0 || session.Hp <= 0 || !ExchangePacketConstants.IsWithinTradeRange(session, target))
         {
@@ -140,16 +89,15 @@ public class ExchangeTransferService(
             return;
         }
 
-        var outcome = DecideOutcome.Wait;
-        var sessionMoneyAfter = 0;
-        var targetMoneyAfter = 0;
-        List<ExchangeItem>? itemsForSession = null;
-        List<ExchangeItem>? itemsForTarget = null;
-        var sessionItemCount = 0;
-        var targetItemCount = 0;
+        var outcome = DecideOutcome.NotPartners;
+        Delivered? toSession = null;
+        Delivered? toTarget = null;
 
         UserSession.WithBoth(session, target, (sa, sb) =>
         {
+            if (!ExchangePacketConstants.ArePartners(sa, sb))
+                return;
+
             if (!sb.Trade.ExchangeOk)
             {
                 sa.Trade.ExchangeOk = true;
@@ -157,39 +105,32 @@ public class ExchangeTransferService(
                 return;
             }
 
-            if (!CheckExchange(sa, sb) || !CheckExchange(sb, sa))
+            var forSession = PlanDelivery(sa, sb);
+            var forTarget = PlanDelivery(sb, sa);
+            if (forSession == null || forTarget == null)
             {
+                LogUnreturned(sa, sa.InitExchange(false));
+                LogUnreturned(sb, sb.InitExchange(false));
                 outcome = DecideOutcome.Fail;
-                sa.InitExchange(false);
-                sb.InitExchange(false);
                 return;
             }
 
-            ExecuteExchange(sa, sb);
-            ExecuteExchange(sb, sa);
-
-            sessionMoneyAfter = sa.Money;
-            targetMoneyAfter = sb.Money;
-            itemsForSession = [.. sb.Trade.ExchangeItemList.Where(e => e.ItemId != InventoryConstants.ItemGold)];
-            itemsForTarget = [.. sa.Trade.ExchangeItemList.Where(e => e.ItemId != InventoryConstants.ItemGold)];
-            sessionItemCount = sa.Trade.ExchangeItemList.Count;
-            targetItemCount = sb.Trade.ExchangeItemList.Count;
-
-            var coeffSession = gameDataService.GetCoefficient(sa.Class);
-            var coeffTarget = gameDataService.GetCoefficient(sb.Class);
-            if (coeffSession != null)
-                sa.RecalculateStats(coeffSession, gameDataService);
-            if (coeffTarget != null)
-                sb.RecalculateStats(coeffTarget, gameDataService);
-
-            outcome = DecideOutcome.Done;
+            toSession = Deliver(sa, forSession);
+            toTarget = Deliver(sb, forTarget);
 
             sa.CompleteExchange();
             sb.CompleteExchange();
+            sa.RecalculateStatsWithBuffs(gameDataService);
+            sb.RecalculateStatsWithBuffs(gameDataService);
+            outcome = DecideOutcome.Done;
         });
 
         switch (outcome)
         {
+            case DecideOutcome.NotPartners:
+                await exchangeLifecycleService.CancelAsync(session);
+                break;
+
             case DecideOutcome.Wait:
                 await target.Client.SendPacket(
                     ExchangePacketWriter.Sub(ExchangePacketConstants.ExchangeOtherDecide));
@@ -204,10 +145,12 @@ public class ExchangeTransferService(
 
             case DecideOutcome.Done:
                 logger.LogInformation("Exchange completed between {Name} ({ItemCount} items) and {TargetName} ({TargetItemCount} items)",
-                    session.Name, sessionItemCount, target.Name, targetItemCount);
+                    session.Name, toTarget!.Items.Count, target.Name, toSession!.Items.Count);
 
-                await SendDoneCapturedAsync(session, sessionMoneyAfter, itemsForSession!);
-                await SendDoneCapturedAsync(target, targetMoneyAfter, itemsForTarget!);
+                await session.Client.SendPacket(ExchangePacketWriter.Completed(
+                    ExchangePacketConstants.ExchangeDone, toSession.Money, toSession.Items));
+                await target.Client.SendPacket(ExchangePacketWriter.Completed(
+                    ExchangePacketConstants.ExchangeDone, toTarget.Money, toTarget.Items));
 
                 await userNotificationService.SendWeightChangeAsync(session);
                 await userNotificationService.SendWeightChangeAsync(target);
@@ -215,97 +158,111 @@ public class ExchangeTransferService(
         }
     }
 
-    private enum DecideOutcome { Wait, Fail, Done }
+    private enum DecideOutcome { NotPartners, Wait, Fail, Done }
 
-    private static async Task SendDoneCapturedAsync(UserSession receiver, int money, List<ExchangeItem> items)
+    private sealed record Delivery(List<(ExchangeItem Item, int Index)> Placements, long Gold);
+
+    private sealed record Delivered(int Money, List<ExchangePacketWriter.TransferredItem> Items);
+
+    private static ExchangeItem? EscrowGold(UserSession session, int count)
     {
-        var transferred = new List<ExchangePacketWriter.TransferredItem>(items.Count);
-        foreach (var item in items)
-        {
-            transferred.Add(new ExchangePacketWriter.TransferredItem(
-                item.DstPos, item.ItemId, (ushort)item.Count, item.Durability));
-        }
+        if (count > session.Money)
+            return null;
 
-        await receiver.Client.SendPacket(ExchangePacketWriter.Completed(
-            ExchangePacketConstants.ExchangeDone, money, transferred));
+        session.Money -= count;
+        var gold = session.Trade.ExchangeItemList.Find(entry => entry.IsGold);
+        if (gold == null)
+            session.Trade.ExchangeItemList.Add(gold = new ExchangeItem { ItemId = InventoryConstants.ItemGold });
+
+        gold.Count += count;
+        return gold;
     }
 
-    private bool CheckExchange(UserSession receiver, UserSession giver)
+    private static ExchangeItem? EscrowItem(UserSession session, byte position, int itemId, ushort count, ItemData itemData)
     {
-        var money = 0L;
-        var totalWeight = (int)receiver.Stats.ItemWeight;
-        byte freeSlots = 0;
-        byte itemCount = 0;
+        var index = InventoryConstants.InventoryStart + position;
+        var slot = session.Inventory[index];
+        var stackable = itemData.Countable != 0;
+        var offeredItems = session.Trade.ExchangeItemList.Count(entry => !entry.IsGold);
+        if (slot.ItemId != itemId
+            || count > slot.Count
+            || (!stackable && count != slot.Count)
+            || !ItemTransfer.CanLeaveOwner(slot, itemData)
+            || offeredItems >= ExchangePacketConstants.MaxOfferedItems)
+            return null;
 
-        for (var i = InventoryConstants.SlotMax; i < InventoryConstants.SlotMax + InventoryConstants.HaveMax; i++)
-        {
-            if (receiver.Inventory[i].IsEmpty)
-                freeSlots++;
-        }
+        var escrowed = ExchangeItem.Escrowed(ItemTransfer.Take(slot, count), (byte)index, stackable);
+        session.Trade.ExchangeItemList.Add(escrowed);
+        return escrowed;
+    }
+
+    private Delivery? PlanDelivery(UserSession receiver, UserSession giver)
+    {
+        var bag = ItemTransfer.BagSnapshot(receiver.Inventory);
+        var placements = new List<(ExchangeItem Item, int Index)>();
+        long gold = 0;
+        long weight = receiver.Stats.ItemWeight;
 
         foreach (var item in giver.Trade.ExchangeItemList)
         {
-            if (item.ItemId == InventoryConstants.ItemGold)
+            if (item.IsGold)
             {
-                money += item.Count;
-                if (receiver.Money + money > ExchangePacketConstants.CoinMax)
-                    return false;
+                gold += item.Count;
                 continue;
             }
 
             var itemData = gameDataService.GetItem(item.ItemId);
             if (itemData == null)
-                return false;
+                return null;
 
-            totalWeight += itemData.Weight * item.Count;
-            if (totalWeight > receiver.Stats.MaxWeight)
-                return false;
+            weight += (long)itemData.Weight * item.Count;
+            var position = ItemTransfer.FindSlot(bag, item.Stack, item.Stackable);
+            if (position == ItemTransfer.NoSlot)
+                return null;
 
-            itemCount++;
+            bag[position] = ItemTransfer.Merge(bag[position], item.Stack);
+            placements.Add((item, InventoryConstants.InventoryStart + position));
         }
 
-        return itemCount <= freeSlots;
+        if ((placements.Count > 0 && weight > receiver.Stats.MaxWeight) || !Coins.CanCredit(receiver.Money, gold))
+            return null;
+
+        return new Delivery(placements, gold);
     }
 
-    private void ExecuteExchange(UserSession receiver, UserSession giver)
+    private static Delivered Deliver(UserSession receiver, Delivery delivery)
     {
-        foreach (var item in giver.Trade.ExchangeItemList)
+        foreach (var (item, index) in delivery.Placements)
         {
-            if (item.ItemId == InventoryConstants.ItemGold)
-            {
-                receiver.Money += item.Count;
-                continue;
-            }
-
-            var slot = receiver.FindSlotForItem(item.ItemId, gameDataService, (ushort)item.Count);
-            if (slot < 0)
-            {
-                giver.Inventory[item.SrcPos].Count += (ushort)item.Count;
-                continue;
-            }
-
-            var dst = receiver.Inventory[slot];
-            var src = giver.Inventory[item.SrcPos];
-
-            dst.ItemId = item.ItemId;
-            dst.Count += (ushort)item.Count;
-            if (dst.Count > 9999)
-                dst.Count = 9999;
-            dst.Durability = item.Durability;
-
-            item.DstPos = (byte)(slot - InventoryConstants.SlotMax);
-
-            if (src.Count == 0)
-                src.Clear();
+            ItemTransfer.Put(receiver.Inventory[index], item.Stack);
+            item.DstPos = (byte)(index - InventoryConstants.InventoryStart);
         }
+
+        receiver.Money = Coins.Credit(receiver.Money, delivery.Gold);
+
+        var transferred = delivery.Placements
+            .Select(placement =>
+            {
+                var slot = receiver.Inventory[placement.Index];
+                return new ExchangePacketWriter.TransferredItem(
+                    placement.Item.DstPos, slot.ItemId, slot.Count, slot.Durability);
+            })
+            .ToList();
+
+        return new Delivered(receiver.Money, transferred);
+    }
+
+    private void LogUnreturned(UserSession session, IReadOnlyList<ExchangeItem> unreturned)
+    {
+        if (unreturned.Count > 0)
+            logger.LogError("Could not return {Count} escrowed items to {Name}", unreturned.Count, session.Name);
     }
 
     internal static bool IsTradableItem(ItemData? itemData, int itemId, byte pos)
         => itemData != null
         && pos < InventoryConstants.HaveMax
         && itemData.Race != ExchangePacketConstants.RaceUntradeable
-        && (itemId < ExchangePacketConstants.ItemNoTrade
-            || itemId >= ExchangePacketConstants.ItemNoTradeMax);
+        && !ItemTransfer.IsNoTradeItem(itemId);
 
     private static async Task SendAddFailAsync(UserSession session)
     {

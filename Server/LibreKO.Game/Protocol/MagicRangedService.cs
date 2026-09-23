@@ -11,7 +11,8 @@ public class MagicRangedService(
     IGameDataService gameDataService,
     ICombatLifecycleService combatLifecycleService)
 {
-    public async Task ExecuteAsync(UserSession caster, MagicData magic, int skillId, int targetId, int[] data)
+    public async Task ExecuteAsync(
+        UserSession caster, MagicData magic, int skillId, int targetId, int[] data, MagicCharge charge)
     {
         if (!MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, skillId, out var type2Data))
         {
@@ -23,31 +24,32 @@ public class MagicRangedService(
         var target = sessionManager.GetByCharacterId(targetId);
         if (target != null)
         {
-            if (!PvpRules.CanAttackPlayer(caster, target))
+            if (!PvpRules.CanAttackPlayer(caster, target) || !await charge.TryPayAsync())
             {
                 await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
                 return;
             }
 
-            finalDamage = CalculateRangedDamage(
+            var damage = CalculateRangedDamage(
                 caster,
                 type2Data,
                 target.Stats.TotalAc,
                 target.Stats.TotalEvasionrate,
                 isPlayerTarget: true);
-            if (finalDamage > 0)
-                finalDamage = CombatUtils.ApplyWeaponTypeResistance(finalDamage, caster, target, gameDataService);
+            if (damage > 0)
+                damage = CombatUtils.ApplyWeaponTypeResistance(damage, caster, target, gameDataService);
 
-            finalDamage = GmMode.Taken(target, GmMode.Dealt(caster, target.Hp,
-                Math.Min(finalDamage, CombatUtils.MaxDamage)));
-            if (finalDamage > 0)
+            var outcome = target.ApplyDamage(GmMode.Taken(target, GmMode.Dealt(caster, target.Hp,
+                Math.Min(damage, CombatUtils.MaxDamage))));
+            finalDamage = outcome.Dealt;
+            if (outcome.Dealt > 0)
             {
-                target.Hp = (short)Math.Max(0, target.Hp - finalDamage);
                 await combatLifecycleService.SendHpChangeAsync(target);
-                await combatLifecycleService.SendPlayerTargetHpAsync(caster, target, finalDamage);
-                if (target.Hp <= 0)
-                    await combatLifecycleService.HandlePlayerDeathAsync(target, caster);
+                await combatLifecycleService.SendPlayerTargetHpAsync(caster, target, outcome.Dealt);
             }
+
+            if (outcome.Killed)
+                await combatLifecycleService.HandlePlayerDeathAsync(target, caster);
         }
         else
         {
@@ -64,22 +66,30 @@ public class MagicRangedService(
                 return;
             }
 
+            if (!await charge.TryPayAsync())
+            {
+                await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
+                return;
+            }
+
             combatLifecycleService.SetNpcAggro(npcTarget, caster);
-            finalDamage = CalculateRangedDamage(
+            var damage = CalculateRangedDamage(
                 caster,
                 type2Data,
                 npcTarget.Ac,
                 Math.Max(1f, npcTarget.EvadeRate),
                 isPlayerTarget: false);
-            finalDamage = GmMode.Dealt(caster, npcTarget.Hp, Math.Min(finalDamage, CombatUtils.MaxDamage));
-            if (finalDamage > 0)
+            var outcome = npcTarget.ApplyDamage(
+                GmMode.Dealt(caster, npcTarget.Hp, Math.Min(damage, CombatUtils.MaxDamage)));
+            finalDamage = outcome.Dealt;
+            if (outcome.Dealt > 0)
             {
-                npcTarget.Hp = Math.Max(0, npcTarget.Hp - finalDamage);
-                npcTarget.RecordDamage(caster.CharacterId, finalDamage, caster, id => sessionManager.GetByCharacterId(id));
-                await combatLifecycleService.SendNpcTargetHpAsync(caster, npcTarget, finalDamage);
-                if (npcTarget.Hp <= 0)
-                    await combatLifecycleService.HandleNpcDeathAsync(npcTarget, caster);
+                npcTarget.RecordDamage(caster.CharacterId, outcome.Dealt, caster, id => sessionManager.GetByCharacterId(id));
+                await combatLifecycleService.SendNpcTargetHpAsync(caster, npcTarget, outcome.Dealt);
             }
+
+            if (outcome.Killed)
+                await combatLifecycleService.HandleNpcDeathAsync(npcTarget, caster);
         }
 
         await EchoAsync(caster, skillId, targetId, data, finalDamage);

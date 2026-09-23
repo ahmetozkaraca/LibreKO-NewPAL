@@ -1,8 +1,7 @@
-using System.Collections.Generic;
+﻿using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
-using LibreKO.Game.World;
-using Microsoft.Extensions.Logging;
 using LibreKO.Game.Protocol.Writers;
+using LibreKO.Game.World;
 
 namespace LibreKO.Game.Protocol;
 
@@ -13,20 +12,9 @@ public interface IDailyQuestPacketCoordinator
 
 public class DailyQuestPacketCoordinator(
     SessionManager sessionManager,
-    IUserNotificationService userNotification,
-    ILogger<DailyQuestPacketCoordinator> logger) : IDailyQuestPacketCoordinator
+    IRewardQuestService rewardQuests) : IDailyQuestPacketCoordinator
 {
-
-    // questId -> (title, required level (0 = always available), gold reward)
-    private static readonly (int Id, string Title, int Level, int Reward)[] Catalog =
-    {
-        (1, "Daily — Log in today", 0, 5000),
-        (2, "Daily — Slay monsters in the field", 0, 8000),
-        (3, "Daily — Reach Level 20", 20, 15000),
-        (4, "Daily — Veteran's stipend (Lv 40+)", 40, 30000),
-    };
-
-    private static readonly Dictionary<int, HashSet<int>> claimed = new();
+    private const int NoQuest = 0;
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
@@ -37,52 +25,38 @@ public class DailyQuestPacketCoordinator(
         var sub = (DailyQuestSubOpcode)packet.ReadByte();
         switch (sub)
         {
-            case DailyQuestSubOpcode.List: await SendListAsync(session); break;
-            case DailyQuestSubOpcode.Claim: await HandleClaimAsync(session, packet); break;
+            case DailyQuestSubOpcode.List:
+                await SendListAsync(session);
+                break;
+            case DailyQuestSubOpcode.Claim:
+                await HandleClaimAsync(session, packet.RemainingBytes >= sizeof(int) ? packet.ReadInt() : NoQuest);
+                break;
         }
     }
 
     private async Task SendListAsync(UserSession session)
     {
-        var done = GetClaimed(session.CharacterId);
-        var entries = new List<DailyQuestPacketWriter.Entry>(Catalog.Length);
-        foreach (var (id, title, level, _) in Catalog)
-        {
-            entries.Add(new DailyQuestPacketWriter.Entry(
-                id, session.Level >= level, done.Contains(id), title));
-        }
+        var views = await rewardQuests.ListAsync(session, QuestBoard.Daily);
+        var entries = views
+            .Select(view => new DailyQuestPacketWriter.Entry(
+                view.QuestId, view.Claimable, view.Claimed, RewardQuestTitles.ForDailyBoard(view)))
+            .ToList();
 
         await session.Client.SendPacket(DailyQuestPacketWriter.QuestList(DailyQuestSubOpcode.List, entries));
     }
 
-    private async Task HandleClaimAsync(UserSession session, Packet packet)
+    private async Task HandleClaimAsync(UserSession session, int questId)
     {
-        int questId = packet.RemainingBytes >= 4 ? packet.ReadInt() : 0;
-        var entry = System.Array.Find(Catalog, c => c.Id == questId);
-        var done = GetClaimed(session.CharacterId);
-
-        if (entry.Id == 0 || session.Level < entry.Level || done.Contains(questId))
-        {
-            await session.Client.SendPacket(DailyQuestPacketWriter.Result(
-                DailyQuestSubOpcode.Claim, DailyQuestPacketWriter.Failed, questId));
-            return;
-        }
-
-        done.Add(questId);
-        session.Money += entry.Reward;
-        await userNotification.SendGoldGainAsync(session, entry.Reward);
-        logger.LogDebug("{Name} claimed daily quest {Q} (+{Gold} gold)", session.Name, questId, entry.Reward);
+        var outcome = await rewardQuests.ClaimAsync(session, QuestBoard.Daily, questId);
+        var succeeded = outcome == RewardOutcome.Succeeded;
         await session.Client.SendPacket(DailyQuestPacketWriter.Result(
-            DailyQuestSubOpcode.Claim, DailyQuestPacketWriter.Succeeded, questId));
-    }
+            DailyQuestSubOpcode.Claim,
+            succeeded ? DailyQuestPacketWriter.Succeeded : DailyQuestPacketWriter.Failed,
+            questId));
+        if (succeeded)
+            return;
 
-    private static HashSet<int> GetClaimed(int charId)
-    {
-        if (!claimed.TryGetValue(charId, out var set))
-        {
-            set = new HashSet<int>();
-            claimed[charId] = set;
-        }
-        return set;
+        await RewardNotices.SendAsync(session, outcome);
+        await SendListAsync(session);
     }
 }

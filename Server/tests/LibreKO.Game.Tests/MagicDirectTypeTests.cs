@@ -14,10 +14,13 @@ namespace LibreKO.Game.Tests;
 
 public class MagicDirectTypeTests : GameTestBase
 {
-    private const int VampiricTouchId = 208650;
+    private const int VampiricTouchId = 108650;
     private const int BulletId = 490099;
+    private const int BulletItem = 389159000;
     private const int MagicHammerId = 490153;
-    private const int AngerExplosionId = 205255;
+    private const int MagicHammerItem = 399288000;
+    private const int AngerExplosionId = 105255;
+    private const byte NoWeaponNeeded = MagicWeaponRequirement.NoWeaponNeeded;
     private const byte RonarkLand = BattleZoneManager.ZONE_RONARK_LAND;
     private const byte FullAngerGauge = 5;
 
@@ -33,7 +36,8 @@ public class MagicDirectTypeTests : GameTestBase
                     Id = VampiricTouchId,
                     Type1 = 3,
                     Moral = 7,
-                    Range = 25
+                    Range = 25,
+                    ItemGroup = NoWeaponNeeded
                 });
                 gameData.MagicType3Table.Returns(new Dictionary<int, MagicType3Data>
                 {
@@ -47,6 +51,7 @@ public class MagicDirectTypeTests : GameTestBase
             });
 
         var (sessionManager, caster, client) = CreateCaster(provider);
+        caster.Class = 108;
         caster.Hp = 100;
         caster.MaxHp = 500;
 
@@ -68,7 +73,10 @@ public class MagicDirectTypeTests : GameTestBase
             _ => { },
             gameData =>
             {
-                gameData.GetMagic(bladeOfHell).Returns(new MagicData { Id = bladeOfHell, Type1 = 3, Moral = 7, Range = 25 });
+                gameData.GetMagic(bladeOfHell).Returns(new MagicData
+                {
+                    Id = bladeOfHell, Type1 = 3, Moral = 7, Range = 25, ItemGroup = NoWeaponNeeded
+                });
                 gameData.MagicType3Table.Returns(new Dictionary<int, MagicType3Data>
                 {
                     [bladeOfHell] = new() { Id = bladeOfHell, DirectType = (byte)MagicDirectType.Health, FirstDamage = -500 },
@@ -76,7 +84,7 @@ public class MagicDirectTypeTests : GameTestBase
             });
 
         var (sessionManager, caster, client) = CreateCaster(provider);
-        caster.Class = 101;
+        caster.Class = 105;
         caster.Magic = 30;
         var victim = CreateVictim(sessionManager, nation: AccountNation.ElMorad);
         victim.Hp = 2000;
@@ -100,8 +108,11 @@ public class MagicDirectTypeTests : GameTestBase
                     Id = BulletId,
                     Type1 = 3,
                     Moral = 7,
-                    Range = 25
+                    Range = 25,
+                    UseItem = BulletItem,
+                    ItemGroup = NoWeaponNeeded
                 });
+                gameData.GetItem(BulletItem).Returns(Consumable(BulletItem));
                 gameData.MagicType3Table.Returns(new Dictionary<int, MagicType3Data>
                 {
                     [BulletId] = new()
@@ -114,6 +125,7 @@ public class MagicDirectTypeTests : GameTestBase
             });
 
         var (sessionManager, caster, client) = CreateCaster(provider);
+        Carry(caster, BulletItem);
         var victim = CreateVictim(sessionManager, nation: AccountNation.ElMorad);
         victim.Hp = 1000;
         victim.MaxHp = 1000;
@@ -135,8 +147,11 @@ public class MagicDirectTypeTests : GameTestBase
                     Id = MagicHammerId,
                     Type1 = 3,
                     Moral = 1,
-                    Range = 25
+                    Range = 25,
+                    UseItem = MagicHammerItem,
+                    ItemGroup = NoWeaponNeeded
                 });
+                gameData.GetItem(MagicHammerItem).Returns(Consumable(MagicHammerItem));
                 gameData.MagicType3Table.Returns(new Dictionary<int, MagicType3Data>
                 {
                     [MagicHammerId] = new()
@@ -149,10 +164,13 @@ public class MagicDirectTypeTests : GameTestBase
             });
 
         var (_, caster, client) = CreateCaster(provider);
+        Carry(caster, MagicHammerItem);
         caster.Hp = 50;
         caster.MaxHp = 500;
 
         await Cast(provider, client, MagicHammerId, caster, caster.CharacterId);
+
+        caster.Inventory[InventoryConstants.InventoryStart].IsEmpty.Should().BeTrue("the hammer was used");
 
         caster.Hp.Should().Be(50, "a repair skill spends its column on item durability, never on health");
     }
@@ -202,7 +220,8 @@ public class MagicDirectTypeTests : GameTestBase
             Id = AngerExplosionId,
             Type1 = 3,
             Moral = 7,
-            Range = 25
+            Range = 25,
+            ItemGroup = NoWeaponNeeded
         });
         gameData.MagicType3Table.Returns(new Dictionary<int, MagicType3Data>
         {
@@ -225,7 +244,10 @@ public class MagicDirectTypeTests : GameTestBase
             _ => { },
             gameData =>
             {
-                gameData.GetMagic(bladeOfHate).Returns(new MagicData { Id = bladeOfHate, Type1 = 1, Moral = 10, Range = 5 });
+                gameData.GetMagic(bladeOfHate).Returns(new MagicData
+                {
+                    Id = bladeOfHate, Type1 = 1, Moral = 10, Range = 5, ItemGroup = NoWeaponNeeded
+                });
                 gameData.MagicType1Table.Returns(new Dictionary<int, MagicType1Data>
                 {
                     [bladeOfHate] = new() { Id = bladeOfHate, HitType = 0, HitRate = 100, Hit = 150, AddDamage = 100 }
@@ -266,21 +288,24 @@ public class MagicDirectTypeTests : GameTestBase
             TracingRange = 20
         });
 
-    private static async Task CastAtGround(
-        ServiceProvider provider, IClient client, int skillId, UserSession caster, int koX, int koZ)
-    {
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(skillId);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(-1);
-        packet.WriteInt(koX);
-        packet.WriteInt(0);
-        packet.WriteInt(koZ);
-        for (var i = 0; i < 4; i++)
-            packet.WriteInt(0);
+    private static Task CastAtGround(
+        ServiceProvider provider, IClient client, int skillId, UserSession caster, int koX, int koZ) =>
+        provider.GetRequiredService<IMagicPacketCoordinator>()
+            .CastAsync(client, skillId, caster.CharacterId, MagicTargetingService.AreaTargetId, koX, 0, koZ);
 
-        await provider.GetRequiredService<IMagicPacketCoordinator>().HandleAsync(client, packet);
+    private static ItemData Consumable(int itemId) => new()
+    {
+        Num = itemId,
+        Countable = 1,
+        Duration = 1,
+        ReqLevelMax = 83
+    };
+
+    private static void Carry(UserSession caster, int itemId)
+    {
+        caster.Inventory[InventoryConstants.InventoryStart].ItemId = itemId;
+        caster.Inventory[InventoryConstants.InventoryStart].Count = 1;
+        caster.Inventory[InventoryConstants.InventoryStart].Durability = 1;
     }
 
     private static (SessionManager Sessions, UserSession Caster, IClient Client) CreateCaster(ServiceProvider provider)
@@ -329,17 +354,7 @@ public class MagicDirectTypeTests : GameTestBase
         return victim;
     }
 
-    private static async Task Cast(
-        ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId)
-    {
-        var packet = new Packet(GameOpcodes.GS_MAGIC_PROCESS);
-        packet.WriteByte((byte)MagicProcessOpcode.Effecting);
-        packet.WriteInt(skillId);
-        packet.WriteInt(caster.CharacterId);
-        packet.WriteInt(targetId);
-        for (var i = 0; i < 7; i++)
-            packet.WriteInt(0);
-
-        await provider.GetRequiredService<IMagicPacketCoordinator>().HandleAsync(client, packet);
-    }
+    private static Task Cast(
+        ServiceProvider provider, IClient client, int skillId, UserSession caster, int targetId) =>
+        provider.GetRequiredService<IMagicPacketCoordinator>().CastAsync(client, skillId, caster.CharacterId, targetId);
 }

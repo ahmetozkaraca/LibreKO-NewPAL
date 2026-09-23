@@ -1,5 +1,6 @@
 ﻿using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Infrastructure.Network;
+using LibreKO.Game.Startup;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
 
@@ -22,7 +23,8 @@ public class WorldObjectEventService(
     private const byte ObjectEventFailed = 0;
     private const byte ObjectEventSucceeded = 1;
 
-    private const float MaxObjectRangeSq = 100.0f;
+    private const int ObjectEventBodySize = 6;
+    private const float MaxObjectRange = 10.0f;
 
     private const byte ObjectBind = 0;
     private const byte ObjectGate = 1;
@@ -35,11 +37,11 @@ public class WorldObjectEventService(
     public async Task HandleObjectEventAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null || session.Hp <= 0 || packet.RemainingBytes < 6)
+        if (session == null || session.Hp <= 0 || packet.RemainingBytes < ObjectEventBodySize)
             return;
 
         var objectIndex = packet.ReadShort();
-        var npcId = packet.ReadInt();
+        _ = packet.ReadInt();
         var objectEvent = sessionManager.Maps?.GetObjectEvent(session.ZoneId, objectIndex);
 
         var success = false;
@@ -51,9 +53,7 @@ public class WorldObjectEventService(
         }
         else
         {
-            var dx = session.X - objectEvent.PosX;
-            var dz = session.Z - objectEvent.PosZ;
-            if (dx * dx + dz * dz > MaxObjectRangeSq)
+            if (!Reach.Within(session, objectEvent.PosX, objectEvent.PosZ, MaxObjectRange))
             {
                 logger.LogDebug(
                     "Object event {Index} type {Type} out of range for {Name}: player=({PlayerX},{PlayerZ}) object=({ObjectX},{ObjectZ})",
@@ -69,16 +69,8 @@ public class WorldObjectEventService(
                         break;
 
                     case ObjectGate:
-                    {
-                        var gateNpc = sessionManager.Regions.GetNpc(npcId);
-                        if (gateNpc != null && (byte)gateNpc.Nation == (byte)session.Nation)
-                        {
-                            gateNpc.GateOpen = !gateNpc.GateOpen;
-                            await BroadcastGateFlagAsync(gateNpc);
-                            success = true;
-                        }
+                        success = await HandleGateObjectEventAsync(session, objectEvent);
                         break;
-                    }
 
                     case ObjectGateLever:
                     case ObjectFlagLever:
@@ -89,8 +81,7 @@ public class WorldObjectEventService(
                         var gateNpc = sessionManager.Regions.GetNpcByProtoId(session.ZoneId, objectEvent.ControlNpcId);
                         if (gateNpc != null)
                         {
-                            gateNpc.GateOpen = !gateNpc.GateOpen;
-                            await BroadcastGateFlagAsync(gateNpc);
+                            await ToggleGateAsync(gateNpc);
                             success = true;
                         }
                         break;
@@ -129,6 +120,17 @@ public class WorldObjectEventService(
         return true;
     }
 
+    private async Task<bool> HandleGateObjectEventAsync(UserSession session, ObjectEvent objectEvent)
+    {
+        var gateNpc = sessionManager.Regions.GetNpcByProtoId(
+            session.ZoneId, (short)GameServerBootstrapper.ResolveObjectEventNpcId(objectEvent));
+        if (gateNpc == null || (byte)gateNpc.Nation != (byte)session.Nation)
+            return false;
+
+        await ToggleGateAsync(gateNpc);
+        return true;
+    }
+
     private async Task<bool> HandleWarpGateObjectEventAsync(UserSession session, ObjectEvent objectEvent)
     {
         if (objectEvent.Belong != 0 && objectEvent.Belong != (int)session.Nation)
@@ -147,12 +149,20 @@ public class WorldObjectEventService(
                 warp.Name,
                 warp.Announce,
                 warp.Zone,
-                0,
+                WarpListPacketWriter.NoUserLimit,
                 (int)warp.Fee))
             .ToList();
 
-        await worldMovementService.SendWarpListAsync(session, entries);
+        var source = new GateWarpSource(
+            session.ZoneId, objectEvent.PosX, objectEvent.PosZ, MaxObjectRange + Reach.LatencyAllowance);
+        await worldMovementService.OfferWarpListAsync(session, source, entries);
         return true;
+    }
+
+    private async Task ToggleGateAsync(NpcInstance gateNpc)
+    {
+        gateNpc.WithLock(gate => gate.GateOpen = !gate.GateOpen);
+        await BroadcastGateFlagAsync(gateNpc);
     }
 
     private async Task BroadcastGateFlagAsync(NpcInstance npc)

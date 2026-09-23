@@ -55,6 +55,11 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
     private const byte CospreCodeEmblem = 14;
     private const byte CospreCodeTattooAlt = 27;
 
+    private const byte NoClassRequirement = 0;
+    private const int NoClassFamily = 0;
+    private const int ClassDecade = 10;
+    private const byte NoLevelCeiling = 0;
+
     public bool TryResolveEquipmentPosition(byte position, out byte resolvedPosition)
     {
         // Client slot indices match storage indices directly (0-13)
@@ -79,7 +84,8 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
             case ItemMoveDirection.InventoryToSlot:
                 if (destinationPosition >= InventoryConstants.SlotMax
                     || sourcePosition >= InventoryConstants.HaveMax
-                    || !IsValidEquipmentDestination(session, itemData, destinationPosition))
+                    || !IsValidEquipmentDestination(session, itemData, destinationPosition)
+                    || !MeetsEquipRequirements(session, itemData))
                 {
                     return false;
                 }
@@ -94,7 +100,7 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
 
                 sourceIndex = sourcePosition;
                 destinationIndex = InventoryConstants.InventoryStart + destinationPosition;
-                return true;
+                return CanEquipInstead(session, session.Inventory[destinationIndex], sourcePosition, checkRequirements: true);
 
             case ItemMoveDirection.InventoryToInventory:
                 if (destinationPosition >= InventoryConstants.HaveMax || sourcePosition >= InventoryConstants.HaveMax)
@@ -114,7 +120,7 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
 
                 sourceIndex = sourcePosition;
                 destinationIndex = destinationPosition;
-                return true;
+                return CanEquipInstead(session, session.Inventory[destinationIndex], sourcePosition, checkRequirements: false);
 
             case ItemMoveDirection.InventoryToCospre:
                 if (destinationPosition >= InventoryConstants.CospreMax
@@ -137,7 +143,7 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
 
                 sourceIndex = InventoryConstants.CospreStart + sourcePosition;
                 destinationIndex = InventoryConstants.InventoryStart + destinationPosition;
-                return true;
+                return FitsCospreInstead(session.Inventory[destinationIndex], sourcePosition);
 
             case ItemMoveDirection.InventoryToBagSlot:
                 if (destinationPosition >= InventoryConstants.BagSlotMax
@@ -165,7 +171,7 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
 
                 sourceIndex = InventoryConstants.BagSlotFor(sourcePosition);
                 destinationIndex = InventoryConstants.InventoryStart + destinationPosition;
-                return true;
+                return IsBagOrEmpty(session.Inventory[destinationIndex]);
 
             case ItemMoveDirection.InventoryToMagicBag:
                 if (destinationPosition >= InventoryConstants.MagicBagTotal
@@ -427,4 +433,62 @@ public class ItemInventoryRuleService(IGameDataService gameDataService) : IItemI
 
         return true;
     }
+
+    private bool CanEquipInstead(UserSession session, ItemSlot incoming, byte equipmentPosition, bool checkRequirements)
+    {
+        if (incoming.IsEmpty)
+            return true;
+
+        var incomingData = gameDataService.GetItem(incoming.ItemId);
+        return incomingData != null
+            && IsValidEquipmentDestination(session, incomingData, equipmentPosition)
+            && (!checkRequirements || MeetsEquipRequirements(session, incomingData));
+    }
+
+    private bool FitsCospreInstead(ItemSlot incoming, byte cosprePosition)
+    {
+        if (incoming.IsEmpty)
+            return true;
+
+        var incomingData = gameDataService.GetItem(incoming.ItemId);
+        return incomingData != null && IsValidCospreDestination(incomingData, cosprePosition);
+    }
+
+    private bool IsBagOrEmpty(ItemSlot incoming) =>
+        incoming.IsEmpty || gameDataService.GetItem(incoming.ItemId)?.Slot == ItemSlotBag;
+
+    private static bool MeetsEquipRequirements(UserSession session, ItemData itemData) =>
+        session.Level >= itemData.ReqLevel
+        && (itemData.ReqLevelMax == NoLevelCeiling || session.Level <= itemData.ReqLevelMax)
+        && !FailsClassRequirement(itemData.Class, session.Class)
+        && StatTotal(session.Strength, session.RebStr, session.Stats.StrBonus) >= itemData.ReqStr
+        && StatTotal(session.Stamina, session.RebSta, session.Stats.StaBonus) >= itemData.ReqSta
+        && StatTotal(session.Dexterity, session.RebDex, session.Stats.DexBonus) >= itemData.ReqDex
+        && StatTotal(session.Intelligence, session.RebIntel, session.Stats.IntBonus) >= itemData.ReqIntel
+        && StatTotal(session.Magic, session.RebMagic, session.Stats.ChaBonus) >= itemData.ReqCha;
+
+    private static int StatTotal(byte baseValue, byte rebirthValue, short itemBonus) =>
+        baseValue + rebirthValue + itemBonus;
+
+    private static bool FailsClassRequirement(byte requiredClass, short classId)
+    {
+        if (requiredClass == NoClassRequirement || classId <= 0 || requiredClass == classId)
+            return false;
+
+        var requiredFamily = ClassFamily(requiredClass);
+        var ownFamily = ClassFamily(classId);
+        if (requiredFamily != NoClassFamily && ownFamily != NoClassFamily)
+            return requiredFamily != ownFamily;
+
+        var requiredDecade = requiredClass / ClassDecade;
+        var ownDecade = classId / ClassDecade;
+        return requiredDecade > 0 && ownDecade > 0 && requiredDecade != ownDecade;
+    }
+
+    private static int ClassFamily(short classId) =>
+        ClassIdHelper.IsWarrior(classId) || ClassIdHelper.IsPortuKurian(classId) ? ClassIdHelper.JobGroupWarrior
+        : ClassIdHelper.IsRogue(classId) ? ClassIdHelper.JobGroupRogue
+        : ClassIdHelper.IsMage(classId) ? ClassIdHelper.JobGroupMage
+        : ClassIdHelper.IsPriest(classId) ? ClassIdHelper.JobGroupPriest
+        : NoClassFamily;
 }

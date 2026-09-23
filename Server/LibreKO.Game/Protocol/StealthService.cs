@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Services;
+﻿using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Game.Protocol.Writers;
 using LibreKO.Game.World;
@@ -12,16 +12,21 @@ public interface IStealthService
     Task GrantSightAsync(UserSession session, short radius);
     Task ClearSightAsync(UserSession session);
     Task EndAsync(UserSession session, MagicStealthType stealthType);
+    bool CanSee(UserSession viewer, UserSession target);
 }
 
 public class StealthService(
     SessionManager sessionManager,
-    IGameDataService gameDataService) : IStealthService
+    IGameDataService gameDataService,
+    IWorldVisibilityService worldVisibilityService) : IStealthService
 {
-    public Task HideAsync(UserSession session, InvisibilityType invisibility)
+    private const short NoSightRadius = 0;
+
+    public async Task HideAsync(UserSession session, InvisibilityType invisibility)
     {
         session.Invisibility = invisibility;
-        return BroadcastVisibilityAsync(session);
+        await BroadcastVisibilityAsync(session);
+        await worldVisibilityService.HideFromAsync(session, UnawareOf(session));
     }
 
     public async Task RevealAsync(UserSession session, InvisibilityType dispelledBy)
@@ -36,16 +41,38 @@ public class StealthService(
             session.ActiveBuffs.TryRemove(skillId, out _);
 
         session.Invisibility = InvisibilityType.None;
-        await BroadcastVisibilityAsync(session);
+        await AnnounceVisibleAsync(session);
         await session.Client.SendPacket(
             MagicProcessPacketWriter.CreateDurationExpired(DurationExpiredCode.Stealth));
     }
 
-    public Task GrantSightAsync(UserSession session, short radius) =>
-        session.Client.SendPacket(StealthPacketWriter.Sight(radius));
+    public async Task GrantSightAsync(UserSession session, short radius)
+    {
+        var revealed = sessionManager.Regions.GetNearbyUsers(session)
+            .Where(user => user.IsInvisible && !StealthSight.Detects(session, user))
+            .ToList();
 
-    public Task ClearSightAsync(UserSession session) =>
-        session.Client.SendPacket(StealthPacketWriter.NoSight());
+        session.SightRadius = radius;
+        await session.Client.SendPacket(StealthPacketWriter.Sight(radius));
+
+        foreach (var user in revealed)
+            await worldVisibilityService.ShowToAsync(user, [session]);
+    }
+
+    public async Task ClearSightAsync(UserSession session)
+    {
+        var obscured = session.SightRadius == NoSightRadius
+            ? []
+            : sessionManager.Regions.GetNearbyUsers(session)
+                .Where(user => user.IsInvisible && !StealthSight.DetectsUnaided(session, user))
+                .ToList();
+
+        session.SightRadius = NoSightRadius;
+        await session.Client.SendPacket(StealthPacketWriter.NoSight());
+
+        foreach (var user in obscured)
+            await worldVisibilityService.HideFromAsync(user, [session]);
+    }
 
     public async Task EndAsync(UserSession session, MagicStealthType stealthType)
     {
@@ -53,7 +80,10 @@ public class StealthService(
         {
             case MagicStealthType.DispelOnMove:
             case MagicStealthType.DispelOnAttack:
-                await BroadcastVisibilityAsync(session);
+                if (session.IsInvisible)
+                    await BroadcastVisibilityAsync(session);
+                else
+                    await AnnounceVisibleAsync(session);
                 await session.Client.SendPacket(
                     MagicProcessPacketWriter.CreateDurationExpired(DurationExpiredCode.Stealth));
                 break;
@@ -66,6 +96,19 @@ public class StealthService(
                 break;
         }
     }
+
+    private async Task AnnounceVisibleAsync(UserSession session)
+    {
+        await worldVisibilityService.ShowToAsync(session, UnawareOf(session));
+        await BroadcastVisibilityAsync(session);
+    }
+
+    private List<UserSession> UnawareOf(UserSession session) =>
+        sessionManager.Regions.GetNearbyUsers(session)
+            .Where(viewer => !StealthSight.Detects(viewer, session))
+            .ToList();
+
+    public bool CanSee(UserSession viewer, UserSession target) => StealthSight.CanTarget(viewer, target);
 
     private Task BroadcastVisibilityAsync(UserSession session) =>
         sessionManager.Regions.SendToRegion(

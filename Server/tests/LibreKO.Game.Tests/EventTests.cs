@@ -439,6 +439,7 @@ public class EventTests : GameTestBase
         session.Hp = 100;
 
         var bundle = sessionManager.Regions.CreateBundle(session.X, session.Z, session.Y);
+        bundle.ZoneId = session.ZoneId;
         bundle.OwnerCharId = session.CharacterId;
         bundle.Items.Add(new LootItem
         {
@@ -501,6 +502,7 @@ public class EventTests : GameTestBase
         session.Hp = 100;
 
         var bundle = sessionManager.Regions.CreateBundle(session.X, session.Z, session.Y);
+        bundle.ZoneId = session.ZoneId;
         bundle.OwnerCharId = session.CharacterId;
         bundle.Items.Add(new LootItem
         {

@@ -80,7 +80,7 @@ public class SocialPacketCoordinator(
                 break;
 
             case 2:
-                await HandleFriendReportAsync(client, packet);
+                await HandleFriendReportAsync(client, session, packet);
                 break;
 
             case 3:
@@ -98,15 +98,18 @@ public class SocialPacketCoordinator(
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        var names = await db.Friendships
-            .Where(f => f.CharacterId == session.CharacterId)
-            .OrderBy(f => f.AddedAt)
-            .Join(db.Characters, f => f.FriendCharacterId, c => c.Id, (_, c) => c.Name)
-            .ToListAsync();
+        var names = await FriendNamesAsync(db, session);
         var friends = names.Select(FriendStatus).ToList();
         await client.SendPacket(FriendPacketWriter.StatusList(friends, (ushort)friends.Count));
         await SendFriendDetailsAsync(client, db, names);
     }
+
+    private static Task<List<string>> FriendNamesAsync(AppDbContext db, UserSession session)
+        => db.Friendships
+            .Where(f => f.CharacterId == session.CharacterId)
+            .OrderBy(f => f.AddedAt)
+            .Join(db.Characters, f => f.FriendCharacterId, c => c.Id, (_, c) => c.Name)
+            .ToListAsync();
 
     private async Task SendFriendDetailsAsync(IClient client, AppDbContext db, IReadOnlyList<string> names)
     {
@@ -139,28 +142,29 @@ public class SocialPacketCoordinator(
         await client.SendPacket(FriendPacketWriter.Details(details));
     }
 
-    private async Task HandleFriendReportAsync(IClient client, Packet packet)
+    private async Task HandleFriendReportAsync(IClient client, UserSession session, Packet packet)
     {
         var count = packet.ReadUShort();
-        if (count > 24)
+        if (count > Friendship.MaxFriends)
             return;
 
-        var friends = new List<FriendPacketWriter.Status>(count);
-        var names = new List<string>(count);
+        var requested = new List<string>(count);
         for (var i = 0; i < count; i++)
         {
             var friendName = packet.ReadSByteString();
             if (string.IsNullOrEmpty(friendName) || friendName.Length > MaxFriendNameLength)
                 return;
 
-            names.Add(friendName);
-            friends.Add(FriendStatus(friendName));
+            requested.Add(friendName);
         }
-
-        await client.SendPacket(FriendPacketWriter.StatusList(friends, count));
 
         using var scope = scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var friendNames = (await FriendNamesAsync(db, session)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var names = requested.Where(friendNames.Contains).ToList();
+
+        var friends = names.Select(FriendStatus).ToList();
+        await client.SendPacket(FriendPacketWriter.StatusList(friends, (ushort)friends.Count));
         await SendFriendDetailsAsync(client, db, names);
     }
 

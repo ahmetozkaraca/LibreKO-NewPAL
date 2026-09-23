@@ -217,8 +217,7 @@ public class KnightsManagementPacketService(
         }
 
         var clan = sessionManager.Knights.GetClan(session.KnightsId);
-        if (clan != null)
-            clan.ClanPointFund += amount;
+        sessionManager.Knights.WithClan(session.KnightsId, knights => knights.ClanPointFund += amount, 0);
 
         await loyaltyService.DonateToKnightsAsync(session, amount);
 
