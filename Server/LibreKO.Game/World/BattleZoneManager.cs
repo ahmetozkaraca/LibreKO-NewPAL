@@ -246,6 +246,17 @@ public class BattleZoneManager
         return Victory;
     }
 
+    public bool SettleVictory(out byte winner)
+    {
+        using var scope = _sync.EnterScope();
+        var undecided = Victory == (byte)AccountNation.None;
+        if (undecided)
+            Victory = DetermineWinner();
+
+        winner = Victory;
+        return undecided && winner != (byte)AccountNation.None;
+    }
+
     public void CaptureMonument(byte nation)
     {
         if (nation == 1) // Karus
@@ -268,7 +279,7 @@ public class BattleZoneManager
         }
     }
 
-    public byte DetermineWinner()
+    private byte DetermineWinner()
     {
         // Zones 4, 6 use monument points
         if (BattleZone is ZONE_BATTLE4 or ZONE_BATTLE6)

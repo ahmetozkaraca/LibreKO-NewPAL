@@ -3523,6 +3523,15 @@ namespace LibreKO.Common.Migrations
                     b.Property<int>("PersonalRankRewardTime")
                         .HasColumnType("int");
 
+                    b.Property<int>("SpiritGuardianBlackTime")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpiritGuardianBlueTime")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SpiritGuardianRedTime")
+                        .HasColumnType("int");
+
                     b.Property<int>("UserLoyaltyWingRewardTime")
                         .HasColumnType("int");
 

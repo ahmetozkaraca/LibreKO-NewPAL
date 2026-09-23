@@ -1,11 +1,10 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
 public sealed class ItemCombinePacketWriter
 {
     public const byte Failed = 0;
-    public const byte Succeeded = 1;
     public const int NoItemId = 0;
 
     public readonly record struct Recipe(int RecipeId, string Name, int OutputItemId);

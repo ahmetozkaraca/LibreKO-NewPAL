@@ -1,6 +1,7 @@
 ﻿using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
+using LibreKO.Common.Infrastructure.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -13,14 +14,13 @@ public interface IRewardStateService
     Task<bool> SaveProgressAsync(UserSession session);
     void SaveProgressInBackground(UserSession session);
     Task FlushAsync(UserSession session);
-    Task<bool> ClaimQuestAsync(CharacterRewardQuest claim, int eventCoins);
-    Task<bool> SpendEventCoinsAsync(RouletteSpin spin, int cost);
-    Task<bool> ClaimDailyRewardAsync(DailyRewardClaim claim);
+    Task<bool> CommitAsync(UserSession session, string operation, Func<bool> apply, Func<IRewardStateRepository, Task<bool>> stage, Action undo);
 }
 
 public sealed class RewardStateService(
     IServiceScopeFactory scopeFactory,
     IGameDataService gameData,
+    ICharacterStatePersister persister,
     TimeProvider time,
     ILogger<RewardStateService> logger) : IRewardStateService
 {
@@ -89,6 +89,9 @@ public sealed class RewardStateService(
 
     public async Task FlushAsync(UserSession session)
     {
+        if (!session.Rewards.IsLoaded)
+            return;
+
         try
         {
             await RunExclusiveAsync(session, false, _ => SaveProgressAsync(session));
@@ -99,14 +102,30 @@ public sealed class RewardStateService(
         }
     }
 
-    public Task<bool> ClaimQuestAsync(CharacterRewardQuest claim, int eventCoins) =>
-        WriteAsync("quest claim", claim.CharacterId, repository => repository.ClaimQuestAsync(claim, eventCoins));
+    public Task<bool> CommitAsync(UserSession session, string operation, Func<bool> apply,
+        Func<IRewardStateRepository, Task<bool>> stage, Action undo) =>
+        persister.RunAsync(session, false, async unit =>
+        {
+            if (!apply())
+                return false;
 
-    public Task<bool> SpendEventCoinsAsync(RouletteSpin spin, int cost) =>
-        WriteAsync("roulette spin", spin.CharacterId, repository => repository.SpendEventCoinsAsync(spin, cost));
+            try
+            {
+                if (await stage(new RewardStateRepository(unit.Db)))
+                {
+                    await unit.CommitAsync();
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Reward {Operation} failed for {Name} ({CharacterId})",
+                    operation, session.Name, session.CharacterId);
+            }
 
-    public Task<bool> ClaimDailyRewardAsync(DailyRewardClaim claim) =>
-        WriteAsync("daily reward claim", claim.CharacterId, repository => repository.ClaimDailyRewardAsync(claim));
+            undo();
+            return false;
+        });
 
     private async Task<bool> TryLoadAsync(UserSession session, RewardState state)
     {

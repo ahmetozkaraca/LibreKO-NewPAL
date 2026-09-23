@@ -41,8 +41,9 @@ public class MerchantListingService(
             : session.Trade.IsTrading || session.IsGathering ? "busy"
             : srcPos >= InventoryConstants.HaveMax ? "source slot out of range"
             : dstPos >= session.Trade.MerchantItems.Length ? "stall slot out of range"
-            : IsNoTradeItem(itemId) ? "item cannot be traded"
+            : ItemTransfer.IsNoTradeItem(itemId) ? "item cannot be traded"
             : !IsSanePrice(price) ? "price out of range"
+            : !IsSanePrice((long)price * count) ? "total price out of range"
             : count == 0 ? "count is zero"
             : itemData.Countable == 0 && count != 1 ? "not stackable but count is not 1"
             : null;
@@ -225,7 +226,7 @@ public class MerchantListingService(
             return null;
 
         var cost = (long)listed.Price * count;
-        if (!IsSanePrice(cost) || cost > buyer.Money || !CanReceive(seller, cost))
+        if (!IsSanePrice(cost) || cost > buyer.Money || !Coins.CanCredit(seller.Money, cost))
             return null;
 
         var stackable = itemData.Countable != 0;

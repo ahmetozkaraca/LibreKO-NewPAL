@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using FluentAssertions;
@@ -17,7 +17,7 @@ public class SocketServerTests
 
     private sealed class RealClientFactory : IClientFactory
     {
-        public IClient Create(Socket socket) => new Client(socket, ServerType.Game, NullLogger<Client>.Instance);
+        public IClient Create(Socket socket) => new Client(socket, ServerType.Game, NullLogger<Client>.Instance, new ConnectionLimitsSettings(), TimeProvider.System);
     }
 
     private sealed class ThrowOnceClientFactory : IClientFactory
@@ -31,7 +31,7 @@ public class SocketServerTests
             if (Interlocked.Increment(ref _attempts) == 1)
                 throw new InvalidOperationException("simulated factory failure");
 
-            return new Client(socket, ServerType.Game, NullLogger<Client>.Instance);
+            return new Client(socket, ServerType.Game, NullLogger<Client>.Instance, new ConnectionLimitsSettings(), TimeProvider.System);
         }
     }
 

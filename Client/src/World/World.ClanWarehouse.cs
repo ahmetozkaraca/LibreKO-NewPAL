@@ -235,7 +235,10 @@ public partial class World
     {
         if (op == 1)
         {
-            if (_clanWhShown) _clanWhStatus.Text = "You're not in a clan.";
+            if (_clanWhShown)
+                _clanWhStatus.Text = _myClan.InClan
+                    ? "Visit a warehouse keeper to open the clan warehouse."
+                    : "You're not in a clan.";
             return;
         }
 

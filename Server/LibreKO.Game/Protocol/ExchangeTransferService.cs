@@ -23,8 +23,11 @@ public class ExchangeTransferService(
 {
     public async Task AddAsync(UserSession session, Packet packet)
     {
-        if (!session.Trade.IsTrading)
+        if (!session.Trade.ExchangeStarted)
+        {
+            await exchangeLifecycleService.CancelAsync(session);
             return;
+        }
 
         var target = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
         if (target == null || target.Hp <= 0 || session.Hp <= 0
@@ -56,6 +59,8 @@ public class ExchangeTransferService(
                 return;
 
             offered = isGold ? EscrowGold(me, count) : EscrowItem(me, pos, itemId, (ushort)count, itemData!);
+            if (offered is { IsGold: false })
+                me.RecalculateStatsWithBuffs(gameDataService);
         });
 
         if (!partners)
@@ -79,8 +84,11 @@ public class ExchangeTransferService(
 
     public async Task DecideAsync(UserSession session)
     {
-        if (!session.Trade.IsTrading)
+        if (!session.Trade.ExchangeStarted)
+        {
+            await exchangeLifecycleService.CancelAsync(session);
             return;
+        }
 
         var target = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
         if (target == null || target.Hp <= 0 || session.Hp <= 0 || !ExchangePacketConstants.IsWithinTradeRange(session, target))
@@ -111,6 +119,8 @@ public class ExchangeTransferService(
             {
                 LogUnreturned(sa, sa.InitExchange(false));
                 LogUnreturned(sb, sb.InitExchange(false));
+                sa.RecalculateStatsWithBuffs(gameDataService);
+                sb.RecalculateStatsWithBuffs(gameDataService);
                 outcome = DecideOutcome.Fail;
                 return;
             }
@@ -257,12 +267,6 @@ public class ExchangeTransferService(
         if (unreturned.Count > 0)
             logger.LogError("Could not return {Count} escrowed items to {Name}", unreturned.Count, session.Name);
     }
-
-    internal static bool IsTradableItem(ItemData? itemData, int itemId, byte pos)
-        => itemData != null
-        && pos < InventoryConstants.HaveMax
-        && itemData.Race != ExchangePacketConstants.RaceUntradeable
-        && !ItemTransfer.IsNoTradeItem(itemId);
 
     private static async Task SendAddFailAsync(UserSession session)
     {

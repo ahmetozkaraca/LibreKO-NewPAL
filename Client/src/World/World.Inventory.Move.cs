@@ -26,7 +26,7 @@ public partial class World : Node3D
 
     private void InventoryActivate(int absSlot)
     {
-        if (_moveInFlight || _moveQueue.Count > 0 || _selfDead) return;
+        if (_moveReply.Waiting || _moveQueue.Count > 0 || _selfDead) return;
         if (absSlot >= Inv.Length || Inv[absSlot].IsEmpty) return;
         var def = ItemData.Get(Inv[absSlot].ItemId);
         if (def == null) return;
@@ -126,7 +126,7 @@ public partial class World : Node3D
 
     private void MoveBetween(int from, int to)
     {
-        if (_moveInFlight || _moveQueue.Count > 0 || _selfDead) return;
+        if (_moveReply.Waiting || _moveQueue.Count > 0 || _selfDead) return;
         if (from == to || from < 0 || to < 0 || from >= Inv.Length || to >= Inv.Length) return;
         if (Inv[from].IsEmpty) return;
 
@@ -170,16 +170,23 @@ public partial class World : Node3D
 
     private void PumpMoves()
     {
-        if (_moveInFlight || _moveQueue.Count == 0) return;
+        if (_moveReply.Waiting || _moveQueue.Count == 0) return;
         _moveCur = _moveQueue.Dequeue();
-        _moveInFlight = true;
+        AwaitReply(_moveReply, OnItemMoveUnanswered);
         Net.I.SendItemMove(_moveCur.Dir, _moveCur.ItemId, _moveCur.Src, _moveCur.Dst);
+    }
+
+    private void OnItemMoveUnanswered()
+    {
+        _moveQueue.Clear();
+        RefreshInventoryUI();
+        CombatNotice(NoReplyText);
     }
 
     private void OnItemMoveResult(bool ok)
     {
-        if (!_moveInFlight) return;
-        _moveInFlight = false;
+        if (!_moveReply.Waiting) return;
+        _moveReply.Settle();
         if (!ok)
         {
             _moveQueue.Clear();

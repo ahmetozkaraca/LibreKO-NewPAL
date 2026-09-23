@@ -8,6 +8,7 @@ public static class CharacterRules
 {
     public const int MinNameLength = 1;
     public const int MinRenameLength = 3;
+    public const int MinClanNameLength = 2;
     public const int MaxNameLength = 20;
     public const int RenameScrollItemId = 379090000;
     public const byte MaxFace = 31;

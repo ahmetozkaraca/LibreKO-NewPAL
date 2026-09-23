@@ -13,7 +13,6 @@ public class MagicMeleeService(
     ICombatLifecycleService combatLifecycleService,
     Microsoft.Extensions.Logging.ILogger<MagicMeleeService> logger)
 {
-    private const int AreaTarget = -1;
     private const float AreaReach = 6f;
     private const short AreaStruckFlag = 1;
 
@@ -29,7 +28,7 @@ public class MagicMeleeService(
         }
 
         int finalDamage;
-        if (targetId == AreaTarget)
+        if (targetId == MagicTargetingService.AreaTargetId)
         {
             if (type1Data.HitType != 0 || !await charge.TryPayAsync())
             {

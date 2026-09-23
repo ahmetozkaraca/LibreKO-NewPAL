@@ -28,14 +28,23 @@ public class ChallengePacketCoordinator(
     public async Task HandleAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null || session.Hp <= 0)
+        if (session == null)
             return;
 
         var opcode = packet.ReadByte();
         switch (opcode)
         {
+            case ChallengePvpRequest when session.Hp <= 0:
+                await SendErrorAsync(session);
+                break;
+
             case ChallengePvpRequest:
                 await RequestAsync(session, packet);
+                break;
+
+            case ChallengePvpAccept when session.Hp <= 0:
+                await CancelAsync(session, ChallengePvpReject);
+                await SendErrorAsync(session);
                 break;
 
             case ChallengePvpAccept:

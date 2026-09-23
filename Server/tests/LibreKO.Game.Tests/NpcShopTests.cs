@@ -21,11 +21,12 @@ public class NpcShopTests : EconomyTestBase
 
     private const int Sundries = 255000;
     private const int LoyaltyMerchant = 249000;
+    private const int TablelessGroup = 201007;
+    private const int NoGroup = 0;
     private const int Arrow = 391010000;
     private const int Sword = 120150000;
     private const int Gem = 379107000;
     private const int FreeTrinket = 389191000;
-    private const int PricedTrinket = 389570000;
     private const int KnightsMedal = 389217000;
     private const int SilverBar = 379067000;
     private const int Potion = 389014000;
@@ -34,7 +35,6 @@ public class NpcShopTests : EconomyTestBase
     private const int ArrowPrice = 10;
     private const int SwordPrice = 1_000;
     private const int GemPrice = 1_500_000_000;
-    private const int TrinketShopPrice = 700;
     private const int MedalGoldPrice = 17_500;
     private const int MedalLoyaltyPrice = 10_000;
     private const int SilverBarPrice = 10_000_000;
@@ -52,7 +52,6 @@ public class NpcShopTests : EconomyTestBase
     private const byte SwordIndex = 1;
     private const byte GemIndex = 2;
     private const byte FreeIndex = 3;
-    private const byte PricedIndex = 4;
 
     [Fact]
     public async Task ABuyWhoseLaterLineIsRefusedGrantsAndChargesNothing()
@@ -87,19 +86,73 @@ public class NpcShopTests : EconomyTestBase
     }
 
     [Theory]
-    [InlineData(NpcData.TypeGuard, Sundries)]
-    [InlineData(NpcData.TypeMonster, Sundries)]
-    [InlineData(NpcData.TypeTradeMerchant, 0)]
-    public async Task OnlyAMerchantOfThatSellingGroupSells(byte npcType, int npcGroup)
+    [InlineData(Sundries, LoyaltyMerchant)]
+    [InlineData(LoyaltyMerchant, Sundries)]
+    [InlineData(NoGroup, NoGroup)]
+    public async Task OnlyTheNpcsOwnSellingGroupSells(int npcGroup, int askedGroup)
     {
         using var provider = Shop();
         var buyer = Player(provider, 5003, out _, money: 10_000);
-        var npc = Npc(provider, npcType, npcGroup);
+        var npc = Npc(provider, NpcData.TypeTradeMerchant, npcGroup);
 
-        await Trade(provider, buyer, Buy(npc, npcGroup, (Arrow, 0, 5, ArrowLine, ArrowIndex)));
+        await Trade(provider, buyer, Buy(npc, askedGroup, (Arrow, 0, 5, ArrowLine, ArrowIndex)));
 
         Bag(buyer, 0).IsEmpty.Should().BeTrue();
         buyer.Money.Should().Be(10_000);
+    }
+
+    [Theory]
+    [InlineData(NpcData.TypeCastleManager)]
+    [InlineData(NpcData.TypeTradeMerchant)]
+    public async Task AnyNpcWhoseSellingGroupHasAShopTableSells(byte npcType)
+    {
+        using var provider = Shop();
+        var buyer = Player(provider, 5014, out var sent, money: 10_000);
+        var npc = Npc(provider, npcType, Sundries);
+
+        await Trade(provider, buyer, Buy(npc, Sundries, (Arrow, 0, 5, ArrowLine, ArrowIndex)));
+
+        Bag(buyer, 0).ItemId.Should().Be(Arrow);
+        buyer.Money.Should().Be(10_000 - ArrowPrice * 5);
+        Reply(sent).Result.Should().Be(TradeDone);
+    }
+
+    [Fact]
+    public async Task ADeadCustomerIsToldTheShopAndTheBlacksmithRefused()
+    {
+        using var provider = Shop();
+        var player = Player(provider, 5016, out var sent, money: 10_000);
+        var merchant = Npc(provider, NpcData.TypeTradeMerchant, Sundries);
+        var smith = Npc(provider, NpcData.TypeRepairMerchant, Sundries);
+        Give(player, 0, Sword, durability: WornDurability);
+        player.Hp = 0;
+
+        await Trade(provider, player, Buy(merchant, Sundries, (Arrow, 1, 5, ArrowLine, ArrowIndex)));
+        var repair = new Packet(GameOpcodes.GS_ITEM_REPAIR);
+        repair.WriteByte(RepairInBag);
+        repair.WriteByte(0);
+        repair.WriteInt(smith.UniqueId);
+        repair.WriteInt(Sword);
+        await provider.GetRequiredService<IItemPacketCoordinator>().HandleRepairAsync(player.Client, repair);
+
+        Reply(sent).Result.Should().Be(TradeRefused);
+        sent.Should().Contain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_ITEM_REPAIR);
+        Bag(player, 0).Durability.Should().Be(WornDurability);
+    }
+
+    [Fact]
+    public async Task AShopWithoutATableIsRefusedWithoutReportingTheBuyer()
+    {
+        using var provider = Shop();
+        var buyer = Player(provider, 5015, out var sent, money: 10_000);
+        var npc = Npc(provider, NpcData.TypeTradeMerchant, TablelessGroup);
+
+        await Trade(provider, buyer, Buy(npc, TablelessGroup, (Arrow, 0, 5, ArrowLine, ArrowIndex)));
+
+        Bag(buyer, 0).IsEmpty.Should().BeTrue();
+        buyer.Money.Should().Be(10_000);
+        Reply(sent).Result.Should().Be(TradeRefused);
+        provider.GetRequiredService<IViolationMonitor>().ScoreOf(buyer.Client.Id).Should().Be(0);
     }
 
     [Fact]
@@ -137,7 +190,7 @@ public class NpcShopTests : EconomyTestBase
     }
 
     [Fact]
-    public async Task AnUnpricedItemOnlySellsAtThePriceTheShopGivesIt()
+    public async Task AnUnpricedItemIsNeverHandedOut()
     {
         using var provider = Shop();
         var buyer = Player(provider, 5006, out _, money: 10_000);
@@ -146,11 +199,7 @@ public class NpcShopTests : EconomyTestBase
         await Trade(provider, buyer, Buy(npc, Sundries, (FreeTrinket, 0, 1, ArrowLine, FreeIndex)));
 
         Bag(buyer, 0).IsEmpty.Should().BeTrue("an item with no price must not be handed out for free");
-
-        await Trade(provider, buyer, Buy(npc, Sundries, (PricedTrinket, 0, 1, ArrowLine, PricedIndex)));
-
-        Bag(buyer, 0).ItemId.Should().Be(PricedTrinket);
-        buyer.Money.Should().Be(10_000 - TrinketShopPrice);
+        buyer.Money.Should().Be(10_000);
     }
 
     [Fact]
@@ -294,7 +343,6 @@ public class NpcShopTests : EconomyTestBase
         Item(gameData, new ItemData { Num = Sword, Countable = 0, BuyPrice = SwordPrice, Duration = SwordDuration });
         Item(gameData, new ItemData { Num = Gem, Countable = 0, BuyPrice = GemPrice });
         Item(gameData, new ItemData { Num = FreeTrinket, Countable = 1, BuyPrice = 0 });
-        Item(gameData, new ItemData { Num = PricedTrinket, Countable = 1, BuyPrice = 0 });
         Item(gameData, new ItemData
         {
             Num = KnightsMedal, Countable = 1, BuyPrice = MedalGoldPrice, NpBuyPrice = MedalLoyaltyPrice,
@@ -307,7 +355,6 @@ public class NpcShopTests : EconomyTestBase
         Listed(gameData, Sundries, SwordIndex, Sword);
         Listed(gameData, Sundries, GemIndex, Gem);
         Listed(gameData, Sundries, FreeIndex, FreeTrinket);
-        Listed(gameData, Sundries, PricedIndex, PricedTrinket, TrinketShopPrice);
         Listed(gameData, LoyaltyMerchant, ArrowIndex, KnightsMedal);
 
         gameData.GetPremiumProperty(PremiumWithSellBonus, PremiumPropertyType.ItemSell).Returns(PremiumSellBonus);
@@ -315,11 +362,14 @@ public class NpcShopTests : EconomyTestBase
 
     private static void Item(IGameDataService gameData, ItemData item) => gameData.GetItem(item.Num).Returns(item);
 
-    private static void Listed(IGameDataService gameData, int group, byte index, int itemId, int price = 0) =>
+    private static void Listed(IGameDataService gameData, int group, byte index, int itemId)
+    {
+        gameData.HasSellingGroup(group).Returns(true);
         gameData.GetSellingGroupItem(group, ArrowLine, index).Returns(new SellingGroupItemData
         {
-            SellingGroup = group, Line = ArrowLine, Index = index, ItemId = itemId, Price = price,
+            SellingGroup = group, Line = ArrowLine, Index = index, ItemId = itemId,
         });
+    }
 
     private static Packet Buy(NpcInstance npc, int group, params (int ItemId, byte Position, ushort Count, byte Line, byte Index)[] lines)
     {

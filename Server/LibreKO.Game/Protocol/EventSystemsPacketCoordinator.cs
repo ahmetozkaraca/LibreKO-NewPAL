@@ -160,8 +160,7 @@ public class EventSystemsPacketCoordinator(
         if (!battle.IsBattleActive)
             return;
 
-        var winner = battle.DetermineWinner();
-        if (winner > 0)
+        if (battle.SettleVictory(out var winner))
             await DeclareBattleWinnerAsync(winner);
 
         battle.CloseBattleZone();

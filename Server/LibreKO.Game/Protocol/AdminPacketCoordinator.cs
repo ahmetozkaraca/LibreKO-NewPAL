@@ -46,6 +46,9 @@ public class AdminPacketCoordinator(
     ILogger<AdminPacketCoordinator> logger) : IAdminPacketCoordinator
 {
     private const int MaxGmSummonCount = 50;
+    private const byte OperatorArrest = 1;
+    private const byte OperatorCutoff = 5;
+    private const byte OperatorSummon = 7;
 
     public async Task HandleOperatorAsync(IClient client, Packet packet)
     {
@@ -62,7 +65,7 @@ public class AdminPacketCoordinator(
 
         switch (opcode)
         {
-            case 1: // OPERATOR_ARREST - GM warps to target
+            case OperatorArrest:
                 if (target != null)
                 {
                     session.X = target.X;
@@ -75,12 +78,12 @@ public class AdminPacketCoordinator(
                 }
                 break;
 
-            case 5: // OPERATOR_CUTOFF - Disconnect target
+            case OperatorCutoff:
                 if (target != null)
                     await DisconnectAsync(target.Client);
                 break;
 
-            case 7: // OPERATOR_SUMMON - Summon target to GM
+            case OperatorSummon:
                 if (target != null)
                 {
                     if (target.ZoneId != session.ZoneId)
@@ -523,7 +526,12 @@ public class AdminPacketCoordinator(
             return;
         }
 
-        target.Hp = 0;
+        if (!target.ApplyDamage(target.Hp).Killed)
+        {
+            await SendNoticeAsync(session, $"Target not found or already dead: {arg}");
+            return;
+        }
+
         await combatNotificationService.SendHpChangeAsync(target, session.CharacterId);
         await combatLifecycleService.HandlePlayerDeathAsync(target, session);
         await SendNoticeAsync(session, $"Killed {target.Name}.");
@@ -542,7 +550,9 @@ public class AdminPacketCoordinator(
             if (!npc.IsAlive) continue;
             if (!npc.IsAttackable) continue;
 
-            npc.Hp = 0;
+            if (!npc.ApplyDamage(npc.Hp).Killed)
+                continue;
+
             await combatLifecycleService.HandleNpcDeathAsync(npc, session);
             killed++;
         }
@@ -948,7 +958,7 @@ public class AdminPacketCoordinator(
         });
 
         session.Quest.SyncActiveQuestKillCounts();
-        await serviceProvider.GetRequiredService<ICharacterStatePersister>().SaveQuestStateAsync(session);
+        await serviceProvider.GetRequiredService<ICharacterStatePersister>().RequestSaveAsync(session);
 
         await session.Client.SendPacket(QuestPacketWriter.StateChange(questId, QuestStatus.NotStarted));
         await session.Client.SendPacket(QuestPacketWriter.QuestList(session.Quest.QuestMap

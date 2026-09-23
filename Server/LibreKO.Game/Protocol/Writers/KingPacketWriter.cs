@@ -1,10 +1,12 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
 public sealed class KingPacketWriter
 {
     public const short Accepted = 1;
+    public const byte FlagRefused = 0;
+    public const byte FlagGranted = 1;
 
     public readonly record struct PollCandidate(string Name, string ClanName);
 
@@ -109,8 +111,6 @@ public sealed class KingPacketWriter
         => sub == NoticePacketWriter.LoginNotice
             ? NoticePacketWriter.Login([(string.Empty, message)])
             : NoticePacketWriter.Screen(message);
-
-    public static Packet Election(byte electionOpcode, byte election) => Sub(election, electionOpcode);
 
     public static Packet ElectionSchedule(
         byte electionOpcode, byte election, byte month, byte day, byte hour, byte minute)

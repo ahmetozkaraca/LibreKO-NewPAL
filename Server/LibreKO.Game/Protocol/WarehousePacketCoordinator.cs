@@ -98,7 +98,7 @@ public class WarehousePacketCoordinator(
             || srcPos >= InventoryConstants.HaveMax
             || dstPos >= WarehousePageSize
             || realDst >= UserSession.WarehouseMax
-            || !IsTransferableCount(itemData, count))
+            || !ItemTransfer.IsTransferableCount(itemData, count))
         {
             await SendResultAsync(session, WarehouseSubOpcode.Input, false);
             return;
@@ -108,10 +108,10 @@ public class WarehousePacketCoordinator(
         var success = session.WithLock(s =>
         {
             var source = s.Inventory[absSrc];
-            if (!Holds(source, itemId, itemData, count) || !ItemTransfer.CanLeaveOwner(source, itemData))
+            if (!ItemTransfer.Holds(source, itemId, itemData, count) || !ItemTransfer.CanLeaveOwner(source, itemData))
                 return false;
 
-            if (!Transfer(source, s.Warehouse[realDst], itemData, count))
+            if (!ItemTransfer.TryTransfer(source, s.Warehouse[realDst], (ushort)count, itemData.Countable != 0))
                 return false;
 
             s.RecalculateStatsWithBuffs(gameDataService);
@@ -158,7 +158,7 @@ public class WarehousePacketCoordinator(
             || srcPos >= WarehousePageSize
             || realSrc >= UserSession.WarehouseMax
             || dstPos >= InventoryConstants.HaveMax
-            || !IsTransferableCount(itemData, count))
+            || !ItemTransfer.IsTransferableCount(itemData, count))
         {
             await SendResultAsync(session, WarehouseSubOpcode.Output, false);
             return;
@@ -168,7 +168,7 @@ public class WarehousePacketCoordinator(
         var success = session.WithLock(s =>
         {
             var source = s.Warehouse[realSrc];
-            if (!Holds(source, itemId, itemData, count) || !Transfer(source, s.Inventory[absDst], itemData, count))
+            if (!ItemTransfer.Holds(source, itemId, itemData, count) || !ItemTransfer.TryTransfer(source, s.Inventory[absDst], (ushort)count, itemData.Countable != 0))
                 return false;
 
             s.RecalculateStatsWithBuffs(gameDataService);
@@ -200,7 +200,7 @@ public class WarehousePacketCoordinator(
             return;
         }
 
-        var moved = session.WithLock(s => TryMove(s.Warehouse[realSrc], s.Warehouse[realDst], itemId));
+        var moved = session.WithLock(s => ItemTransfer.TryMove(s.Warehouse[realSrc], s.Warehouse[realDst], itemId));
 
         await SendResultAsync(session, WarehouseSubOpcode.Move, moved);
     }
@@ -223,7 +223,7 @@ public class WarehousePacketCoordinator(
 
         var absSrc = InventoryConstants.InventoryStart + srcPos;
         var absDst = InventoryConstants.InventoryStart + dstPos;
-        var moved = session.WithLock(s => TryMove(s.Inventory[absSrc], s.Inventory[absDst], itemId));
+        var moved = session.WithLock(s => ItemTransfer.TryMove(s.Inventory[absSrc], s.Inventory[absDst], itemId));
 
         await SendResultAsync(session, WarehouseSubOpcode.InventoryMove, moved);
     }
@@ -232,35 +232,6 @@ public class WarehousePacketCoordinator(
         !ItemTransfer.IsInventoryLocked(session)
         && sessionManager.Regions.GetNpc(npcId) is { IsAlive: true, NpcType: NpcData.TypeWarehouse } npc
         && Reach.CanInteract(session, npc);
-
-    private static bool IsTransferableCount(ItemData itemData, int count) =>
-        count > 0
-        && count <= InventoryConstants.MaxStackCount
-        && (itemData.Countable != 0 || count == 1);
-
-    private static bool Holds(ItemSlot source, int itemId, ItemData itemData, int count) =>
-        source.ItemId == itemId
-        && source.Count >= count
-        && (itemData.Countable != 0 || source.Count == count);
-
-    private static bool Transfer(ItemSlot source, ItemSlot destination, ItemData itemData, int count)
-    {
-        var moving = ItemStack.Of(source) with { Count = (ushort)count };
-        if (!ItemTransfer.CanPut(destination, moving, itemData.Countable != 0))
-            return false;
-
-        ItemTransfer.Put(destination, ItemTransfer.Take(source, (ushort)count));
-        return true;
-    }
-
-    private static bool TryMove(ItemSlot source, ItemSlot destination, int itemId)
-    {
-        if (source.IsEmpty || source.ItemId != itemId || !destination.IsEmpty)
-            return false;
-
-        ItemTransfer.Move(source, destination);
-        return true;
-    }
 
     private static Task SendResultAsync(UserSession session, WarehouseSubOpcode sub, bool succeeded) =>
         session.Client.SendPacket(WarehousePacketWriter.Result(sub, succeeded));

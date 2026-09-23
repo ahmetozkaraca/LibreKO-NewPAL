@@ -45,6 +45,14 @@ public class CombatAuthorityTests : GameTestBase
     private const int SummonFriend = 109004;
     private const int Escape = 109035;
     private const int SightSkill = 107715;
+    private const int Resurrect = 111520;
+    private const int Blessing = 111530;
+    private const int ResurrectMana = 30;
+    private const int RevivalStone = 379006000;
+    private const short RequiredStones = 3;
+    private const int NukeMana = 50;
+    private const short NukeRecast = 100;
+    private const byte AnyRegene = 1;
     private const int Arrow = 391010000;
     private const int Sword = 110110001;
     private const int ArrowKind = 120;
@@ -703,6 +711,211 @@ public class CombatAuthorityTests : GameTestBase
         worm.State.Should().Be(NpcState.Dead);
     }
 
+    [Fact]
+    public async Task ABoltsFlightIsRebroadcastForItsBoundCastAndChargesNothing()
+    {
+        using var harness = CreateHarness();
+        NukeSkills(harness.Data);
+        harness.Data.Magic[Nuke].Msp = NukeMana;
+        var (mage, client, sent) = Player(harness, 1, MageMaster, AccountNation.Karus, Moradon, 100, 100);
+        var worm = Monster(harness, Moradon, 105, 100);
+
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Flying, Nuke, mage.CharacterId, worm.UniqueId);
+        Replies(sent).Should().Equal(MagicProcessOpcode.Fail);
+        sent.Clear();
+
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Casting, Nuke, mage.CharacterId, worm.UniqueId);
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Flying, Nuke, mage.CharacterId, worm.UniqueId);
+        Replies(sent).Should().Equal(MagicProcessOpcode.Casting, MagicProcessOpcode.Flying);
+        mage.Mp.Should().Be(mage.MaxMp);
+
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Effecting, Nuke, mage.CharacterId, worm.UniqueId);
+        worm.Hp.Should().BeLessThan(worm.MaxHp);
+        mage.Mp.Should().Be((short)(mage.MaxMp - NukeMana));
+    }
+
+    [Fact]
+    public async Task ABoltFliesOnlyOncePerCast()
+    {
+        using var harness = CreateHarness();
+        NukeSkills(harness.Data);
+        var (mage, client, sent) = Player(harness, 1, MageMaster, AccountNation.Karus, Moradon, 100, 100);
+        var worm = Monster(harness, Moradon, 105, 100);
+
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Casting, Nuke, mage.CharacterId, worm.UniqueId);
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Flying, Nuke, mage.CharacterId, worm.UniqueId);
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Flying, Nuke, mage.CharacterId, worm.UniqueId);
+
+        Replies(sent).Should().Equal(MagicProcessOpcode.Casting, MagicProcessOpcode.Flying, MagicProcessOpcode.Fail);
+
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Effecting, Nuke, mage.CharacterId, worm.UniqueId);
+        worm.Hp.Should().BeLessThan(worm.MaxHp, "a refused repeat flight leaves the cast itself intact");
+    }
+
+    [Fact]
+    public async Task ATargetedAreaSpellKeepsACentreWithinItsRange()
+    {
+        using var harness = CreateHarness();
+        NukeSkills(harness.Data);
+        var (mage, client, _) = Player(harness, 1, MageMaster, AccountNation.Karus, Moradon, 100, 100);
+        var target = Monster(harness, Moradon, 110, 100);
+        var bystander = Monster(harness, Moradon, 113, 100);
+
+        await harness.Magic.CastAsync(client, AreaNuke, mage.CharacterId, target.UniqueId, 111, 0, 100);
+
+        target.Hp.Should().BeLessThan(target.MaxHp);
+        bystander.Hp.Should().BeLessThan(bystander.MaxHp);
+    }
+
+    [Fact]
+    public async Task ATargetedAreaSpellDropsACentreBeyondItsRange()
+    {
+        using var harness = CreateHarness();
+        NukeSkills(harness.Data);
+        var (mage, client, _) = Player(harness, 1, MageMaster, AccountNation.Karus, Moradon, 100, 100);
+        var target = Monster(harness, Moradon, 110, 100);
+        var distant = Monster(harness, Moradon, 160, 100);
+
+        await harness.Magic.CastAsync(client, AreaNuke, mage.CharacterId, target.UniqueId, 160, 0, 100);
+
+        target.Hp.Should().BeLessThan(target.MaxHp);
+        distant.Hp.Should().Be(distant.MaxHp);
+    }
+
+    [Fact]
+    public async Task ARefusedReleaseHandsBackTheCooldown()
+    {
+        using var harness = CreateHarness();
+        NukeSkills(harness.Data);
+        harness.Data.Magic[Nuke].ReCastTime = NukeRecast;
+        var (mage, client, _) = Player(harness, 1, MageMaster, AccountNation.Karus, Moradon, 100, 100);
+        var worm = Monster(harness, Moradon, 105, 100);
+
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Casting, Nuke, mage.CharacterId, worm.UniqueId);
+        worm.X = 200;
+        await harness.Magic.SendAsync(client, MagicProcessOpcode.Effecting, Nuke, mage.CharacterId, worm.UniqueId);
+        worm.Hp.Should().Be(worm.MaxHp, "the target walked out of range");
+        mage.SkillCooldowns.Should().NotContainKey(Nuke);
+
+        worm.X = 105;
+        harness.Clock.Advance(BurstFloor);
+        await harness.Magic.CastAsync(client, Nuke, mage.CharacterId, worm.UniqueId);
+        worm.Hp.Should().BeLessThan(worm.MaxHp);
+    }
+
+    [Fact]
+    public async Task AResurrectionIsRefusedWhileAnotherIsUnderwayAndChargesNothing()
+    {
+        using var harness = CreateHarness();
+        ResurrectSkill(harness.Data);
+        var (priest, client, _) = Player(harness, 1, PriestNovice, AccountNation.Karus, Moradon, 100, 100);
+        var (corpse, _, _) = Player(harness, 2, WarriorBeginner, AccountNation.Karus, Moradon, 102, 100);
+        corpse.Hp = 0;
+        corpse.TryClaimRevival().Should().BeTrue();
+
+        await harness.Magic.CastAsync(client, Resurrect, priest.CharacterId, corpse.CharacterId);
+        corpse.Hp.Should().Be(0);
+        priest.Mp.Should().Be(priest.MaxMp);
+
+        corpse.ReleaseRevival();
+        harness.Clock.Advance(BurstFloor);
+        await harness.Magic.CastAsync(client, Resurrect, priest.CharacterId, corpse.CharacterId);
+        corpse.Hp.Should().Be(corpse.MaxHp);
+        priest.Mp.Should().Be((short)(priest.MaxMp - ResurrectMana));
+    }
+
+    [Fact]
+    public async Task ARegeneWaitsForAResurrectionThatIsUnderway()
+    {
+        using var harness = CreateHarness();
+        var (corpse, client, _) = Player(harness, 1, WarriorBeginner, AccountNation.Karus, Moradon, 100, 100);
+        corpse.Hp = 0;
+        corpse.TryClaimRevival();
+        var lifecycle = harness.Provider.GetRequiredService<ICombatLifecycleService>();
+
+        await lifecycle.HandleRegeneAsync(client, corpse, AnyRegene);
+        corpse.Hp.Should().Be(0);
+
+        corpse.ReleaseRevival();
+        await lifecycle.HandleRegeneAsync(client, corpse, AnyRegene);
+        corpse.Hp.Should().Be(corpse.MaxHp);
+    }
+
+    [Fact]
+    public async Task ARegeneHoldsTheCorpseSoNoResurrectionLandsMidway()
+    {
+        using var harness = CreateHarness();
+        var (corpse, client, _) = Player(harness, 1, WarriorBeginner, AccountNation.Karus, Moradon, 100, 100);
+        corpse.Hp = 0;
+        bool? claimedMidway = null;
+        client.SendPacket(Arg.Is<Packet>(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_REGENE), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                claimedMidway = corpse.TryClaimRevival();
+                return Task.CompletedTask;
+            });
+
+        await harness.Provider.GetRequiredService<ICombatLifecycleService>().HandleRegeneAsync(client, corpse, AnyRegene);
+
+        claimedMidway.Should().BeFalse("the respawn owns the corpse until it stands up");
+        corpse.Hp.Should().Be(corpse.MaxHp);
+        corpse.Hp = 0;
+        corpse.TryClaimRevival().Should().BeTrue("the claim is handed back once the respawn is done");
+    }
+
+    [Fact]
+    public async Task AResurrectionWithoutItsStonesChargesNothingAndFreesTheCorpse()
+    {
+        using var harness = CreateHarness();
+        ResurrectSkill(harness.Data);
+        harness.Data.Magic[Resurrect].UseItem = RevivalStone;
+        harness.Data.Type5[Resurrect].NeedStone = RequiredStones;
+        harness.Data.Items[RevivalStone] = Consumable(RevivalStone);
+        var (priest, client, _) = Player(harness, 1, PriestNovice, AccountNation.Karus, Moradon, 100, 100);
+        var (corpse, _, _) = Player(harness, 2, WarriorBeginner, AccountNation.Karus, Moradon, 102, 100);
+        corpse.Hp = 0;
+
+        await harness.Magic.CastAsync(client, Resurrect, priest.CharacterId, corpse.CharacterId);
+
+        corpse.Hp.Should().Be(0);
+        priest.Mp.Should().Be(priest.MaxMp);
+        corpse.TryClaimRevival().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ABuffNeverLandsOnACorpse()
+    {
+        using var harness = CreateHarness();
+        harness.Data.Magic[Blessing] = new MagicData
+        {
+            Id = Blessing, Type1 = 4, Moral = (byte)SkillMoral.FriendWithMe, Range = 25, ItemGroup = NoWeaponNeeded
+        };
+        harness.Data.Type4[Blessing] = new MagicType4Data { Id = Blessing, BuffType = (byte)BuffType.Ac, Ac = 50, Duration = 60 };
+        var (priest, _, _) = Player(harness, 1, PriestNovice, AccountNation.Karus, Moradon, 100, 100);
+        var (corpse, _, _) = Player(harness, 2, WarriorBeginner, AccountNation.Karus, Moradon, 102, 100);
+        corpse.Hp = 0;
+
+        await harness.Provider.GetRequiredService<IMagicStatusEffectService>().ExecuteAsync(
+            priest, harness.Data.Magic[Blessing], MagicSkillType.Buff, Blessing, corpse.CharacterId,
+            new int[MagicProcessPacketWriter.PayloadSlotCount], MagicCharge.Prepaid);
+
+        corpse.ActiveBuffs.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task APvpDeathClosesTheVictimsStall()
+    {
+        using var harness = CreateHarness();
+        var (victim, _, _) = Player(harness, 1, WarriorBeginner, AccountNation.Karus, Moradon, 100, 100);
+        var (killer, _, _) = Player(harness, 2, WarriorBeginner, AccountNation.ElMorad, Moradon, 102, 100);
+        victim.Trade.MerchantState = MerchantMode.Selling;
+        victim.Hp = 0;
+
+        await harness.Provider.GetRequiredService<ICombatLifecycleService>().HandlePlayerDeathAsync(victim, killer);
+
+        victim.Trade.IsMerchanting.Should().BeFalse();
+    }
+
     private static Harness CreateHarness()
     {
         var clock = new ManualClock();
@@ -738,6 +951,16 @@ public class CombatAuthorityTests : GameTestBase
             Id = Guard, Type1 = 4, Moral = 1, ReCastTime = 100, Msp = 10, ItemGroup = NoWeaponNeeded
         };
         data.Type4[Guard] = new MagicType4Data { Id = Guard, BuffType = (byte)BuffType.Ac, Ac = 50, Duration = 60 };
+    }
+
+    private static void ResurrectSkill(Catalog data)
+    {
+        data.Magic[Resurrect] = new MagicData
+        {
+            Id = Resurrect, Type1 = 5, Moral = (byte)SkillMoral.CorpseFriend, Range = 25, Msp = ResurrectMana,
+            ItemGroup = NoWeaponNeeded
+        };
+        data.Type5[Resurrect] = new MagicType5Data { Id = Resurrect, Type = (byte)SpecialMagicType.Resurrection };
     }
 
     private static MagicData HealRow(int id, int castTenths) => new()

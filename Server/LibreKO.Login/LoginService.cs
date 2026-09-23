@@ -72,25 +72,31 @@ public class LoginService(
             return Rejected(responseOpcode, LoginResult.InvalidPassword);
         }
 
-        if (loginAttempts.IsLockedOut(address, login))
+        var admission = await loginAttempts.AdmitAsync(address, login);
+        if (admission == null)
         {
             logger.LogDebug("Refused login for {Login} from {Address}: too many recent failures", loggedLogin, address);
             return Rejected(responseOpcode, LoginResult.InvalidPassword);
         }
 
-        var account = await accountRepository.GetByLogin(login);
-        if (account == null && settings.Value.Account.AutoCreate)
-            account = await CreateAccountAsync(login, password, address);
-
-        var verified = PasswordHasher.Verify(password, account?.Password);
-        if (account == null || !verified)
+        Account? account;
+        using (admission)
         {
-            loginAttempts.RecordFailure(address, login);
-            logger.LogWarning("Failed login for {Login} from {Address}", loggedLogin, address);
-            return Rejected(responseOpcode, LoginResult.InvalidPassword);
+            account = await accountRepository.GetByLogin(login);
+            if (account == null && settings.Value.Account.AutoCreate)
+                account = await CreateAccountAsync(login, password, address);
+
+            var verified = PasswordHasher.Verify(password, account?.Password);
+            if (account == null || !verified)
+            {
+                loginAttempts.RecordFailure(address, login);
+                logger.LogWarning("Failed login for {Login} from {Address}", loggedLogin, address);
+                return Rejected(responseOpcode, LoginResult.InvalidPassword);
+            }
+
+            loginAttempts.RecordSuccess(address, login);
         }
 
-        loginAttempts.RecordSuccess(login);
         if (PasswordHasher.NeedsRehash(account.Password))
         {
             await accountRepository.UpdatePasswordAsync(account, PasswordHasher.Hash(password));

@@ -25,7 +25,6 @@ public sealed class MagicCostService(
 {
     public const int DisguiseScrollItem = 381001000;
 
-    private const int SingleItem = 1;
     private const int NothingConsumed = 0;
     private const int NoItem = 0;
     private const int NoGold = 0;
@@ -112,14 +111,14 @@ public sealed class MagicCostService(
                 new MagicReagent(
                     [.. new[] { magic.BeforeAction, magic.UseItem }.Where(item => item != NoItem)],
                     consumesTheGem ? magic.ConsumedItem : NoItem,
-                    consumesTheGem ? SingleItem : NothingConsumed),
-                new MagicReagent([DisguiseScrollItem], DisguiseScrollItem, SingleItem),
+                    consumesTheGem ? ItemTransfer.SingleItem : NothingConsumed),
+                new MagicReagent([DisguiseScrollItem], DisguiseScrollItem, ItemTransfer.SingleItem),
             ];
         }
 
         return magic.UseItem == NoItem
             ? []
-            : [new MagicReagent([magic.UseItem], magic.ConsumedItem, SingleItem)];
+            : [new MagicReagent([magic.UseItem], magic.ConsumedItem, ItemTransfer.SingleItem)];
     }
 
     private bool IsPaidByTheTarget(MagicData magic) =>

@@ -6,18 +6,22 @@ namespace LibreKO.Game.World;
 
 public interface INpcSummonService
 {
-    Task<IReadOnlyList<NpcInstance>> SummonAsync(int npcId, byte zoneId, ushort room, int x, int z, int count, float fallbackY);
+    Task<IReadOnlyList<NpcInstance>> SummonAsync(
+        int npcId, byte zoneId, ushort room, int x, int z, int count, float fallbackY, SummonGrant? grant = null);
 }
 
 public sealed class NpcSummonService(
     SessionManager sessionManager,
     IGameDataService gameData,
     IMonsterAggressionPolicy aggression,
-    INpcLifecycleService lifecycle) : INpcSummonService
+    INpcLifecycleService lifecycle,
+    InstanceRoomRegistry instanceRooms,
+    SummonQuota summonQuota) : INpcSummonService
 {
     public const int SpreadRange = 3;
 
-    public async Task<IReadOnlyList<NpcInstance>> SummonAsync(int npcId, byte zoneId, ushort room, int x, int z, int count, float fallbackY)
+    public async Task<IReadOnlyList<NpcInstance>> SummonAsync(
+        int npcId, byte zoneId, ushort room, int x, int z, int count, float fallbackY, SummonGrant? grant = null)
     {
         var npcData = gameData.GetNpc(npcId);
         if (npcData == null)
@@ -42,7 +46,26 @@ public sealed class NpcSummonService(
             aggression.Apply(npc);
             npc.Y = sessionManager.Maps?.GetHeight(zoneId, npc.X, npc.Z) ?? fallbackY;
             npc.SpawnY = npc.Y;
-            await lifecycle.SpawnAsync(npc);
+            var inRoom = room != RegionManager.OpenWorldRoom;
+            if (inRoom && !instanceRooms.Adopt(room, npc))
+                break;
+
+            try
+            {
+                await lifecycle.SpawnAsync(npc);
+            }
+            finally
+            {
+                if (grant != null)
+                    summonQuota.Track(grant, npc);
+            }
+
+            if (inRoom && !instanceRooms.Holds(room, zoneId))
+            {
+                sessionManager.Regions.RemoveNpc(npc);
+                break;
+            }
+
             spawned.Add(npc);
         }
 

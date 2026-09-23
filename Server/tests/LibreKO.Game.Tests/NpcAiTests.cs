@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -954,6 +954,7 @@ public class NpcAiTests : GameTestBase
         session.Hp = 0;
         session.MaxHp = 100;
         session.Trade.ExchangeUser = 999;
+        session.Trade.ExchangeStarted = true;
         session.Trade.ExchangeOk = true;
         session.Trade.ExchangeItemList.Add(new ExchangeItem
         {

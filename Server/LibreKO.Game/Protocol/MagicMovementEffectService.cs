@@ -134,7 +134,7 @@ public class MagicMovementEffectService(
     private static bool IsSummonable(UserSession caster, MagicData magic, UserSession target) =>
         (SkillMoral)magic.Moral switch
         {
-            SkillMoral.Party or SkillMoral.PartyAll => caster.IsInParty && caster.PartyIndex == target.PartyIndex,
+            SkillMoral.Party or SkillMoral.PartyAll => PvpRules.SharesPartyWith(caster, target),
             SkillMoral.Clan or SkillMoral.ClanAll => caster.KnightsId != NoClan && caster.KnightsId == target.KnightsId,
             _ => false,
         };
@@ -158,8 +158,8 @@ public class MagicMovementEffectService(
     private bool MayMoveTo(UserSession caster, MagicData magic, UserSession target) =>
         (SkillMoral)magic.Moral switch
         {
-            SkillMoral.Party or SkillMoral.PartyAll => caster.IsInParty && caster.PartyIndex == target.PartyIndex,
-            SkillMoral.Enemy => PvpRules.CanAttackPlayer(caster, target) && stealthService.CanSee(caster, target),
+            SkillMoral.Party or SkillMoral.PartyAll => PvpRules.SharesPartyWith(caster, target),
+            SkillMoral.Enemy => PvpRules.CanAttackPlayer(caster, target) && stealthService.CanTarget(caster, target),
             _ => target.Nation == caster.Nation && !PvpRules.IsEnemy(caster, target),
         };
 

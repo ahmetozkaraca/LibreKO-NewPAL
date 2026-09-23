@@ -44,15 +44,18 @@ public sealed class MagicTimingService(TimeProvider? timeProvider = null) : IMag
     private const int SkillBurstFloorMs = 250;
     private const int RangedCommitMs = 400;
     private const int PotionSharedCooldownMs = 2000;
-    private const byte PotionItemGroup = 9;
     private const byte MoralSelf = 1;
     private const int TenthsPerSecond = 10;
     private const int MillisecondsPerTenth = 1000 / TenthsPerSecond;
     private const int CooldownEntryPruneThreshold = 256;
+    private const int StaleAcceptedCastGraces = 10;
     private const int InstantCastMs = 0;
     private const int NoArrows = 0;
-    private const int MinimumVolley = 1;
     private const int VolleysInFlight = 2;
+
+    public const int MinimumVolley = 1;
+
+    public static readonly TimeSpan ArrowFlightAllowance = TimeSpan.FromSeconds(3);
 
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
 
@@ -96,8 +99,17 @@ public sealed class MagicTimingService(TimeProvider? timeProvider = null) : IMag
             : MagicTimingVerdict.Allowed;
     }
 
-    public bool IsVolleyInFlight(UserSession session, int skillId) =>
-        session.PendingArrowHits.TryGetValue(skillId, out var arrows) && arrows > NoArrows;
+    public bool IsVolleyInFlight(UserSession session, int skillId)
+    {
+        if (!session.PendingArrowHits.TryGetValue(skillId, out var volley))
+            return false;
+
+        if (_time.GetUtcNow().UtcTicks <= volley.LandsByTicks)
+            return volley.Arrows > NoArrows;
+
+        session.PendingArrowHits.TryRemove(skillId, out _);
+        return false;
+    }
 
     public TimeSpan CastDuration(UserSession session, MagicData magic) =>
         TimeSpan.FromMilliseconds(CastMilliseconds(session, magic));
@@ -132,19 +144,20 @@ public sealed class MagicTimingService(TimeProvider? timeProvider = null) : IMag
         CloseCast(session, magic.Id);
 
         var volley = Math.Max(MinimumVolley, arrows);
+        var landsBy = _time.GetUtcNow().UtcTicks + ArrowFlightAllowance.Ticks;
         session.PendingArrowHits.AddOrUpdate(
             magic.Id,
-            volley,
-            (_, outstanding) => Math.Min(outstanding + volley, volley * VolleysInFlight));
+            new PendingVolley(volley, landsBy),
+            (_, outstanding) => new PendingVolley(Math.Min(outstanding.Arrows + volley, volley * VolleysInFlight), landsBy));
     }
 
     public void OnVolleyHit(UserSession session, int skillId)
     {
-        if (!session.PendingArrowHits.TryGetValue(skillId, out var arrows))
+        if (!session.PendingArrowHits.TryGetValue(skillId, out var volley))
             return;
 
-        if (arrows > MinimumVolley)
-            session.PendingArrowHits[skillId] = arrows - 1;
+        if (volley.Arrows > MinimumVolley)
+            session.PendingArrowHits[skillId] = volley with { Arrows = volley.Arrows - 1 };
         else
             session.PendingArrowHits.TryRemove(skillId, out _);
     }
@@ -217,7 +230,7 @@ public sealed class MagicTimingService(TimeProvider? timeProvider = null) : IMag
     private static void PruneAcceptedCasts(UserSession session, long now)
     {
         foreach (var (skillId, accepted) in session.AcceptedCasts)
-            if (MillisecondsSince(accepted, now) > AbandonedCastGraceMs * 10)
+            if (MillisecondsSince(accepted, now) > AbandonedCastGraceMs * StaleAcceptedCastGraces)
                 session.AcceptedCasts.TryRemove(skillId, out _);
     }
 
@@ -253,7 +266,7 @@ public sealed class MagicTimingService(TimeProvider? timeProvider = null) : IMag
 
     private static bool IsPotion(MagicData magic) =>
         ConsumesAnItem(magic)
-        && magic.ItemGroup == PotionItemGroup
+        && magic.ItemGroup == MagicWeaponRequirement.PotionItemGroup
         && magic.Moral == MoralSelf
         && magic.PrimaryType == MagicSkillType.OverTime
         && magic.CastTime == 0

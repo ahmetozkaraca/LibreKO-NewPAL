@@ -268,7 +268,7 @@ public class NationSystemsPacketCoordinator(
     {
         using var scope = _siegeSync.EnterScope();
         var funds = isKing ? (long)siege.MoradonTax + siege.DellosTax : siege.DungeonCharge;
-        if (funds <= 0 || !session.WithLock(player => TryCredit(player, funds)))
+        if (funds <= 0 || !Coins.TryCredit(session, funds))
             return 0;
 
         if (isKing)
@@ -282,15 +282,6 @@ public class NationSystemsPacketCoordinator(
         }
 
         return (int)funds;
-    }
-
-    private static bool TryCredit(UserSession player, long amount)
-    {
-        if (player.Money + amount > ExchangePacketConstants.CoinMax)
-            return false;
-
-        player.Money += (int)amount;
-        return true;
     }
 
     private async Task SetSiegeTariffAsync(UserSession session, SiegeWarfareData siege, byte subType, ushort tariff, byte zone)

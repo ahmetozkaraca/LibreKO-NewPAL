@@ -28,6 +28,7 @@ public sealed partial class QuestScriptEngine : IQuestDefinitionSource
     private readonly ILogger<QuestScriptEngine> _logger;
     private readonly GameServerSettings _settings;
     private readonly TimeProvider _clock;
+    private readonly SummonQuota? _summons;
     private DateTimeOffset _nextFileCheck;
 
     private sealed record CachedProgram(QuestProgram Program, DateTime WrittenAt, string Path);
@@ -48,8 +49,10 @@ public sealed partial class QuestScriptEngine : IQuestDefinitionSource
         IHostEnvironment hostEnvironment,
         IOptions<GameServerSettings> settings,
         ILogger<QuestScriptEngine> logger,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        SummonQuota? summons = null)
     {
+        _summons = summons;
         _gameData = gameData;
         _sessionManager = sessionManager;
         _effects = effects;
@@ -249,7 +252,7 @@ public sealed partial class QuestScriptEngine : IQuestDefinitionSource
                 if (questId is { } requested && id != requested)
                     continue;
                 var context = new QuestScriptContext(session, null, _gameData, _sessionManager, _logger,
-                    Math.Max(1, _settings.Global.ExpMultiplier));
+                    Math.Max(1, _settings.Global.ExpMultiplier), _summons);
                 var host = new QuestScriptHost(session, context, _translations, _logger, program.FileName, this, _clock,
                     MonsterName);
                 session.WithLock(_ =>
@@ -320,7 +323,7 @@ public sealed partial class QuestScriptEngine : IQuestDefinitionSource
             || !program.TryGetLocation(goals.Groups[group].Target, out var location))
             return;
         var context = new QuestScriptContext(session, null, _gameData, _sessionManager, _logger,
-            Math.Max(1, _settings.Global.ExpMultiplier));
+            Math.Max(1, _settings.Global.ExpMultiplier), _summons);
         new QuestScriptHost(session, context, _translations, _logger, program.FileName, this, _clock,
             MonsterName).ShowLocation(location, questId);
         await _effects.ApplyAsync(session, context, program.FileName);
@@ -331,7 +334,7 @@ public sealed partial class QuestScriptEngine : IQuestDefinitionSource
         if (!FlowIndex().TryGetValue(questId, out var program))
             return;
         var context = new QuestScriptContext(session, null, _gameData, _sessionManager, _logger,
-            Math.Max(1, _settings.Global.ExpMultiplier));
+            Math.Max(1, _settings.Global.ExpMultiplier), _summons);
         var host = new QuestScriptHost(session, context, _translations, _logger, program.FileName, this, _clock,
             MonsterName, program);
         session.WithLock(_ =>
@@ -516,7 +519,7 @@ public sealed partial class QuestScriptEngine : IQuestDefinitionSource
 
         var context = new QuestScriptContext(
             session, npc, _gameData, _sessionManager, _logger,
-            Math.Max(1, _settings.Global.ExpMultiplier));
+            Math.Max(1, _settings.Global.ExpMultiplier), _summons);
 
         var host = new QuestScriptHost(session, context, _translations, _logger, cached.Program.FileName, this, _clock,
             MonsterName);

@@ -2,6 +2,7 @@
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
+using LibreKO.Game.Protocol.Writers;
 using LibreKO.Game.World;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
@@ -134,6 +135,77 @@ public class PartyAuthorityTests : GameTestBase
     }
 
     [Fact]
+    public async Task ALeaderWhoseOnlyInviteLapsedCanBeInvitedAgain()
+    {
+        using var provider = CreateHarness(out var clock);
+        var (parties, sessionManager) = Services(provider);
+        var leader = CreateMember(sessionManager, 730, AccountNation.Karus);
+        var silent = CreateMember(sessionManager, 731, AccountNation.Karus);
+        var other = CreateMember(sessionManager, 732, AccountNation.Karus);
+
+        await parties.HandleAsync(leader.Client, InviteRequest(PartyRequest.Create, silent.Name));
+        var ghost = leader.PartyIndex;
+        clock.Advance(PartyManager.InviteLifetime + TimeSpan.FromSeconds(1));
+        await parties.HandleAsync(other.Client, InviteRequest(PartyRequest.Create, leader.Name));
+
+        sessionManager.Parties.GetParty(ghost).Should().BeNull();
+        leader.IsInParty.Should().BeFalse();
+        ReceivedInviteFailure(leader);
+        await parties.HandleAsync(leader.Client, Answer(accept: true));
+        leader.PartyIndex.Should().Be(other.PartyIndex);
+    }
+
+    [Fact]
+    public async Task ALateAcceptanceReleasesTheLeaderOnlyParty()
+    {
+        using var provider = CreateHarness(out var clock);
+        var (parties, sessionManager) = Services(provider);
+        var leader = CreateMember(sessionManager, 733, AccountNation.Karus);
+        var late = CreateMember(sessionManager, 734, AccountNation.Karus);
+
+        await parties.HandleAsync(leader.Client, InviteRequest(PartyRequest.Create, late.Name));
+        var ghost = leader.PartyIndex;
+        clock.Advance(PartyManager.InviteLifetime + TimeSpan.FromSeconds(1));
+        await parties.HandleAsync(late.Client, Answer(accept: true));
+
+        sessionManager.Parties.GetParty(ghost).Should().BeNull();
+        leader.IsInParty.Should().BeFalse();
+        ReceivedInviteFailure(leader);
+    }
+
+    [Fact]
+    public async Task AnInviteReplacedByAnotherPartyReleasesTheFirstLeader()
+    {
+        using var provider = CreateHarness(out _);
+        var (parties, sessionManager) = Services(provider);
+        var first = CreateMember(sessionManager, 735, AccountNation.Karus);
+        var second = CreateMember(sessionManager, 736, AccountNation.Karus);
+        var invitee = CreateMember(sessionManager, 737, AccountNation.Karus);
+
+        await parties.HandleAsync(first.Client, InviteRequest(PartyRequest.Create, invitee.Name));
+        await parties.HandleAsync(second.Client, InviteRequest(PartyRequest.Create, invitee.Name));
+
+        first.IsInParty.Should().BeFalse();
+        ReceivedInviteFailure(first);
+        second.IsInParty.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ADeclineTellsTheLeaderAndReleasesTheLeaderOnlyParty()
+    {
+        using var provider = CreateHarness(out _);
+        var (parties, sessionManager) = Services(provider);
+        var leader = CreateMember(sessionManager, 738, AccountNation.Karus);
+        var invitee = CreateMember(sessionManager, 739, AccountNation.Karus);
+
+        await parties.HandleAsync(leader.Client, InviteRequest(PartyRequest.Create, invitee.Name));
+        await parties.HandleAsync(invitee.Client, Answer(accept: false));
+
+        leader.IsInParty.Should().BeFalse();
+        ReceivedInviteFailure(leader);
+    }
+
+    [Fact]
     public async Task APendingInviteeHearsNoPartyChat()
     {
         using var provider = CreateHarness(out _);
@@ -178,6 +250,38 @@ public class PartyAuthorityTests : GameTestBase
         indices.Should().OnlyContain(index => parties.GetParty(index) != null);
     }
 
+    [Fact]
+    public void TwoMembersLeavingAThreeMemberPartyAtOnceDisbandIt()
+    {
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            var party = new PartyManager().CreateParty(1);
+            party.TryAddMember(2).Should().BeTrue();
+            party.TryAddMember(3).Should().BeTrue();
+
+            var outcomes = new PartyRemoval[2];
+            Parallel.Invoke(
+                () => outcomes[0] = party.Remove(2, out _),
+                () => outcomes[1] = party.Remove(3, out _));
+
+            outcomes.Should().BeEquivalentTo([PartyRemoval.Removed, PartyRemoval.Disbanded]);
+            party.MemberCount.Should().Be(0);
+        }
+    }
+
+    [Fact]
+    public void TheLeaderLeavingDisbandsThePartyAndNamesEveryMember()
+    {
+        var party = new PartyManager().CreateParty(1);
+        party.TryAddMember(2).Should().BeTrue();
+        party.TryAddMember(3).Should().BeTrue();
+
+        party.Remove(1, out var released).Should().Be(PartyRemoval.Disbanded);
+
+        released.Should().BeEquivalentTo(new short[] { 1, 2, 3 });
+        party.Remove(2, out _).Should().Be(PartyRemoval.NotMember);
+    }
+
     private static async Task<PartyGroup> FormPartyAsync(
         IPartyPacketCoordinator parties, SessionManager sessionManager, UserSession leader, params UserSession[] members)
     {
@@ -192,6 +296,13 @@ public class PartyAuthorityTests : GameTestBase
         var party = sessionManager.Parties.GetParty(leader.PartyIndex)!;
         party.MemberCount.Should().Be(members.Length + 1);
         return party;
+    }
+
+    private static void ReceivedInviteFailure(UserSession leader)
+    {
+        var failure = PartyPacketWriter.Rejected(PartyPacketWriter.InviteFailed).GetBytes();
+        leader.Client.Received().SendPacket(
+            Arg.Is<Packet>(packet => packet.GetBytes().SequenceEqual(failure)), Arg.Any<CancellationToken>());
     }
 
     private static (IPartyPacketCoordinator Parties, SessionManager Sessions) Services(ServiceProvider provider)

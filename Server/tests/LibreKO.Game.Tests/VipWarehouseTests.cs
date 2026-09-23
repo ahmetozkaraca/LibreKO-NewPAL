@@ -20,6 +20,7 @@ public class VipWarehouseTests : GameTestBase
     private const string Pin = "1234";
     private const string WrongPin = "0000";
     private const string NewPin = "5678";
+    private const string LetteredPin = "12a4";
     private const int GemId = 379050000;
     private const byte Zone = 21;
     private const float Here = 100f;
@@ -28,6 +29,11 @@ public class VipWarehouseTests : GameTestBase
     private const int VaultDays = 7;
     private const int RentalDays = 1;
     private const int PinGuessLimit = 5;
+    private const int VaultKeyId = 800_442_000;
+    private const ushort KeysHeld = 2;
+    private const byte FirstSlot = 0;
+    private const byte SecondSlot = 1;
+    private static readonly TimeSpan PastTheVault = TimeSpan.FromDays(2);
     private static readonly TimeSpan PastTheUnlock = TimeSpan.FromMinutes(11);
 
     [Fact]
@@ -194,6 +200,151 @@ public class VipWarehouseTests : GameTestBase
 
         Result(sent, VipWarehouseSubOpcode.Input).Should().Be((byte)VipWarehouseResult.Failed);
         bag.ItemId.Should().Be(GemId);
+    }
+
+    [Theory]
+    [InlineData(ItemFlag.Bound)]
+    [InlineData(ItemFlag.Sealed)]
+    [InlineData(ItemFlag.Duplicate)]
+    [InlineData(ItemFlag.CharacterSeal)]
+    public async Task Deposit_RefusesItemsBoundToTheCharacter(ItemFlag flag)
+    {
+        using var provider = Provider(string.Empty);
+        var (session, sent) = Online(provider, string.Empty);
+        var bag = StockBag(session);
+        bag.Flag = (byte)flag;
+
+        await Route(provider, session, Input(0, 0));
+
+        Result(sent, VipWarehouseSubOpcode.Input).Should().Be((byte)VipWarehouseResult.Failed);
+        bag.ItemId.Should().Be(GemId);
+        session.VipWarehouse[0].IsEmpty.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Deposit_FollowsTheServerClockForTheVaultExpiry()
+    {
+        var clock = new ManualClock();
+        using var provider = Provider(string.Empty, clock);
+        var (session, sent) = Online(provider, string.Empty);
+        session.VipVaultExpiry = clock.GetUtcNow().UtcDateTime.AddDays(1);
+        var bag = StockBag(session);
+
+        clock.Advance(PastTheVault);
+        await Route(provider, session, Input(0, 0));
+
+        Result(sent, VipWarehouseSubOpcode.Input).Should().Be((byte)VipWarehouseResult.Expired);
+        bag.ItemId.Should().Be(GemId);
+    }
+
+    [Fact]
+    public async Task Store_MovesAVaultSlotAndCommitsIt()
+    {
+        using var provider = Provider(string.Empty);
+        var (session, sent) = Online(provider, string.Empty);
+        StockVault(session, FirstSlot);
+
+        await Route(provider, session, Shift(VipWarehouseSubOpcode.Store, FirstSlot, SecondSlot));
+
+        Result(sent, VipWarehouseSubOpcode.Store).Should().Be((byte)VipWarehouseResult.Succeeded);
+        session.VipWarehouse[FirstSlot].IsEmpty.Should().BeTrue();
+        session.VipWarehouse[SecondSlot].ItemId.Should().Be(GemId);
+        var account = await StoredAccountAsync(provider);
+        StoredSlots(account.VipWarehouseItems, UserSession.VipWarehouseMax)[SecondSlot].ItemId.Should().Be(GemId);
+    }
+
+    [Fact]
+    public async Task Store_RefusesAnOccupiedDestination()
+    {
+        using var provider = Provider(string.Empty);
+        var (session, sent) = Online(provider, string.Empty);
+        StockVault(session, FirstSlot);
+        StockVault(session, SecondSlot);
+
+        await Route(provider, session, Shift(VipWarehouseSubOpcode.Store, FirstSlot, SecondSlot));
+
+        Result(sent, VipWarehouseSubOpcode.Store).Should().Be((byte)VipWarehouseResult.Failed);
+        session.VipWarehouse[FirstSlot].ItemId.Should().Be(GemId);
+        session.VipWarehouse[SecondSlot].Count.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task UseVault_ExtendsFromTheServerClockAndSpendsOneKey()
+    {
+        var clock = new ManualClock();
+        using var provider = Provider(string.Empty, clock);
+        var (session, sent) = Online(provider, string.Empty);
+        session.VipVaultExpiry = clock.GetUtcNow().UtcDateTime.AddDays(-1);
+        var keys = session.Inventory[InventoryConstants.InventoryStart + SecondSlot];
+        keys.ItemId = VaultKeyId;
+        keys.Count = KeysHeld;
+
+        var packet = Sub(VipWarehouseSubOpcode.UseVault);
+        packet.WriteInt(VaultKeyId);
+        await Route(provider, session, packet);
+
+        Result(sent, VipWarehouseSubOpcode.UseVault).Should().Be((byte)VipWarehouseResult.Succeeded);
+        session.VipVaultExpiry.Should().Be(clock.GetUtcNow().UtcDateTime.AddDays(VaultDays));
+        keys.Count.Should().Be(KeysHeld - 1);
+        (await StoredAccountAsync(provider)).VipVaultExpiry.Should().Be(session.VipVaultExpiry);
+    }
+
+    [Fact]
+    public async Task UseVault_RefusesWithoutAKey()
+    {
+        using var provider = Provider(string.Empty);
+        var (session, sent) = Online(provider, string.Empty);
+        var expiry = session.VipVaultExpiry;
+
+        var packet = Sub(VipWarehouseSubOpcode.UseVault);
+        packet.WriteInt(VaultKeyId);
+        await Route(provider, session, packet);
+
+        Result(sent, VipWarehouseSubOpcode.UseVault).Should().Be((byte)VipWarehouseResult.Failed);
+        session.VipVaultExpiry.Should().Be(expiry);
+    }
+
+    [Fact]
+    public async Task SetPassword_StoresTheNewPin()
+    {
+        using var provider = Provider(string.Empty);
+        var (session, sent) = Online(provider, string.Empty);
+
+        await Route(provider, session, PinPacket(VipWarehouseSubOpcode.SetPassword, NewPin));
+
+        Result(sent, VipWarehouseSubOpcode.SetPassword).Should().Be((byte)VipWarehouseResult.Succeeded);
+        session.VipPassword.Should().Be(NewPin);
+        (await StoredAccountAsync(provider)).VipPassword.Should().Be(NewPin);
+    }
+
+    [Fact]
+    public async Task SetPassword_RefusesAPinThatIsNotFourDigits()
+    {
+        using var provider = Provider(string.Empty);
+        var (session, sent) = Online(provider, string.Empty);
+
+        await Route(provider, session, PinPacket(VipWarehouseSubOpcode.SetPassword, LetteredPin));
+
+        Result(sent, VipWarehouseSubOpcode.SetPassword).Should().Be((byte)VipWarehouseResult.Rejected);
+        session.VipPassword.Should().BeEmpty();
+    }
+
+    private static Packet Shift(VipWarehouseSubOpcode sub, byte source, byte destination)
+    {
+        var packet = Sub(sub);
+        packet.WriteInt(0);
+        packet.WriteInt(GemId);
+        packet.WriteByte(0);
+        packet.WriteByte(source);
+        packet.WriteByte(destination);
+        return packet;
+    }
+
+    private static async Task<Account> StoredAccountAsync(ServiceProvider provider)
+    {
+        await using var scope = provider.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<AppDbContext>().Accounts
+            .AsNoTracking().SingleAsync(a => a.Id == AccountId);
     }
 
     private static ServiceProvider Provider(string pin, ManualClock? clock = null) => CreateProvider(

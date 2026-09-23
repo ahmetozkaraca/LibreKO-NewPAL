@@ -1,4 +1,4 @@
-namespace LibreKO.Game.Protocol;
+﻿namespace LibreKO.Game.Protocol;
 
 internal static class KingPacketConstants
 {
@@ -28,7 +28,9 @@ internal static class KingPacketConstants
     public const byte EventWeather = 5;
     public const byte EventNotice = 6;
 
+    public const byte ElectionListSenator = 3;
     public const byte ElectionListCandidate = 4;
+    public const byte ElectionListNomination = 5;
 
     public const byte ImpeachmentRequest = 1;
     public const byte ImpeachmentRequestElect = 2;

@@ -1,4 +1,5 @@
 ﻿using Godot;
+using LibreKO.Domain;
 using LibreKO.Network;
 
 namespace LibreKO;
@@ -25,7 +26,7 @@ public partial class World
     private CheckBox _capeTicket = null!;
     private Button _capeBuyBtn = null!;
     private bool _capeShown;
-    private bool _capeRequestInFlight;
+    private readonly PendingReply _capeReply = new();
 
     private MyClanInfo _capeMyClan;
 
@@ -157,7 +158,7 @@ public partial class World
         if (_capeShown) { CloseCape(); return; }
         _capePanel.Visible = true;
         _capeShown = true;
-        _capeRequestInFlight = false;
+        _capeReply.Settle();
         SetCapeStatus("", false);
         Net.I.SendClanInfoRequest();
 
@@ -183,7 +184,7 @@ public partial class World
 
     private void OnCapeBuyPressed()
     {
-        if (_capeRequestInFlight) return;
+        if (_capeReply.Waiting) return;
         if (!CapeImChief) { SetCapeStatus("Only the clan chief can change the cape.", true); return; }
 
         int capeId = _capeChoice;
@@ -195,15 +196,19 @@ public partial class World
         }
 
         byte op = _capeTicket.ButtonPressed ? Net.CapeOpTicket : Net.CapeOpBuy;
-        _capeRequestInFlight = true;
         _capeBuyBtn.Disabled = true;
         SetCapeStatus("Requesting…", false);
+        AwaitReply(_capeReply, () =>
+        {
+            UpdateCapeGate();
+            SetCapeStatus(NoReplyText, true);
+        });
         Net.I.SendCapeBuy(op, capeId, rr, gg, bb);
     }
 
     private void OnCapeResult(bool ok, int a, int capeId, int rr, int gg, int bb)
     {
-        _capeRequestInFlight = false;
+        _capeReply.Settle();
         UpdateCapeGate();
 
         if (ok)
@@ -451,7 +456,7 @@ public partial class World
     private void UpdateCapeGate()
     {
         bool chief = CapeImChief;
-        _capeBuyBtn.Disabled = !chief || _capeRequestInFlight;
+        _capeBuyBtn.Disabled = !chief || _capeReply.Waiting;
         if (!_capeMyClan.InClan)
             _capeHint.Text = "Join a clan to buy a cape.";
         else if (!chief)

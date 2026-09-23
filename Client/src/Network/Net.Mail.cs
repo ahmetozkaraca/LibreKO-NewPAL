@@ -67,7 +67,7 @@ public partial class Net
                 if (p.RemainingBytes < 6) return;
                 bool ok = p.ReadByte() != 0;
                 int id = p.ReadInt();
-                MailReadEvent?.Invoke(id, ok, p.ReadSByteString());
+                MailReadEvent?.Invoke(id, ok, p.ReadString());
                 break;
             }
             case MailSubSend:
@@ -117,7 +117,7 @@ public partial class Net
         p.WriteByte(MailSubSend);
         p.WriteSByteString(recipient);
         p.WriteSByteString(subject);
-        p.WriteSByteString(body);
+        p.WriteString(body);
         p.WriteInt(gold);
         p.WriteByte((byte)items.Count);
         foreach (var item in items)

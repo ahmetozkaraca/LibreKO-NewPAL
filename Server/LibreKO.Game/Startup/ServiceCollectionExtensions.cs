@@ -89,6 +89,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IRingUpgradePacketCoordinator, RingUpgradePacketCoordinator>();
         services.AddSingleton<IInnPacketCoordinator, InnPacketCoordinator>();
         services.AddSingleton<IClientSettingsPacketCoordinator, ClientSettingsPacketCoordinator>();
+        services.AddSingleton<IBeautyShopPacketCoordinator, BeautyShopPacketCoordinator>();
+        services.AddSingleton<IClanPremiumPacketCoordinator, ClanPremiumPacketCoordinator>();
         services.AddSingleton<IGuardPetPacketCoordinator, GuardPetPacketCoordinator>();
         services.AddSingleton<IEventQuestPacketCoordinator, EventQuestPacketCoordinator>();
         services.AddSingleton<IGlobalMapPacketCoordinator, GlobalMapPacketCoordinator>();
@@ -122,9 +124,8 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IViolationMonitor, ViolationMonitor>();
         services.TryAddSingleton<IPacketGuard, PacketGuard>();
         services.TryAddSingleton<IMovementValidator, MovementValidator>();
-        services.TryAddSingleton(sp => new LoginAttemptLimiter(
-            sp.GetRequiredService<IOptions<GameServerSettings>>().Value.Connections,
-            sp.GetRequiredService<TimeProvider>()));
+        services.TryAddSingleton<IOptions<ConnectionLimitsSettings>, ConnectionLimitsOptions<GameServerSettings>>();
+        services.TryAddSingleton<LoginAttemptLimiter>();
         return services;
     }
 
@@ -226,7 +227,8 @@ public static class ServiceCollectionExtensions
     {
         services.AddSingleton<IClientFactory>(sp =>
             new ClientFactory(ServerType.Game, sp.GetRequiredService<ILogger<Client>>(),
-                sp.GetRequiredService<IOptions<GameServerSettings>>().Value.Connections));
+                sp.GetRequiredService<IOptions<ConnectionLimitsSettings>>().Value,
+                sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<MapManager>();
         services.AddSingleton<SessionManager>();
 
@@ -246,6 +248,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<LibreKO.Quests.Localization.IQuestTranslations>(provider =>
             QuestTranslationLoader.Load(provider));
         services.AddSingleton<INpcLifecycleService, NpcLifecycleService>();
+        services.AddSingleton<SummonQuota>();
         services.AddSingleton<INpcSummonService, NpcSummonService>();
         services.AddSingleton<QuestScriptEngine>();
         services.AddSingleton<IQuestDefinitionSource>(p => p.GetRequiredService<QuestScriptEngine>());

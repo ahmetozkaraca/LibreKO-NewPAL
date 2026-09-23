@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using LibreKO.Domain;
 
 namespace LibreKO.Network;
 
@@ -26,6 +27,9 @@ public partial class Net
     private const byte SmLetterDelete = 7;
 
     public const int ShoppingMallLetterCost = 1000;
+    public const int ShoppingMallLetterRecipientMax = 20;
+    public const int ShoppingMallLetterSubjectMax = 31;
+    public const int ShoppingMallLetterMessageMax = 128;
     public const int ShoppingMallGiftCost = 10000;
 
     public event Action<short, short>? ShoppingMallOpenEvent;
@@ -293,7 +297,7 @@ public partial class Net
         p.WriteByte(SmBuyItemSubcommand);
         p.WriteByte(SmBuyItemKind);
         p.WriteInt(catalogEntryId);
-        p.WriteByte((byte)Math.Clamp(count, 1, 255));
+        p.WriteByte((byte)Math.Clamp(count, 1, PusPurchase.MaxCountPerRequest));
         _conn.Send(p);
     }
 

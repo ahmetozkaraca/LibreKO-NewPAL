@@ -35,14 +35,14 @@ public class LootPacketCoordinator(
         var pos = packet.ReadByte();
         var itemId = packet.ReadInt();
         var count = packet.ReadUShort();
-        if (pos >= InventoryConstants.HaveMax || count == 0 || ItemTransfer.IsInventoryLocked(session))
+        var itemData = gameDataService.GetItem(itemId);
+        if (pos >= InventoryConstants.HaveMax || count == 0 || itemData == null || ItemTransfer.IsInventoryLocked(session))
+        {
+            await session.Client.SendPacket(ItemDropPacketWriter.Refused(session.CharacterId));
             return;
+        }
 
         var absPos = InventoryConstants.InventoryStart + pos;
-
-        var itemData = gameDataService.GetItem(itemId);
-        if (itemData == null)
-            return;
 
         var dropped = session.WithLock(s =>
         {
@@ -59,7 +59,10 @@ public class LootPacketCoordinator(
         });
 
         if (dropped == null)
+        {
+            await session.Client.SendPacket(ItemDropPacketWriter.Refused(session.CharacterId));
             return;
+        }
 
         var bundle = sessionManager.Regions.CreateBundle(session.X, session.Z, session.Y);
         bundle.ZoneId = session.ZoneId;
@@ -67,10 +70,7 @@ public class LootPacketCoordinator(
         bundle.Items.Add(LootItem.Of(dropped.Value));
         logger.LogDebug("{Name} dropped item {ItemId} x{Count}", session.Name, itemId, count);
 
-        var result = ItemDropPacketWriter
-            .Dropped(session.CharacterId, bundle.BundleId, hasItems: true)
-            ;
-        await session.Client.SendPacket(result);
+        await session.Client.SendPacket(ItemDropPacketWriter.Dropped(session.CharacterId, bundle.BundleId, hasItems: true));
 
         await userNotificationService.SendWeightChangeAsync(session);
     }
@@ -84,13 +84,17 @@ public class LootPacketCoordinator(
         var bundleId = packet.ReadInt();
         var bundle = sessionManager.Regions.GetBundle(bundleId);
         if (bundle == null)
+        {
+            await session.Client.SendPacket(new BundleOpenPacketWriter { BundleId = bundleId }.Build());
             return;
+        }
 
-        if (!bundle.IsWithinReachOf(session))
+        if (!bundle.IsWithinReachOf(session)
+            || !bundle.CanLoot(session.CharacterId, session.IsInParty ? session.PartyIndex : -1, DateTime.UtcNow.Ticks))
+        {
+            await session.Client.SendPacket(BundleOpenPacketWriter.Refusal(bundleId));
             return;
-
-        if (!bundle.CanLoot(session.CharacterId, session.IsInParty ? session.PartyIndex : -1, DateTime.UtcNow.Ticks))
-            return;
+        }
 
         var snapshot = bundle.SnapshotItems();
 

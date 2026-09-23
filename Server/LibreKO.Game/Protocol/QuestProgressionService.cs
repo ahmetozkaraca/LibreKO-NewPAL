@@ -141,7 +141,7 @@ public class QuestProgressionService(
     {
         // The persister coalesces and rate-limits quest saves internally, so this is a
         // cheap, non-blocking request even when called rapidly for the same player.
-        _ = statePersister.SaveQuestStateAsync(session);
+        _ = statePersister.RequestSaveAsync(session);
     }
 
     private async Task ExecuteQuestEntryAsync(UserSession session, Packet packet, string role)

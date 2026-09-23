@@ -69,7 +69,7 @@ public partial class World
             {
                 int id = q.Id;
                 var btn = new Button { Text = "Claim", FocusMode = Control.FocusModeEnum.None };
-                btn.Pressed += () => Net.I.SendDailyQuestClaim(id);
+                btn.Pressed += () => { btn.Disabled = true; Net.I.SendDailyQuestClaim(id); };
                 hb.AddChild(btn);
             }
             else hb.AddChild(UiTheme.Text("Locked", 12, UiTheme.TextLo));
@@ -82,8 +82,5 @@ public partial class World
         }
     }
 
-    private void OnDailyQuestClaim(int id, bool ok)
-    {
-        if (ok) Net.I.SendDailyQuestList();
-    }
+    private void OnDailyQuestClaim(int id, bool ok) => Net.I.SendDailyQuestList();
 }

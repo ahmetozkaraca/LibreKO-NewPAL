@@ -35,19 +35,19 @@ public class KingGovernancePacketService(
 
         switch (taxOpcode)
         {
-            case 2:
+            case TaxCollect:
                 await HandleTaxCollectionAsync(session, kingData, isKing);
                 break;
 
-            case 3:
+            case TaxTariffView:
                 await SendTariffAsync(session, kingData);
                 break;
 
-            case 4:
+            case TaxTariffUpdate:
                 await HandleTariffUpdateAsync(session, packet, kingData, isKing);
                 break;
 
-            case 7:
+            case TaxScepter:
                 await HandleScepterRequestAsync(session, isKing);
                 break;
         }
@@ -85,8 +85,7 @@ public class KingGovernancePacketService(
                 break;
 
             default:
-                var failure = CreateEventResponse(eventOpcode);
-                await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, eventOpcode, 0));
+                await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, eventOpcode, KingPacketWriter.FlagRefused));
                 break;
         }
     }
@@ -112,17 +111,16 @@ public class KingGovernancePacketService(
 
     private async Task HandleTaxCollectionAsync(UserSession session, KingSystemData? kingData, bool isKing)
     {
-        var response = CreateTaxResponse(TaxCollect);
         if (!isKing || kingData == null || kingData.TerritoryTax <= 0)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 2, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxCollect, KingPacketWriter.FlagRefused));
             return;
         }
 
         var taxAmount = kingData.TerritoryTax;
-        if (!TryCredit(session, taxAmount))
+        if (!Coins.TryCredit(session, taxAmount))
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxCollect, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxCollect, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -131,28 +129,27 @@ public class KingGovernancePacketService(
         await userNotificationService.SendGoldGainAsync(session, taxAmount);
 
         await session.Client.SendPacket(KingPacketWriter.FlagWithAmount(
-            KingPacketConstants.Tax, TaxCollect, 1, taxAmount));
+            KingPacketConstants.Tax, TaxCollect, KingPacketWriter.FlagGranted, taxAmount));
     }
 
     private static async Task SendTariffAsync(UserSession session, KingSystemData? kingData)
     {
         await session.Client.SendPacket(KingPacketWriter.FlagWithValue(
-            KingPacketConstants.Tax, TaxTariffView, 1, kingData?.TerritoryTariff ?? 0));
+            KingPacketConstants.Tax, TaxTariffView, KingPacketWriter.FlagGranted, kingData?.TerritoryTariff ?? 0));
     }
 
     private async Task HandleTariffUpdateAsync(UserSession session, Packet packet, KingSystemData? kingData, bool isKing)
     {
-        var response = CreateTaxResponse(4);
         if (!isKing || kingData == null || packet.RemainingBytes < 1)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 4, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxTariffUpdate, KingPacketWriter.FlagRefused));
             return;
         }
 
         var newTariff = packet.ReadByte();
-        if (newTariff > 10)
+        if (newTariff > MaxTariff)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 4, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxTariffUpdate, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -160,63 +157,61 @@ public class KingGovernancePacketService(
         logger.LogInformation("King {Name} set tariff to {Tariff}% for nation {Nation}", session.Name, newTariff, session.Nation);
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.TerritoryTariff);
 
-        await session.Client.SendPacket(KingPacketWriter.FlagWithValue(KingPacketConstants.Tax, 4, 1, newTariff));
+        await session.Client.SendPacket(KingPacketWriter.FlagWithValue(KingPacketConstants.Tax, TaxTariffUpdate, KingPacketWriter.FlagGranted, newTariff));
     }
 
     private async Task HandleScepterRequestAsync(UserSession session, bool isKing)
     {
-        var response = CreateTaxResponse(7);
         if (!isKing)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 7, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxScepter, KingPacketWriter.FlagRefused));
             return;
         }
 
         var slot = session.WithLock(king =>
         {
             if (HoldsScepter(king))
-                return -1;
+                return ItemTransfer.NoSlot;
 
             var free = king.FindSlotForItem(KingScepterItem, gameDataService);
-            if (free < 0)
-                return -1;
+            if (free == ItemTransfer.NoSlot)
+                return ItemTransfer.NoSlot;
 
             king.Inventory[free].ItemId = KingScepterItem;
-            king.Inventory[free].Durability = 1;
-            king.Inventory[free].Count = 1;
+            king.Inventory[free].Durability = ScepterDurability;
+            king.Inventory[free].Count = ItemTransfer.SingleItem;
             return free;
         });
-        if (slot < 0)
+        if (slot == ItemTransfer.NoSlot)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 7, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxScepter, KingPacketWriter.FlagRefused));
             return;
         }
 
-        await userNotificationService.SendStackChangeAsync(session, (byte)slot, KingScepterItem, 1, 1, isNewItem: true);
+        await userNotificationService.SendStackChangeAsync(session, (byte)slot, KingScepterItem, ItemTransfer.SingleItem, ScepterDurability, isNewItem: true);
 
-        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, 7, 1));
+        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Tax, TaxScepter, KingPacketWriter.FlagGranted));
     }
 
     private async Task HandleNoahEventAsync(UserSession session, Packet packet, KingSystemData? kingData, bool isKing)
     {
-        var response = CreateEventResponse(KingPacketConstants.EventNoah);
         if (!isKing || kingData == null || packet.RemainingBytes < 1)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNoah, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNoah, KingPacketWriter.FlagRefused));
             return;
         }
 
         var amount = packet.ReadByte();
         if (amount < 1 || amount > 3)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNoah, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNoah, KingPacketWriter.FlagRefused));
             return;
         }
 
         var cost = 50_000_000 * amount;
         if (kingData.NationalTreasury < cost)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNoah, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNoah, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -225,7 +220,7 @@ public class KingGovernancePacketService(
         logger.LogInformation("King {Name} activated {Amount}% Noah bonus for nation {Nation}", session.Name, amount, session.Nation);
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.NationalTreasury);
 
-        await session.Client.SendPacket(KingPacketWriter.FlagWithValue(KingPacketConstants.Event, KingPacketConstants.EventNoah, 1, amount));
+        await session.Client.SendPacket(KingPacketWriter.FlagWithValue(KingPacketConstants.Event, KingPacketConstants.EventNoah, KingPacketWriter.FlagGranted, amount));
 
         var notice = KingPacketWriter.Notice(1, $"The King has activated a {amount}% Noah drop bonus for 30 minutes!");
         await kingSystemRuntimeService.BroadcastToNationAsync(session.Nation, notice);
@@ -233,24 +228,23 @@ public class KingGovernancePacketService(
 
     private async Task HandleExpEventAsync(UserSession session, Packet packet, KingSystemData? kingData, bool isKing)
     {
-        var response = CreateEventResponse(KingPacketConstants.EventExp);
         if (!isKing || kingData == null || packet.RemainingBytes < 1)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventExp, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventExp, KingPacketWriter.FlagRefused));
             return;
         }
 
         var amount = packet.ReadByte();
         if (amount != 10 && amount != 30 && amount != 50)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventExp, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventExp, KingPacketWriter.FlagRefused));
             return;
         }
 
         var cost = 30_000_000 * amount;
         if (kingData.NationalTreasury < cost)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventExp, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventExp, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -259,7 +253,7 @@ public class KingGovernancePacketService(
         logger.LogInformation("King {Name} activated {Amount}% EXP bonus for nation {Nation}", session.Name, amount, session.Nation);
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.NationalTreasury);
 
-        await session.Client.SendPacket(KingPacketWriter.FlagWithValue(KingPacketConstants.Event, KingPacketConstants.EventExp, 1, amount));
+        await session.Client.SendPacket(KingPacketWriter.FlagWithValue(KingPacketConstants.Event, KingPacketConstants.EventExp, KingPacketWriter.FlagGranted, amount));
 
         var notice = KingPacketWriter.Notice(1, $"The King has activated a {amount}% EXP bonus for 30 minutes!");
         await kingSystemRuntimeService.BroadcastToNationAsync(session.Nation, notice);
@@ -267,10 +261,9 @@ public class KingGovernancePacketService(
 
     private async Task HandlePrizeEventAsync(UserSession session, Packet packet, KingSystemData? kingData, bool isKing)
     {
-        var response = CreateEventResponse(KingPacketConstants.EventPrize);
         if (!isKing || kingData == null || packet.RemainingBytes < 6)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -281,9 +274,9 @@ public class KingGovernancePacketService(
         var amount = packet.ReadInt();
         var target = sessionManager.GetByName(targetName);
         if (amount <= 0 || target == null || target.Nation != session.Nation || kingData.NationalTreasury < amount
-            || !TryCredit(target, amount))
+            || !Coins.TryCredit(target, amount))
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -291,15 +284,14 @@ public class KingGovernancePacketService(
         await userNotificationService.SendGoldGainAsync(target, amount);
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.NationalTreasury);
 
-        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, 1));
+        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventPrize, KingPacketWriter.FlagGranted));
     }
 
     private async Task HandleWeatherEventAsync(UserSession session, Packet packet, KingSystemData? kingData, bool isKing)
     {
-        var response = CreateEventResponse(KingPacketConstants.EventWeather);
         if (!isKing || kingData == null || packet.RemainingBytes < 2)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventWeather, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventWeather, KingPacketWriter.FlagRefused));
             return;
         }
 
@@ -308,14 +300,14 @@ public class KingGovernancePacketService(
         if (weatherType < 1 || weatherType > 3
             || kingData.NationalTreasury < 100_000)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventWeather, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventWeather, KingPacketWriter.FlagRefused));
             return;
         }
 
         kingData.NationalTreasury -= 100_000;
         await kingSystemRuntimeService.PersistKingPropertyAsync(kingData, entry => entry.NationalTreasury);
 
-        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventWeather, 1));
+        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventWeather, KingPacketWriter.FlagGranted));
 
         timeWeather.TrySetWeather(weatherType, weatherAmount);
         await timeWeather.BroadcastWeatherAsync();
@@ -323,21 +315,20 @@ public class KingGovernancePacketService(
 
     private async Task HandleNoticeEventAsync(UserSession session, Packet packet, bool isKing)
     {
-        var response = CreateEventResponse(KingPacketConstants.EventNotice);
         if (!isKing || packet.RemainingBytes < 2)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNotice, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNotice, KingPacketWriter.FlagRefused));
             return;
         }
 
         var message = packet.ReadString();
         if (string.IsNullOrEmpty(message) || message.Length > 256)
         {
-            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNotice, 0));
+            await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNotice, KingPacketWriter.FlagRefused));
             return;
         }
 
-        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNotice, 1));
+        await session.Client.SendPacket(KingPacketWriter.Flag(KingPacketConstants.Event, KingPacketConstants.EventNotice, KingPacketWriter.FlagGranted));
 
         var notice = ChatPacketWriter
             .NationNotice((byte)session.Nation, session.CharacterId, session.Name, message)
@@ -347,26 +338,14 @@ public class KingGovernancePacketService(
 
     private const byte TaxCollect = 2;
     private const byte TaxTariffView = 3;
+    private const byte TaxTariffUpdate = 4;
+    private const byte TaxScepter = 7;
     private const int KingScepterItem = 910074311;
-
-    private static bool TryCredit(UserSession player, int amount)
-        => player.WithLock(target =>
-        {
-            if ((long)target.Money + amount > ExchangePacketConstants.CoinMax)
-                return false;
-
-            target.Money += amount;
-            return true;
-        });
+    private const byte MaxTariff = 10;
+    private const short ScepterDurability = 1;
 
     private static bool HoldsScepter(UserSession king)
         => king.Inventory.Any(slot => slot.ItemId == KingScepterItem)
             || king.Warehouse.Any(slot => slot.ItemId == KingScepterItem)
             || king.VipWarehouse.Any(slot => slot.ItemId == KingScepterItem);
-
-    private static Packet CreateTaxResponse(byte taxOpcode) =>
-        KingPacketWriter.Election(taxOpcode, KingPacketConstants.Tax);
-
-    private static Packet CreateEventResponse(byte eventOpcode) =>
-        KingPacketWriter.Election(eventOpcode, KingPacketConstants.Event);
 }

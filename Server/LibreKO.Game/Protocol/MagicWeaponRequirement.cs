@@ -9,6 +9,7 @@ namespace LibreKO.Game.Protocol;
 internal static class MagicWeaponRequirement
 {
     public const byte NoWeaponNeeded = 9;
+    public const byte PotionItemGroup = NoWeaponNeeded;
 
     private const byte AnyWeapon = 0;
     private const int KindsPerGroup = 10;

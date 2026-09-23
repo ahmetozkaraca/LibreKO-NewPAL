@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol.Writers;
@@ -104,6 +104,17 @@ public class BundleOpenWriterTests
 
         packet.ReadInt().Should().Be(7);
         packet.ReadByte().Should().Be(0);
+        packet.RemainingBytes.Should().Be(0);
+    }
+
+    [Fact]
+    public void RefusedBundle_CarriesOnlyTheRefusalFlag()
+    {
+        var packet = BundleOpenPacketWriter.Refusal(9);
+        packet.ResetOffset();
+
+        packet.ReadInt().Should().Be(9);
+        packet.ReadByte().Should().Be(BundleOpenPacketWriter.Refused);
         packet.RemainingBytes.Should().Be(0);
     }
 }

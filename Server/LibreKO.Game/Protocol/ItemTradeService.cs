@@ -39,8 +39,14 @@ public class ItemTradeService(
     public async Task HandleRepairAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null || session.Hp <= 0)
+        if (session == null)
             return;
+
+        if (session.Hp <= 0)
+        {
+            await SendRepairResponseAsync(session, ItemRepairResult.Failed);
+            return;
+        }
 
         var positionType = packet.ReadByte();
         var slot = packet.ReadByte();
@@ -105,8 +111,14 @@ public class ItemTradeService(
     public async Task HandleTradeAsync(IClient client, Packet packet)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null || session.Hp <= 0)
+        if (session == null)
             return;
+
+        if (session.Hp <= 0)
+        {
+            await SendItemTradeErrorAsync(session, ItemTradeRefusal.CannotTrade);
+            return;
+        }
 
         var type = packet.ReadByte();
         if (type is not (TradeBuy or TradeSell))
@@ -178,7 +190,7 @@ public class ItemTradeService(
             }
 
             var itemData = gameDataService.GetItem(entry.ItemId);
-            var unitPrice = itemData == null ? 0 : UnitBuyPrice(itemData, listed, loyaltyMerchant);
+            var unitPrice = itemData == null ? 0 : UnitBuyPrice(itemData, loyaltyMerchant);
             if (itemData == null
                 || unitPrice <= 0
                 || entry.Position >= InventoryConstants.HaveMax
@@ -253,8 +265,7 @@ public class ItemTradeService(
                 if (slot.ItemId != entry.ItemId
                     || entry.Count > slot.Count
                     || (itemData.Countable == 0 && entry.Count != slot.Count)
-                    || !ItemTransfer.CanLeaveOwner(slot, itemData)
-                    || entry.ItemId >= ExchangePacketConstants.ItemNoTrade)
+                    || !ItemTransfer.CanLeaveOwner(slot, itemData))
                     return TradeOutcome.Refused(ItemTradeRefusal.CannotTrade);
 
                 total += SalePrice(itemData, entry.Count, sellBonus);
@@ -272,16 +283,13 @@ public class ItemTradeService(
         });
     }
 
-    private static bool IsShopkeeper(NpcInstance npc, int sellingGroup) =>
+    private bool IsShopkeeper(NpcInstance npc, int sellingGroup) =>
         npc.SellingGroup != NoSellingGroup
         && npc.SellingGroup == sellingGroup
-        && npc.NpcType is NpcData.TypeTradeMerchant or NpcData.TypeRepairMerchant;
+        && gameDataService.HasSellingGroup(sellingGroup);
 
-    private static long UnitBuyPrice(ItemData itemData, SellingGroupItemData listed, bool loyaltyMerchant)
-    {
-        var tablePrice = loyaltyMerchant ? itemData.NpBuyPrice : itemData.BuyPrice;
-        return tablePrice > 0 ? tablePrice : listed.Price;
-    }
+    private static long UnitBuyPrice(ItemData itemData, bool loyaltyMerchant) =>
+        loyaltyMerchant ? itemData.NpBuyPrice : itemData.BuyPrice;
 
     private static ItemStack Purchased(NpcTradeEntry entry, ItemData itemData) =>
         ItemStack.Fresh(entry.ItemId, itemData.Duration, entry.Count);

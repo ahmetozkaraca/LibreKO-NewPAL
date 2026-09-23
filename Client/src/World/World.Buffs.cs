@@ -78,16 +78,13 @@ public partial class World
     private float AttackSpeedMultiplier()
     {
         double now = Now();
-        float best = 1f;
+        _attackSpeedScratch.Clear();
         foreach (var (skillId, end) in Net.I.BuffEnds)
-        {
-            if (end <= now) continue;
-            var s = SkillData.Get(skillId);
-            if (s == null || s.AttackSpeedPercent == 100) continue;
-            best = Mathf.Max(best, s.AttackSpeedPercent / 100f);
-        }
-        return best;
+            if (end > now && SkillData.Get(skillId) is { } s) _attackSpeedScratch.Add(s.AttackSpeedPercent);
+        return BuffKind.AttackSpeedMultiplier(_attackSpeedScratch);
     }
+
+    private readonly List<int> _attackSpeedScratch = new();
 
     private void RegisterBuff(SkillData.Skill s, int targetId, int duration)
     {
@@ -123,7 +120,7 @@ public partial class World
             return;
         }
 
-        bool harmful = s.IsEnemy || s.MoveSpeedPercent < 100;
+        bool harmful = s.IsEnemy || s.MoveSpeedPercent < BuffKind.NeutralPercent;
         bool longLived = s.Duration >= BuffLongSeconds;
 
         var entry = new VBoxContainer { MouseFilter = Control.MouseFilterEnum.Ignore };
@@ -247,7 +244,7 @@ public partial class World
         if (GodotObject.IsInstanceValid(b.Entry)) b.Entry.QueueFree();
         _buffs.RemoveAt(index);
         Net.I.BuffEnds.Remove(b.SkillId);
-        if (SkillData.Get(b.SkillId) is { } s && s.MoveSpeedPercent != 100) ClearMoveSpeedBuff();
+        if (SkillData.Get(b.SkillId) is { } s && s.MoveSpeedPercent != BuffKind.NeutralPercent) ClearMoveSpeedBuff();
     }
 
     private void BuffBarTick(double now)

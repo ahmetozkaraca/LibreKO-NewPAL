@@ -78,7 +78,7 @@ public class WorldObjectEventService(
                         if (objectEvent.Belong != 0 && objectEvent.Belong != (int)session.Nation)
                             break;
 
-                        var gateNpc = sessionManager.Regions.GetNpcByProtoId(session.ZoneId, objectEvent.ControlNpcId);
+                        var gateNpc = sessionManager.Regions.GetNpcByProtoId(session.Room, session.ZoneId, objectEvent.ControlNpcId);
                         if (gateNpc != null)
                         {
                             await ToggleGateAsync(gateNpc);
@@ -123,7 +123,7 @@ public class WorldObjectEventService(
     private async Task<bool> HandleGateObjectEventAsync(UserSession session, ObjectEvent objectEvent)
     {
         var gateNpc = sessionManager.Regions.GetNpcByProtoId(
-            session.ZoneId, (short)GameServerBootstrapper.ResolveObjectEventNpcId(objectEvent));
+            session.Room, session.ZoneId, (short)GameServerBootstrapper.ResolveObjectEventNpcId(objectEvent));
         if (gateNpc == null || (byte)gateNpc.Nation != (byte)session.Nation)
             return false;
 

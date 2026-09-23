@@ -1,4 +1,5 @@
 ﻿using FluentAssertions;
+using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -18,6 +19,7 @@ public class RewardQuestTests : RewardTestBase
     private const int UnknownQuestId = 424_242;
     private const int ConcurrentClaims = 8;
     private const float FarAway = 300;
+    private const ushort ScrollsArrivedMeanwhile = 3;
 
     private sealed record EventRow(int Id, string Title, bool Accepted, bool Claimable);
 
@@ -44,6 +46,20 @@ public class RewardQuestTests : RewardTestBase
     }
 
     [Fact]
+    public async Task EventQuest_ADoubleClickedAcceptIsRefusedWithoutAViolation()
+    {
+        using var provider = CreateRewardProvider(new ManualClock());
+        var player = Player(provider, 5090, 6090, level: 10);
+        await ListEventsAsync(provider, player);
+
+        await RouteAsync(provider, player, GameOpcodes.GS_EVENT_QUEST, EventAcceptSub, EventHuntId);
+        await RouteAsync(provider, player, GameOpcodes.GS_EVENT_QUEST, EventAcceptSub, EventHuntId);
+
+        LastEventResult(player, EventAcceptSub).Should().Be((Failed, EventHuntId));
+        ViolationScore(provider, player).Should().Be(0);
+    }
+
+    [Fact]
     public async Task EventQuest_KillsAfterAcceptingCompleteTheQuestAndItPaysExactlyOnce()
     {
         using var provider = CreateRewardProvider(new ManualClock());
@@ -62,7 +78,7 @@ public class RewardQuestTests : RewardTestBase
         player.Session.Rewards.EventCoins.Should().Be(EventHuntCoins);
         (await StoredCoinsAsync(provider, 5002)).Should().Be(EventHuntCoins);
         LastEventResult(player, EventClaimSub).Should().Be((Failed, EventHuntId));
-        ViolationScore(provider, player).Should().Be(ViolationMonitor.InvalidStateWeight);
+        ViolationScore(provider, player).Should().Be(0, "repeating a claim that already paid is a stale window, not an attack");
         var stored = (await StoredQuestsAsync(provider, 5002)).Single(entry => entry.QuestId == EventHuntId);
         stored.Kills.Should().Be(HuntKills);
         stored.ClaimedAt.Should().NotBeNull();
@@ -232,7 +248,7 @@ public class RewardQuestTests : RewardTestBase
         player.Session.Money.Should().Be(DailyHuntGold);
         player.Session.Experience.Should().Be(DailyHuntGold);
         (await StoredCoinsAsync(provider, 5013)).Should().Be(DailyHuntCoins);
-        ViolationScore(provider, player).Should().Be(ViolationMonitor.InvalidStateWeight);
+        ViolationScore(provider, player).Should().Be(0, "repeating a claim that already paid is a stale window, not an attack");
         (await ListDailyAsync(provider, player)).Single(entry => entry.Id == DailyHuntId).Completed.Should().BeTrue();
 
         clock.Advance(TimeSpan.FromDays(1));
@@ -376,6 +392,7 @@ public class RewardQuestTests : RewardTestBase
         Give(player.Session, InventoryConstants.InventoryStart, HerbItemId, HerbsRequired);
         await ListDailyAsync(provider, player);
         player.Session.Trade.ExchangeUser = 5099;
+        player.Session.Trade.ExchangeStarted = true;
 
         await RouteAsync(provider, player, GameOpcodes.GS_DAILY_QUEST, (byte)DailyQuestSubOpcode.Claim, DailySupplyId);
 
@@ -409,7 +426,7 @@ public class RewardQuestTests : RewardTestBase
     {
         using var provider = CreateRewardProvider(
             new ManualClock(),
-            configureServices: services => services.AddScoped<LibreKO.Common.Domain.Services.IRewardStateRepository, FailingWritesRepository>());
+            configureServices: FailingCommitsOf<CharacterRewardQuest>().Register);
         var player = Player(provider, 5025, 6025, level: 10);
         Give(player.Session, InventoryConstants.InventoryStart, HerbItemId, HerbsRequired);
         await ListDailyAsync(provider, player);
@@ -422,6 +439,108 @@ public class RewardQuestTests : RewardTestBase
         CountItem(player.Session, ScrollItemId).Should().Be(0);
         player.Session.Rewards.EventCoins.Should().Be(0);
         (await ListDailyAsync(provider, player)).Single(row => row.Id == DailySupplyId).Available.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task AFailedClaimKeepsWhateverArrivedDuringTheCommit()
+    {
+        var probe = FailingCommitsOf<CharacterRewardQuest>();
+        using var provider = CreateRewardProvider(new ManualClock(), configureServices: probe.Register);
+        var player = Player(provider, 5033, 6033, level: 10);
+        Give(player.Session, InventoryConstants.InventoryStart, HerbItemId, HerbsRequired);
+        await ListDailyAsync(provider, player);
+        probe.BeforeSave = db =>
+        {
+            if (probe.FailWhen!(db))
+                player.Session.WithLock(s => s.Inventory.First(slot => slot.ItemId == ScrollItemId).Count += ScrollsArrivedMeanwhile);
+            return Task.CompletedTask;
+        };
+
+        await RouteAsync(provider, player, GameOpcodes.GS_DAILY_QUEST, (byte)DailyQuestSubOpcode.Claim, DailySupplyId);
+
+        LastDailyResult(player).Should().Be((Failed, DailySupplyId));
+        CountItem(player.Session, HerbItemId).Should().Be(HerbsRequired);
+        CountItem(player.Session, ScrollItemId).Should().Be(ScrollsArrivedMeanwhile);
+    }
+
+    [Fact]
+    public async Task ALeavingPlayerCannotClaim()
+    {
+        using var provider = CreateRewardProvider(new ManualClock());
+        var player = Player(provider, 5028, 6028, level: 10);
+        await KillAsync(provider, player.Session, WormId, HuntKills);
+        await ListDailyAsync(provider, player);
+        player.Session.TryBeginClosing();
+
+        var outcome = await provider.GetRequiredService<IRewardQuestService>().ClaimAsync(player.Session, QuestBoard.Daily, DailyHuntId);
+
+        outcome.Should().Be(RewardOutcome.Unavailable);
+        player.Session.Money.Should().Be(0);
+        player.Session.Rewards.EventCoins.Should().Be(0);
+        (await StoredQuestsAsync(provider, 5028)).Single(row => row.QuestId == DailyHuntId).ClaimedAt.Should().BeNull();
+        (await StoredCoinsAsync(provider, 5028)).Should().Be(0);
+        ViolationScore(provider, player).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task AClaimIsCommittedWithTheCharacter()
+    {
+        using var provider = CreateRewardProvider(new ManualClock(), seed: StoredCharacter(5029, 6029));
+        var player = Player(provider, 5029, 6029, level: 10);
+        Give(player.Session, InventoryConstants.InventoryStart, HerbItemId, HerbsRequired);
+        await ListDailyAsync(provider, player);
+
+        await RouteAsync(provider, player, GameOpcodes.GS_DAILY_QUEST, (byte)DailyQuestSubOpcode.Claim, DailySupplyId);
+
+        LastDailyResult(player).Should().Be((Succeeded, DailySupplyId));
+        var slots = Enumerable.Range(0, InventoryConstants.InventoryTotal).Select(_ => new ItemSlot()).ToArray();
+        UserSessionBinaryState.LoadItems(slots, (await StoredCharacterAsync(provider, 5029)).Items);
+        slots.Where(slot => slot.ItemId == HerbItemId).Should().BeEmpty();
+        slots.Where(slot => slot.ItemId == ScrollItemId).Sum(slot => slot.Count).Should().Be(DailySupplyScrolls);
+        (await StoredCoinsAsync(provider, 5029)).Should().Be(DailySupplyCoins);
+    }
+
+    [Fact]
+    public async Task SealedItemsAreNeverConsumedByAClaim()
+    {
+        using var provider = CreateRewardProvider(new ManualClock());
+        var player = Player(provider, 5030, 6030, level: 10);
+        Give(player.Session, InventoryConstants.InventoryStart, HerbItemId, HerbsRequired, ItemFlag.Sealed);
+        Give(player.Session, InventoryConstants.InventoryStart + 1, HerbItemId, HerbsRequired);
+        await ListDailyAsync(provider, player);
+
+        await RouteAsync(provider, player, GameOpcodes.GS_DAILY_QUEST, (byte)DailyQuestSubOpcode.Claim, DailySupplyId);
+
+        LastDailyResult(player).Should().Be((Succeeded, DailySupplyId));
+        player.Session.Inventory[InventoryConstants.InventoryStart].Count.Should().Be(HerbsRequired);
+        CountItem(player.Session, HerbItemId).Should().Be(HerbsRequired);
+    }
+
+    [Fact]
+    public async Task SealedItemsDoNotCountTowardsAnItemObjective()
+    {
+        using var provider = CreateRewardProvider(new ManualClock());
+        var player = Player(provider, 5031, 6031, level: 10);
+        Give(player.Session, InventoryConstants.InventoryStart, HerbItemId, HerbsRequired, ItemFlag.Sealed);
+
+        var row = (await ListDailyAsync(provider, player)).Single(entry => entry.Id == DailySupplyId);
+
+        row.Available.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task KillProgressThatCouldNotBeSavedIsFlushedAtLogout()
+    {
+        var probe = FailingCommitsOf<CharacterRewardQuest>();
+        using var provider = CreateRewardProvider(new ManualClock(), configureServices: probe.Register);
+        var player = Player(provider, 5032, 6032, level: 10);
+        await KillAsync(provider, player.Session, WormId, HuntKills);
+        (await StoredQuestsAsync(provider, 5032)).Should().BeEmpty();
+        probe.FailWhen = null;
+
+        await provider.GetRequiredService<ISessionTerminationService>().LogoutAsync(player.Client);
+
+        (await StoredQuestsAsync(provider, 5032)).Single(row => row.QuestId == DailyHuntId).Kills.Should().Be(HuntKills);
     }
 
     [Fact]

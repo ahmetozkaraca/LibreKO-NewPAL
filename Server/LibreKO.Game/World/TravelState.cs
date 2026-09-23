@@ -7,6 +7,7 @@ public sealed class TravelState
     public WarpOffer? Offer;
     public long RegionChangeAllowedAt;
     public long TownRecallAllowedAt;
+    public long ZoneGateRetryAt;
 }
 
 public abstract record WarpSource

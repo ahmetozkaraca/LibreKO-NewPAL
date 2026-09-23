@@ -72,8 +72,7 @@ public class CombatPacketCoordinator(
         if (attackResult != AttackResult.Failed && isBowAttack)
             _ = await magicItemUsageService.TryConsumeArrowAsync(session);
 
-        var result = AttackPacketWriter.Create(
-            AttackPacketWriter.TypeMelee, attackResult, session.CharacterId, targetId);
+        var result = AttackPacketWriter.Create(attackResult, session.CharacterId, targetId);
         await sessionManager.Regions.SendToRegion(session, result, excludeSender: false);
     }
 
@@ -81,7 +80,7 @@ public class CombatPacketCoordinator(
     {
         if (!Reach.Within(session, target, reach + CombatReach.PlayerBodyRadius)
             || !PvpRules.CanAttackPlayer(session, target)
-            || !stealthService.CanSee(session, target))
+            || !stealthService.CanTarget(session, target))
         {
             logger.LogDebug(
                 "PvP swing by {Name} on {Target} refused: arena={A}/{B} zone={Zone}/{TargetZone} invisible={Invisible}",
@@ -218,7 +217,7 @@ public class CombatPacketCoordinator(
     }
 
     private bool MayObserve(UserSession viewer, UserSession target) =>
-        !target.IsInvisible || !PvpRules.IsEnemy(viewer, target) || stealthService.CanSee(viewer, target);
+        !target.IsInvisible || !PvpRules.IsEnemy(viewer, target) || stealthService.CanTarget(viewer, target);
 
     private static Packet BuildTargetHpPacket(int targetId, byte echo, int maxHp, int hp, int damage)
     {

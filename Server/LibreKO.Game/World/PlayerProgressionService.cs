@@ -1,4 +1,4 @@
-using LibreKO.Common.Domain.Services;
+﻿using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Configuration;
 using LibreKO.Game.Protocol;
@@ -170,15 +170,17 @@ public class PlayerProgressionService(
         if (coefficient != null)
             session.RecalculateStats(coefficient, gameDataService);
 
-        if (session.Hp > 0)
+        session.WithLock(leveled =>
         {
-            session.Mp = session.MaxMp;
-            session.Hp = session.MaxHp;
-        }
-        else
-        {
-            session.Mp = Math.Min(session.Mp, session.MaxMp);
-        }
+            if (leveled.Hp <= 0)
+            {
+                leveled.Mp = Math.Min(leveled.Mp, leveled.MaxMp);
+                return;
+            }
+
+            leveled.Mp = leveled.MaxMp;
+            leveled.Heal(leveled.MaxHp);
+        });
 
         await achievementProgressService.RefreshAsync(session);
 

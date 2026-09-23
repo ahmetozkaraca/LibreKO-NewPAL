@@ -87,14 +87,13 @@ public static class SkillData
         public bool RootsCaster => HasCastPhase && !IsNonAction;
 
         public int MoveSpeedPercent =>
-            Type1 == MagicType.Buff && Effect.TryGetValue("Speed", out var v) && (int)v > 0
-                ? (int)v
-                : 100;
+            BuffKind.MoveSpeedPercent(Type1, BuffType, Effect.TryGetValue("Speed", out var v) ? (int)v : null);
 
         public int AttackSpeedPercent =>
-            Type1 == MagicType.Buff && Effect.TryGetValue("AttackSpeed", out var a) && (int)a > 0
+            Type1 == MagicType.Buff && BuffType == BuffKind.AttackSpeed
+            && Effect.TryGetValue("AttackSpeed", out var a) && (int)a > 0
                 ? (int)a
-                : 100;
+                : BuffKind.NeutralPercent;
 
         public int SpecialKind =>
             Type1 == MagicType.Special && Effect.TryGetValue("Type", out var v) ? (int)v : 0;

@@ -38,6 +38,7 @@ public partial class World
         BuildLootPrompt();
         Net.I.LootDropEvent += OnLootDrop;
         Net.I.LootContentsEvent += OnLootContents;
+        Net.I.LootRefusedEvent += OnLootRefused;
         Net.I.LootTakenEvent += OnLootTaken;
         Net.I.LootFailEvent += OnLootFail;
     }
@@ -46,6 +47,7 @@ public partial class World
     {
         Net.I.LootDropEvent -= OnLootDrop;
         Net.I.LootContentsEvent -= OnLootContents;
+        Net.I.LootRefusedEvent -= OnLootRefused;
         Net.I.LootTakenEvent -= OnLootTaken;
         Net.I.LootFailEvent -= OnLootFail;
     }
@@ -222,6 +224,13 @@ public partial class World
         _lootEntries.AddRange(entries);
         RefreshLootWindow();
         _lootLayer.Visible = true;
+    }
+
+    private void OnLootRefused(int bundleId)
+    {
+        if (bundleId != _openBundleId) return;
+        CloseLoot();
+        CombatNotice("You cannot loot that right now.");
     }
 
     private void RefreshLootWindow()

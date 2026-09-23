@@ -7,6 +7,11 @@ namespace LibreKO.Game.Scripting;
 
 public class QuestScriptContext
 {
+    public const string SummonRefusedReason = "Too many creatures answer your call already. Try again later.";
+
+    private readonly UserSession _session;
+    private readonly SummonQuota? _summons;
+
     public List<Packet> QueuedPackets { get; } = [];
 
     public bool QuestStateDirty { get; set; }
@@ -40,7 +45,18 @@ public class QuestScriptContext
 
     public List<(int NpcId, int Count, int X, int Z)> PendingSummons { get; } = [];
 
-    public void RequestSummon(int npcId, int count, int x, int z) => PendingSummons.Add((npcId, count, x, z));
+    public SummonGrant? SummonGrant { get; private set; }
+
+    public void RequestSummon(int npcId, int count, int x, int z)
+    {
+        if (_summons != null && (SummonGrant ??= _summons.Reserve(_session)) == null)
+        {
+            FailAction(SummonRefusedReason);
+            return;
+        }
+
+        PendingSummons.Add((npcId, count, x, z));
+    }
 
     public void RequestZoneChange(int zoneId, float x, float z) => PendingZoneChange = (zoneId, x, z);
 
@@ -70,8 +86,11 @@ public class QuestScriptContext
         IGameDataService gameData,
         SessionManager sessionManager,
         ILogger logger,
-        int expMultiplier)
+        int expMultiplier,
+        SummonQuota? summons = null)
     {
+        _session = session;
+        _summons = summons;
         Dialog = new ScriptDialogService(session, npc, QueuedPackets, this);
         Player = new ScriptPlayerQueryService(session, npc, gameData, sessionManager, logger);
         Character = new ScriptCharacterService(session, npc, gameData, QueuedPackets, expMultiplier, this);

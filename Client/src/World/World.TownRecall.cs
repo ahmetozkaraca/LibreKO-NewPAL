@@ -38,7 +38,5 @@ public partial class World
     private void TownRecallConfirm()
     {
         Net.I.SendTownRecall();
-        Chat.Info("Recalling to town…");
-        Audio.Play(Sfx.WarpZone, _self.GlobalPosition);
     }
 }

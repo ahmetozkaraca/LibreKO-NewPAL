@@ -67,16 +67,13 @@ public class EventSchedulerService(
 
             if (elapsed >= maxDuration)
             {
-                // Determine winner and close
-                byte winner = battle.DetermineWinner();
-                battle.Victory = winner;
+                var announce = battle.SettleVictory(out var winner);
 
                 logger.LogInformation("Battle zone {Zone} ended. Winner: {Winner} (K:{KDead} E:{EDead})",
-                    battle.BattleZone, winner == 1 ? "Karus" : winner == 2 ? "Elmorad" : "Draw",
+                    battle.BattleZone, winner == (byte)AccountNation.Karus ? "Karus" : winner == (byte)AccountNation.ElMorad ? "Elmorad" : "Draw",
                     battle.KarusDead, battle.ElmoradDead);
 
-                // Broadcast result to all online players
-                await BroadcastBattleResult(winner);
+                await BroadcastBattleResult(winner, announce);
 
                 battle.CloseBattleZone();
                 _banishPending = true;
@@ -115,15 +112,16 @@ public class EventSchedulerService(
         await sessionManager.BroadcastToAll(pkt);
     }
 
-    private async Task BroadcastBattleResult(byte winner)
+    private async Task BroadcastBattleResult(byte winner, bool announce)
     {
-        // Winner announcement
-        var pkt = BattleEventPacketWriter.Notice(
-            winner > 0 ? BattleZoneManager.DECLARE_WINNER : BattleZoneManager.BATTLEZONE_CLOSE,
-            winner);
-        await sessionManager.BroadcastToAll(pkt);
+        if (announce || winner == (byte)AccountNation.None)
+        {
+            var pkt = BattleEventPacketWriter.Notice(
+                winner > 0 ? BattleZoneManager.DECLARE_WINNER : BattleZoneManager.BATTLEZONE_CLOSE,
+                winner);
+            await sessionManager.BroadcastToAll(pkt);
+        }
 
-        // Award loyalty to participants of winning side
         int loyaltyReward = settings.Value.Events.BattleWinLoyalty;
         if (winner > 0 && loyaltyReward > 0)
         {

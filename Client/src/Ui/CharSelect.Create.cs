@@ -33,6 +33,7 @@ public partial class CharSelect : Node3D
     private int _createFace;
     private int _createHair;
     private bool _creating;
+    private readonly PendingReply _createReply = new();
 
     private int FreeSlot()
     {
@@ -421,6 +422,14 @@ public partial class CharSelect : Node3D
         _creating = true;
         _createConfirm.Disabled = true;
         _createStatus.Text = "Creating…";
+        int token = _createReply.Begin();
+        GetTree().CreateTimer(PendingReply.TimeoutSeconds).Timeout += () =>
+        {
+            if (!_createReply.Expire(token)) return;
+            _creating = false;
+            RefreshCreateState();
+            _createStatus.Text = PendingReply.NoReplyText;
+        };
         Net.I.CreateCharacter(
             slot, _createName.Text.StripEdges(), _createRace, _createClass,
             _createFace, HairCode.Pack(_createHair, _hairColour.Color),
@@ -429,6 +438,7 @@ public partial class CharSelect : Node3D
 
     private void OnCreateResult(int code)
     {
+        _createReply.Settle();
         _creating = false;
         if (code == 0)
         {

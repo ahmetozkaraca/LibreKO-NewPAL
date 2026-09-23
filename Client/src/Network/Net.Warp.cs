@@ -10,7 +10,7 @@ public partial class Net
 
     public event Action<List<WarpListEntry>>? WarpListEvent;
 
-    public event Action? WarpFailEvent;
+    public event Action<byte>? WarpFailEvent;
 
     public const byte WarpListMenu = 1;
     public const byte WarpListResult = 2;
@@ -31,12 +31,12 @@ public partial class Net
         if (kind == WarpListResult)
         {
             byte result = p.RemainingBytes >= 1 ? p.ReadByte() : WarpResultArrived;
-            if (result != WarpResultArrived) WarpFailEvent?.Invoke();
+            if (result != WarpResultArrived) WarpFailEvent?.Invoke(result);
             return;
         }
         if (kind != WarpListMenu)
         {
-            WarpFailEvent?.Invoke();
+            WarpFailEvent?.Invoke(WarpResultNotQualified);
             return;
         }
 

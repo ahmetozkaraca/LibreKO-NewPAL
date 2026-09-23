@@ -8,6 +8,7 @@ using LibreKO.Common.Enums;
 using LibreKO.Common.Gameplay;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Common.Infrastructure.Persistence;
+using LibreKO.Login.Configuration;
 using LibreKO.Login.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -143,9 +144,12 @@ public class LoginCredentialTests() : LoginSocketTest(new Dictionary<string, str
 {
     ["Account:AutoCreate"] = "false",
     ["Connections:MaxLoginFailuresPerConnection"] = "2",
-    ["Connections:MaxLoginFailuresPerAccount"] = "3",
+    ["Connections:MaxLoginFailuresPerAccountAndIp"] = "3",
 })
 {
+    private const int AttackingAddresses = 6;
+    private static readonly IPAddress OwnerAddress = IPAddress.Parse("198.51.100.7");
+
     protected override void SeedDatabase(AppDbContext db)
     {
         db.Accounts.AddRange(
@@ -195,7 +199,7 @@ public class LoginCredentialTests() : LoginSocketTest(new Dictionary<string, str
     }
 
     [Fact]
-    public async Task AnAccountIsLockedAfterRepeatedFailuresEvenForTheRightPassword()
+    public async Task AnAddressIsLockedOutOfAnAccountAfterRepeatedFailuresEvenForTheRightPassword()
     {
         await StartServerAsync();
 
@@ -206,6 +210,24 @@ public class LoginCredentialTests() : LoginSocketTest(new Dictionary<string, str
             "the lockout has to hold before the password is even checked");
         (await LoginResultAsync("hashed", Password)).Should().Be((byte)LoginResult.Success,
             "other accounts stay reachable");
+    }
+
+    [Fact]
+    public async Task FailuresFromOtherAddressesNeverLockTheOwnerOut()
+    {
+        for (var attempt = 0; attempt < AttackingAddresses; attempt++)
+            (await ServiceLoginAsync("victim", "GUESS", IPAddress.Parse($"203.0.113.{attempt + 1}")))
+                .Should().Be(LoginResult.InvalidPassword);
+
+        (await ServiceLoginAsync("victim", Password, OwnerAddress)).Should().Be(LoginResult.Success,
+            "guessing from elsewhere must not keep the owner out of the account");
+    }
+
+    private async Task<LoginResult> ServiceLoginAsync(string login, string password, IPAddress address)
+    {
+        using var scope = host.Services.CreateScope();
+        var outcome = await scope.ServiceProvider.GetRequiredService<ILoginService>().LoginAsync(login, password, address);
+        return outcome.Result;
     }
 
     [Fact]
@@ -368,6 +390,59 @@ public class LoginTimeoutTests() : LoginSocketTest(new Dictionary<string, string
         var request = new Packet(LoginOpcodes.LS_SERVERLIST);
         request.WriteShort(1);
         (await ExchangeAsync(stream, request)).Should().NotBeNull("a signed-in player may sit on the server list");
+    }
+}
+
+public class LoginScreenTests() : LoginSocketTest(new Dictionary<string, string?>
+{
+    ["Account:AutoCreate"] = "false",
+})
+{
+    private const int SweepsToWaitMs = 2500;
+    private static readonly TimeSpan PastTheDeadline = TimeSpan.FromSeconds(1);
+
+    private readonly ManualClock _clock = new();
+
+    protected override void ConfigureServices(HostBuilderContext ctx, IServiceCollection services)
+    {
+        base.ConfigureServices(ctx, services);
+        services.AddSingleton<TimeProvider>(_clock);
+    }
+
+    protected override void SeedDatabase(AppDbContext db)
+    {
+        db.Accounts.Add(new Account { Login = "player", Password = PasswordHasher.Hash(Password) });
+        db.SaveChanges();
+    }
+
+    [Fact]
+    public async Task APlayerMayTakeTheirTimeOnTheLoginScreen()
+    {
+        await StartServerAsync();
+        var (tcp, stream) = await ConnectAsync();
+        using var _ = tcp;
+
+        (await ExchangeAsync(stream, new Packet(LoginOpcodes.LS_VERSION_REQ))).Should().NotBeNull();
+        _clock.Advance(new ConnectionLimitsSettings().LoginTimeout * 2);
+        await Task.Delay(SweepsToWaitMs);
+
+        var login = await ExchangeAsync(stream, LoginRequest("player", Password));
+        login.Should().NotBeNull("the client connects before the player has typed the credentials");
+        login!.ReadShort();
+        login.ReadByte().Should().Be((byte)LoginResult.Success);
+    }
+
+    [Fact]
+    public async Task AConnectionLeftOnTheLoginScreenIsClosedEventually()
+    {
+        await StartServerAsync();
+        var (tcp, stream) = await ConnectAsync();
+        using var _ = tcp;
+
+        (await ExchangeAsync(stream, new Packet(LoginOpcodes.LS_VERSION_REQ))).Should().NotBeNull();
+        _clock.Advance(TimeSpan.FromSeconds(LoginServerSettings.LoginScreenTimeoutSeconds) + PastTheDeadline);
+
+        (await WaitForCloseAsync(stream)).Should().BeTrue();
     }
 }
 

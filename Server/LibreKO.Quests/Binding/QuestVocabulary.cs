@@ -1,4 +1,4 @@
-namespace LibreKO.Quests.Binding;
+﻿namespace LibreKO.Quests.Binding;
 
 public enum QuestActionKind
 {
@@ -140,6 +140,7 @@ public static class QuestVocabulary
 
     public const string OperatorArgument = "$op";
     public const string NegatedArgument = "$negated";
+    public const string TopUpArgument = "$topup";
     public const string CloseTarget = "close";
     public const int KarusKillTarget = 1;
     public const int ElMoradKillTarget = 2;

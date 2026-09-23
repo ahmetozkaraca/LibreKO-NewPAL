@@ -33,7 +33,11 @@ public partial class World
         root.AddChild(_genieStatus);
 
         _genieClaimBtn = new Button { Text = "Claim Daily Reward", FocusMode = Control.FocusModeEnum.None };
-        _genieClaimBtn.Pressed += () => Net.I.SendGenieClaim();
+        _genieClaimBtn.Pressed += () =>
+        {
+            _genieClaimBtn.Disabled = true;
+            Net.I.SendGenieClaim();
+        };
         root.AddChild(_genieClaimBtn);
 
         Net.I.GenieStatusEvent += OnGenieStatus;
@@ -80,10 +84,7 @@ public partial class World
 
     private void OnGenieClaim(bool ok, int rewardGold)
     {
-        if (ok)
-        {
-            Chat.Info($"Your genie granted you {rewardGold} gold.");
-            Net.I.SendGenieStatus();
-        }
+        if (ok) Chat.Info($"Your genie granted you {rewardGold} gold.");
+        Net.I.SendGenieStatus();
     }
 }

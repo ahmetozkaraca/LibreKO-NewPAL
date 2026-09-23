@@ -162,6 +162,7 @@ public class ItemSealTests : GameTestBase
         var (provider, session, sent) = Open(bound: 10);
         using var _ = provider;
         session.Trade.ExchangeUser = 999;
+        session.Trade.ExchangeStarted = true;
 
         await Seal(provider, session, ItemSealType.Bind, KrowazBoots, 0, string.Empty);
 

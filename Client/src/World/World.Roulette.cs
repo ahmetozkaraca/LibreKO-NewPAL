@@ -67,6 +67,7 @@ public partial class World
             _rouletteResultLabel.Text = "Not enough event coins.";
             return;
         }
+        _rouletteSpinBtn.Disabled = true;
         Net.I.SendRouletteSpin();
     }
 

@@ -12,13 +12,5 @@ public sealed class AccountCreationThrottle(IOptions<LoginServerSettings> settin
         TimeSpan.FromSeconds(Math.Max(0, settings.Value.Account.CreationWindowSeconds)),
         time);
 
-    public bool TryReserve(IPAddress? address)
-    {
-        var key = address ?? IPAddress.None;
-        if (_creations.IsExhausted(key))
-            return false;
-
-        _creations.Record(key);
-        return true;
-    }
+    public bool TryReserve(IPAddress? address) => _creations.TryRecord(address ?? IPAddress.None);
 }

@@ -23,6 +23,11 @@ public class MailServiceTests : GameTestBase
     private const int Sword = 110110001;
     private const int CoinMax = 2_100_000_000;
     private const int FreeSlotsLeft = 2;
+    private const ushort RentedApples = 2;
+    private const ushort MailedApples = 4;
+    private const ushort SentApples = 5;
+    private const ushort ArrivedMeanwhile = 3;
+    private const int RentalDays = 1;
 
     private static ServiceProvider Provider(SaveChangesProbe? probe = null) => CreateProvider(
         db => db.Characters.AddRange(
@@ -247,6 +252,7 @@ public class MailServiceTests : GameTestBase
         alice.Money = 10_000;
         var slot = Stock(alice, InventoryConstants.InventoryStart, Apple, 5);
         alice.Trade.ExchangeUser = BobId;
+        alice.Trade.ExchangeStarted = true;
         var mail = provider.GetRequiredService<IMailService>();
 
         await mail.SendAsync(alice, "Bob", "Apples", "", 100, [new MailItemPick((byte)InventoryConstants.InventoryStart, 3)]);
@@ -296,6 +302,49 @@ public class MailServiceTests : GameTestBase
         slot.Count.Should().Be(5);
         alice.Money.Should().Be(10_000);
         (await MailCountAsync(provider)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task SendAsync_UndoKeepsWhatArrivedDuringTheCommit()
+    {
+        var probe = new SaveChangesProbe();
+        using var provider = Provider(probe);
+        var (alice, aliceSent) = Online(provider, AliceId, "Alice");
+        var slot = Stock(alice, InventoryConstants.InventoryStart, Apple, SentApples);
+        probe.BeforeSave = _ =>
+        {
+            alice.WithLock(s => Stock(s, InventoryConstants.InventoryStart, Apple, ArrivedMeanwhile));
+            return Task.CompletedTask;
+        };
+        probe.FailWhen = db => db.ChangeTracker.Entries<Mail>().Any(entry => entry.State == EntityState.Added);
+        var mail = provider.GetRequiredService<IMailService>();
+
+        await mail.SendAsync(alice, "Bob", "Apples", "", 0, [new MailItemPick((byte)InventoryConstants.InventoryStart, SentApples)]);
+
+        MailPacket(aliceSent, MailPacketWriter.SubSend).ReadByte().Should().Be(MailPacketWriter.Failed);
+        slot.ItemId.Should().Be(Apple);
+        slot.Count.Should().Be(SentApples + ArrivedMeanwhile);
+    }
+
+    [Fact]
+    public async Task ClaimAsync_KeepsMailedItemsOutOfARentedStack()
+    {
+        using var provider = Provider();
+        var (bob, bobSent) = Online(provider, BobId, "Bob");
+        var rented = Stock(bob, InventoryConstants.InventoryStart, Apple, RentedApples);
+        rented.ExpireInDays(RentalDays, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var mailId = await SystemMailAsync(provider, bob, bobSent,
+            new MailAttachmentDraft(MailAttachmentKind.Item, Apple, MailedApples, 1));
+
+        await provider.GetRequiredService<IMailService>().ClaimAsync(bob, mailId);
+
+        MailPacket(bobSent, MailPacketWriter.SubClaim).ReadByte().Should().Be(MailPacketWriter.Succeeded);
+        rented.Count.Should().Be(RentedApples);
+        rented.State.Should().Be(ItemFlag.Rented);
+        var delivered = bob.Inventory[InventoryConstants.InventoryStart + 1];
+        delivered.ItemId.Should().Be(Apple);
+        delivered.Count.Should().Be(MailedApples);
+        delivered.Expires.Should().BeFalse();
     }
 
     [Fact]
@@ -388,6 +437,34 @@ public class MailServiceTests : GameTestBase
     }
 
     [Fact]
+    public async Task ABodyLongerThanAByteLengthStringTravelsBothWays()
+    {
+        using var provider = Provider();
+        var (alice, _) = Online(provider, AliceId, "Alice");
+        var (bob, bobSent) = Online(provider, BobId, "Bob");
+        var body = new string('a', MailLimits.BodyMax);
+        var request = new Packet(GameOpcodes.GS_MAIL);
+        request.WriteByte(MailPacketWriter.SubSend);
+        request.WriteSByteString("Bob");
+        request.WriteSByteString("Long");
+        request.WriteString(body);
+        request.WriteInt(0);
+        request.WriteByte(0);
+
+        await provider.GetRequiredService<IMailPacketCoordinator>().HandleAsync(alice.Client, request);
+        var mail = provider.GetRequiredService<IMailService>();
+        await mail.SendInboxAsync(bob);
+        var inbox = MailPacket(bobSent, MailPacketWriter.SubList);
+        inbox.ReadUShort();
+        await mail.ReadAsync(bob, inbox.ReadInt());
+
+        var read = MailPacket(bobSent, MailPacketWriter.SubRead);
+        read.ReadByte().Should().Be(MailPacketWriter.Succeeded);
+        read.ReadInt();
+        read.ReadString().Should().Be(body);
+    }
+
+    [Fact]
     public async Task ReadAsync_ReturnsBodyAndClearsUnread()
     {
         using var provider = Provider();
@@ -403,7 +480,7 @@ public class MailServiceTests : GameTestBase
         var read = MailPacket(bobSent, MailPacketWriter.SubRead);
         read.ReadByte().Should().Be(MailPacketWriter.Succeeded);
         read.ReadInt().Should().Be(mailId);
-        read.ReadSByteString().Should().Be("Hello Bob.");
+        read.ReadString().Should().Be("Hello Bob.");
 
         await mail.SendUnreadAsync(bob);
         MailPacket(bobSent, MailPacketWriter.SubUnread).ReadUShort().Should().Be(0);

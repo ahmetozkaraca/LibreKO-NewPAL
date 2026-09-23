@@ -38,7 +38,8 @@ public class GmSummonTests : GameTestBase
             {
                 Id = KecoonBandit, Name = "Kecoon Bandit", IsMonster = true, Hp = 800, ActType = 1,
             }));
-        var gm = GameMaster(provider, room: 3);
+        var room = provider.GetRequiredService<InstanceRoomRegistry>().Open(21, set: 1, TimeSpan.FromMinutes(1));
+        var gm = GameMaster(provider, room.Id);
         var bystander = GameMaster(provider, room: 0);
         var coordinator = provider.GetRequiredService<IAdminPacketCoordinator>();
 
@@ -47,7 +48,8 @@ public class GmSummonTests : GameTestBase
         var regions = provider.GetRequiredService<SessionManager>().Regions;
         var bandits = regions.GetNearbyNpcs(gm).Where(n => n.NpcId == KecoonBandit).ToList();
         bandits.Should().HaveCount(3);
-        bandits.Should().OnlyContain(n => n.IsAlive && !n.CanRespawn && n.Room == 3 && n.ZoneId == 21);
+        bandits.Should().OnlyContain(n => n.IsAlive && !n.CanRespawn && n.Room == room.Id && n.ZoneId == 21);
+        room.Npcs.Should().BeEquivalentTo(bandits);
         regions.GetNearbyNpcs(bystander).Should().BeEmpty();
     }
 

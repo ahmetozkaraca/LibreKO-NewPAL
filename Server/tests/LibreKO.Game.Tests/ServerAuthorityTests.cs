@@ -1,5 +1,6 @@
 ﻿using FluentAssertions;
 using LibreKO.Common.Infrastructure.Network;
+using LibreKO.Game.Configuration;
 using LibreKO.Game.Protocol;
 using LibreKO.Game.World;
 using Microsoft.Extensions.DependencyInjection;
@@ -12,6 +13,9 @@ public class ServerAuthorityTests : GameTestBase
     private const byte MoveEchoMove = 3;
     private const float PositionScale = 10f;
     private const byte Zone = 21;
+    private const float RunStepMeters = 0.6f;
+    private const int FullSpeedSteps = 30;
+    private const byte FrozenSpeedAmount = 1;
     private static readonly TimeSpan MoveInterval = TimeSpan.FromMilliseconds(100);
 
     [Fact]
@@ -40,6 +44,23 @@ public class ServerAuthorityTests : GameTestBase
 
         session.X.Should().Be(90);
         session.Z.Should().Be(90);
+    }
+
+    [Fact]
+    public void PacketGuard_NeverDropsASitToggleMashedAsFastAsAHandCan()
+    {
+        const int PressesPerSecond = 10;
+        const int SecondsMashed = 30;
+        var clock = new ManualClock();
+        using var provider = CreateHarness(clock);
+        var (_, client, _) = CreatePlayer(provider, 1003, x: 100, z: 100);
+        var guard = provider.GetRequiredService<IPacketGuard>();
+
+        for (var press = 0; press < PressesPerSecond * SecondsMashed; press++)
+        {
+            guard.Admit(client, GameOpcodes.GS_STATE_CHANGE).Should().BeTrue();
+            clock.Advance(TimeSpan.FromSeconds(1.0 / PressesPerSecond));
+        }
     }
 
     [Fact]
@@ -166,6 +187,39 @@ public class ServerAuthorityTests : GameTestBase
     }
 
     [Fact]
+    public async Task Move_ASlowLandingMidRunIsNotReportedWhileTheClientLearnsOfIt()
+    {
+        var clock = new ManualClock();
+        using var provider = CreateHarness(clock);
+        var (session, client, sent) = CreatePlayer(provider, 1017, x: 100, z: 100);
+
+        var x = await RunAsync(provider, client, clock, 100f, FullSpeedSteps);
+        session.SpeedAmount = FrozenSpeedAmount;
+        sent.Clear();
+        await RunAsync(provider, client, clock, x, StepsWithinSlowdownGrace());
+
+        sent.Should().NotContain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_WARP);
+        provider.GetRequiredService<IViolationMonitor>().ScoreOf(client.Id).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Move_RunningOnThroughASlowPastItsGraceIsReported()
+    {
+        var clock = new ManualClock();
+        using var provider = CreateHarness(clock);
+        var (session, client, sent) = CreatePlayer(provider, 1018, x: 100, z: 100);
+
+        var x = await RunAsync(provider, client, clock, 100f, FullSpeedSteps);
+        session.SpeedAmount = FrozenSpeedAmount;
+        sent.Clear();
+        await RunAsync(provider, client, clock, x, StepsWithinSlowdownGrace() + FullSpeedSteps);
+
+        sent.Should().Contain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_WARP);
+        provider.GetRequiredService<IViolationMonitor>().ScoreOf(client.Id)
+            .Should().BeGreaterThanOrEqualTo(ViolationMonitor.SpeedHackWeight);
+    }
+
+    [Fact]
     public async Task Move_StaleMovesAfterAServerRelocationAreDroppedWithoutPenalty()
     {
         var clock = new ManualClock();
@@ -188,6 +242,36 @@ public class ServerAuthorityTests : GameTestBase
         clock.Advance(MoveInterval);
         await MoveAsync(provider, client, 500.5f, 500);
         session.X.Should().BeApproximately(500.5f, 0.01f);
+    }
+
+    [Fact]
+    public async Task Move_TheFirstLaggedMoveAfterARelocationIsPulledBackWithoutPenalty()
+    {
+        var clock = new ManualClock();
+        using var provider = CreateHarness(clock);
+        var (session, client, sent) = CreatePlayer(provider, 1011, x: 100, z: 100);
+        var monitor = provider.GetRequiredService<IViolationMonitor>();
+        var pastGrace = TimeSpan.FromSeconds(5);
+
+        clock.Advance(MoveInterval);
+        await MoveAsync(provider, client, 100.5f, 100);
+        session.X = 500;
+        session.Z = 500;
+        sent.Clear();
+
+        clock.Advance(MoveInterval);
+        await MoveAsync(provider, client, 101, 100);
+        clock.Advance(pastGrace);
+        await MoveAsync(provider, client, 101.5f, 100);
+
+        session.X.Should().Be(500);
+        sent.Should().Contain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_WARP);
+        monitor.ScoreOf(client.Id).Should().Be(0);
+
+        clock.Advance(pastGrace);
+        await MoveAsync(provider, client, 102, 100);
+
+        monitor.ScoreOf(client.Id).Should().Be(ViolationMonitor.TeleportWeight);
     }
 
     [Fact]
@@ -277,6 +361,55 @@ public class ServerAuthorityTests : GameTestBase
     }
 
     [Fact]
+    public void TryBeginDeath_IsOnlyClaimedForTheDead()
+    {
+        var session = new SessionManager().CreateSession(Substitute.For<IClient>(), characterId: 1, accountId: 1);
+        session.MaxHp = 100;
+        session.Hp = 50;
+
+        session.TryBeginDeath().Should().BeFalse("a player revived before the death was processed is alive");
+
+        session.Hp = 0;
+        session.TryBeginDeath().Should().BeTrue();
+        session.TryBeginDeath().Should().BeFalse();
+    }
+
+    [Fact]
+    public void TryClaimRevival_HoldsOneRevivalUntilTheCorpseStandsUp()
+    {
+        var session = new SessionManager().CreateSession(Substitute.For<IClient>(), characterId: 1, accountId: 1);
+        session.MaxHp = 100;
+        session.Hp = 50;
+
+        session.TryClaimRevival().Should().BeFalse("the living need no revival");
+
+        session.Hp = 0;
+        session.TryClaimRevival().Should().BeTrue();
+        session.TryClaimRevival().Should().BeFalse();
+
+        session.Hp = 100;
+        session.Hp = 0;
+        session.TryClaimRevival().Should().BeTrue("standing up ends the claim");
+    }
+
+    [Fact]
+    public async Task LevelUp_DoesNotRaiseTheDead()
+    {
+        using var provider = CreateHarness(new ManualClock());
+        var (corpse, _, _) = CreatePlayer(provider, 1015, x: 100, z: 100);
+        var (living, _, _) = CreatePlayer(provider, 1016, x: 100, z: 100);
+        var progression = provider.GetRequiredService<IPlayerProgressionService>();
+        corpse.Hp = 0;
+        living.Hp = 1;
+
+        await progression.SetLevelAsync(corpse, (byte)(corpse.Level + 1));
+        await progression.SetLevelAsync(living, (byte)(living.Level + 1));
+
+        corpse.Hp.Should().Be(0);
+        living.Hp.Should().Be(living.MaxHp);
+    }
+
+    [Fact]
     public void Heal_DoesNothingForTheDead()
     {
         var session = new SessionManager().CreateSession(Substitute.For<IClient>(), characterId: 1, accountId: 1);
@@ -356,6 +489,22 @@ public class ServerAuthorityTests : GameTestBase
         packet.ResetOffset();
         return provider.GetRequiredService<IWorldMovementService>().HandleMoveAsync(client, packet);
     }
+
+    private static async Task<float> RunAsync(
+        ServiceProvider provider, IClient client, ManualClock clock, float x, int steps)
+    {
+        for (var step = 0; step < steps; step++)
+        {
+            clock.Advance(MoveInterval);
+            x += RunStepMeters;
+            await MoveAsync(provider, client, x, 100);
+        }
+
+        return x;
+    }
+
+    private static int StepsWithinSlowdownGrace()
+        => (int)(new MovementCheckSettings().SlowdownGraceSeconds / MoveInterval.TotalSeconds) - 1;
 
     private static Packet WarpRequest(ushort x, ushort z)
     {

@@ -177,7 +177,7 @@ public class ClientProtocolTests
 
         return new Connection
         {
-            Client = new Client(socket, serverType, logger),
+            Client = new Client(socket, serverType, logger, new ConnectionLimitsSettings(), TimeProvider.System),
             Peer = peer,
             Listener = listener,
         };

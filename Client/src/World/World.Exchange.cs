@@ -271,6 +271,7 @@ public partial class World
 
     private void BeginTradeRequest(int charId, string name)
     {
+        if (_exShown || _exWaiting || _exRequestPending) return;
         if (_ents.TryGetValue(charId, out var partner)
             && partner.Nation != Net.I.Nation
             && !Net.I.CurrentZoneAbility.CanTrade)
@@ -325,7 +326,7 @@ public partial class World
         if (!_exRequestPending) return;
         _exRequestPending = false;
         Net.I.SendExchangeAgree(accept);
-        if (accept) OpenExchange();
+        if (accept) ShowExchangeWait($"Opening the trade with {_exPartnerName}…");
     }
 
     private void OnExchangeAgree(bool accepted)

@@ -9,6 +9,8 @@ public partial class Net
 
     public const int LootMaxItems = 8;
     public const int LootWireSlots = 12;
+    public const byte LootBundleListed = 1;
+    public const byte LootBundleRefused = 2;
 
     public const float LootRange = 11f;
 
@@ -19,6 +21,8 @@ public partial class Net
     public event Action<int, int, int>? LootTakenEvent;
 
     public event Action<byte>? LootFailEvent;
+
+    public event Action<int>? LootRefusedEvent;
 
     private void HandleItemDrop(Packet p)
     {
@@ -33,10 +37,15 @@ public partial class Net
     {
         if (p.RemainingBytes < 5) return;
         int bundleId = p.ReadInt();
-        bool hasItems = p.ReadByte() != 0;
+        byte state = p.ReadByte();
+        if (state == LootBundleRefused)
+        {
+            LootRefusedEvent?.Invoke(bundleId);
+            return;
+        }
 
         var entries = new List<LootEntry>(LootMaxItems);
-        if (hasItems)
+        if (state == LootBundleListed)
         {
             for (int i = 0; i < LootWireSlots && p.RemainingBytes >= 6; i++)
             {

@@ -121,7 +121,7 @@ public class CharacterPersistenceTests : GameTestBase
         session.Quest.QuestMap[QuestId] = QuestCompleted;
         Stock(session, InventoryConstants.InventoryStart, PotionId, 1);
 
-        await Persister(provider).SaveQuestStateAsync(session);
+        await Persister(provider).RequestSaveAsync(session);
 
         var character = await StoredCharacterAsync(provider);
         character.QuestData.Should().Equal(session.SerializeQuestData());

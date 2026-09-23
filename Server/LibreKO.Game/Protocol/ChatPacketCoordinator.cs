@@ -57,7 +57,10 @@ public class ChatPacketCoordinator(
             {
                 var target = sessionManager.GetByCharacterId(session.PrivateChatUser);
                 if (target == null)
+                {
+                    await session.Client.SendPacket(ChatTargetPacketWriter.WhisperTargetNotFound());
                     break;
+                }
 
                 if (target.BlockPrivateChat && !session.IsGM)
                 {
@@ -84,7 +87,7 @@ public class ChatPacketCoordinator(
 
                 if (!session.IsGM && session.Level < ShoutMinLevel)
                 {
-                    if (!session.WithLock(TryPayShoutFee))
+                    if (!Coins.TryDebit(session, ShoutFee))
                         break;
 
                     await userNotificationService.SendGoldLossAsync(session, ShoutFee);
@@ -172,14 +175,5 @@ public class ChatPacketCoordinator(
                 }
                 break;
         }
-    }
-
-    private static bool TryPayShoutFee(UserSession session)
-    {
-        if (session.Money < ShoutFee)
-            return false;
-
-        session.Money -= ShoutFee;
-        return true;
     }
 }

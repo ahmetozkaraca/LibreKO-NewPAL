@@ -62,14 +62,32 @@ public sealed class InstanceRoomRegistry(SessionManager sessionManager, ILogger<
             Close(room);
     }
 
+    public bool Adopt(ushort roomId, NpcInstance npc)
+    {
+        if (!_rooms.TryGetValue(roomId, out var room))
+            return false;
+
+        lock (room.Npcs)
+        {
+            if (!_rooms.ContainsKey(roomId))
+                return false;
+
+            room.Npcs.Add(npc);
+            return true;
+        }
+    }
+
     public void Close(InstanceRoom room)
     {
         if (!_rooms.TryRemove(room.Id, out _))
             return;
 
-        foreach (var npc in room.Npcs)
-            sessionManager.Regions.RemoveNpc(npc);
-        room.Npcs.Clear();
+        lock (room.Npcs)
+        {
+            foreach (var npc in room.Npcs)
+                sessionManager.Regions.RemoveNpc(npc);
+            room.Npcs.Clear();
+        }
         logger.LogInformation("Instance room {Room} in zone {Zone} closed", room.Id, room.ZoneId);
     }
 }

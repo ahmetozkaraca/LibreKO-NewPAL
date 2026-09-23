@@ -185,6 +185,7 @@ public class WorldAuthorityTests : GameTestBase
 
         player.Session.Money.Should().Be(10_000);
         player.Session.ZoneId.Should().Be(Moradon);
+        LastWarpResult(player).Should().Be(WarpListPacketWriter.ResultNotQualified);
     }
 
     [Fact]
@@ -578,6 +579,7 @@ public class WorldAuthorityTests : GameTestBase
 
         player.Session.X.Should().Be(100);
         player.Sent.Should().NotContain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_WARP);
+        player.Sent.Should().ContainSingle(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_CHAT);
     }
 
     [Fact]
@@ -613,11 +615,10 @@ public class WorldAuthorityTests : GameTestBase
 
     [Theory]
     [InlineData((byte)StateChangeType.Abnormal, 5000)]
+    [InlineData((byte)StateChangeType.Visibility, 1)]
     [InlineData((byte)StateChangeType.Transformation, 107550)]
     [InlineData((byte)StateChangeType.Stealth, 1)]
-    [InlineData((byte)StateChangeType.Pose, (int)UserPoseState.Dead)]
-    [InlineData((byte)StateChangeType.CombatStance, 7)]
-    public async Task StateChange_OnlyWhatTheClientCanSendIsRelayed(byte type, int value)
+    public async Task StateChange_AServerOwnedStateIsRefusedAndScored(byte type, int value)
     {
         using var provider = CreateWorld(new ManualClock());
         var player = CreatePlayer(provider, 2045, Moradon, AccountNation.Karus, level: 40);
@@ -628,6 +629,23 @@ public class WorldAuthorityTests : GameTestBase
         watcher.Sent.Should().NotContain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_STATE_CHANGE);
         provider.GetRequiredService<IViolationMonitor>().ScoreOf(player.Client.Id)
             .Should().Be(ViolationMonitor.InvalidRequestWeight);
+    }
+
+    [Theory]
+    [InlineData((byte)StateChangeType.NeedParty, 1)]
+    [InlineData((byte)StateChangeType.Action, 11)]
+    [InlineData((byte)StateChangeType.Pose, (int)UserPoseState.Dead)]
+    [InlineData((byte)StateChangeType.CombatStance, 7)]
+    public async Task StateChange_AStateTheClientDoesNotDrawIsDroppedWithoutPenalty(byte type, int value)
+    {
+        using var provider = CreateWorld(new ManualClock());
+        var player = CreatePlayer(provider, 2049, Moradon, AccountNation.Karus, level: 40);
+        var watcher = CreatePlayer(provider, 2146, Moradon, AccountNation.ElMorad, level: 40, x: 101, z: 100);
+
+        await ChangeStateAsync(provider, player, type, value);
+
+        watcher.Sent.Should().NotContain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_STATE_CHANGE);
+        provider.GetRequiredService<IViolationMonitor>().ScoreOf(player.Client.Id).Should().Be(0);
     }
 
     [Fact]
@@ -742,11 +760,12 @@ public class WorldAuthorityTests : GameTestBase
     {
         using var provider = CreateWorld(new ManualClock());
         var player = CreatePlayer(provider, 2058, Moradon, AccountNation.Karus, level: 40);
-        var world = World(provider);
+        var speedCheck = provider.GetRequiredService<IInGameOpcodeRouter>().Resolve(GameOpcodes.GS_SPEEDHACK_CHECK);
+        speedCheck.Should().NotBeNull();
 
-        await world.HandleSpeedHackCheckAsync(player.Client, new Packet(GameOpcodes.GS_SPEEDHACK_CHECK));
+        await speedCheck!(player.Client, new Packet(GameOpcodes.GS_SPEEDHACK_CHECK));
         player.Session.X = 220;
-        await world.HandleSpeedHackCheckAsync(player.Client, new Packet(GameOpcodes.GS_SPEEDHACK_CHECK));
+        await speedCheck(player.Client, new Packet(GameOpcodes.GS_SPEEDHACK_CHECK));
 
         player.Session.X.Should().Be(220);
         player.Sent.Should().NotContain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_WARP);
@@ -771,6 +790,119 @@ public class WorldAuthorityTests : GameTestBase
         RegistrationsOf(provider, player.Session).Should().Be(1);
         player.Session.RegisteredRegionKey.Should().NotBe(RegionManager.NoRegionKey);
     }
+
+    [Fact]
+    public async Task ZoneExit_ARefusedGateSaysWhyOnceAndRetriesAfterAPause()
+    {
+        var clock = new ManualClock();
+        using var provider = CreateWorld(clock);
+        UseMaps(provider, ZoneExitMap(RonarkLand, KarusHome));
+        var player = CreatePlayer(provider, 2060, RonarkLand, AccountNation.ElMorad, level: 80);
+
+        await StepAsync(provider, clock, player, 100.5f, 100);
+        await StepAsync(provider, clock, player, 101, 100);
+
+        Notices(player).Should().Be(1);
+
+        clock.Advance(TimeSpan.FromSeconds(WorldMovementService.ZoneGateRetrySeconds));
+        await StepAsync(provider, clock, player, 101.5f, 100);
+
+        Notices(player).Should().Be(2);
+        player.Session.ZoneId.Should().Be(RonarkLand);
+    }
+
+    [Fact]
+    public async Task WarpList_AMerchantCannotLeaveThroughAGate()
+    {
+        using var provider = CreateWorld(new ManualClock());
+        UseMaps(provider, MoradonGateMap());
+        var player = CreatePlayer(provider, 2061, Moradon, AccountNation.Karus, level: 40, x: GateX, z: GateZ);
+        player.Session.Money = 10_000;
+
+        await OpenGateAsync(provider, player);
+        player.Session.Trade.MerchantState = MerchantMode.Selling;
+        await SelectWarpAsync(provider, player, LufersonCastle);
+
+        player.Session.ZoneId.Should().Be(Moradon);
+        player.Session.Money.Should().Be(10_000);
+    }
+
+    [Fact]
+    public async Task WarpList_ATraderCannotHopAcrossTheZone()
+    {
+        using var provider = CreateWorld(new ManualClock());
+        UseMaps(provider, MoradonGateMap());
+        var player = CreatePlayer(provider, 2062, Moradon, AccountNation.Karus, level: 40, x: GateX, z: GateZ);
+        player.Session.Money = 10_000;
+
+        await OpenGateAsync(provider, player);
+        player.Session.Trade.ExchangeUser = 2063;
+        player.Session.Trade.ExchangeStarted = true;
+        await SelectWarpAsync(provider, player, FolkVillage);
+
+        player.Session.X.Should().Be(GateX);
+        player.Session.Money.Should().Be(10_000);
+        LastWarpResult(player).Should().Be(WarpListPacketWriter.ResultNotQualified);
+    }
+
+    [Fact]
+    public async Task InstanceEntry_ThePlayersLeftBehindSeeHimGo()
+    {
+        using var provider = CreateWorld(new ManualClock());
+        var player = CreatePlayer(provider, 2064, Moradon, AccountNation.Karus, level: 40);
+        var watcher = CreatePlayer(provider, 2065, Moradon, AccountNation.Karus, level: 40, x: 101, z: 100);
+        var rooms = provider.GetRequiredService<InstanceRoomRegistry>();
+        var room = rooms.Open(KarusHome, set: 1, TimeSpan.FromMinutes(1));
+
+        rooms.Join(room, player.Session);
+        await provider.GetRequiredService<IZoneTransitionService>().ChangeZoneAsync(player.Session, KarusHome, 100, 100);
+
+        InOuts(watcher, player, InOutType.Out).Should().Be(1);
+    }
+
+    [Fact]
+    public void Reach_PlayersInDifferentRoomsAreNeverInRange()
+    {
+        using var provider = CreateWorld(new ManualClock());
+        var player = CreatePlayer(provider, 2066, Moradon, AccountNation.Karus, level: 40);
+        var other = CreatePlayer(provider, 2067, Moradon, AccountNation.Karus, level: 40, x: 101, z: 100);
+        var npc = new NpcInstance { ZoneId = Moradon, X = 101, Z = 100, Room = 1 };
+
+        Reach.Within(player.Session, other.Session, UnitDistance).Should().BeTrue();
+
+        other.Session.Room = 1;
+
+        Reach.Within(player.Session, other.Session, UnitDistance).Should().BeFalse();
+        Reach.CanInteract(player.Session, npc).Should().BeFalse();
+        Reach.CanInteract(other.Session, npc).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ObjectEvent_AGateInAnotherRoomIsLeftAlone()
+    {
+        const short gateObject = 1300;
+        using var provider = CreateWorld(new ManualClock());
+        UseMaps(provider, CreateMapManagerWithObjectEvent(
+            NapiesGorge,
+            new ObjectEvent { Index = gateObject, Type = GateObject, Belong = 1, PosX = 100, PosZ = 100 }));
+        var regions = provider.GetRequiredService<SessionManager>().Regions;
+        var roomGate = regions.SpawnNpc(new NpcInstance
+        {
+            NpcId = gateObject, ZoneId = NapiesGorge, X = 100, Z = 100, MaxHp = 100, Hp = 100,
+            Nation = EntityNation.Karus, Room = 1,
+        });
+        var player = CreatePlayer(provider, 2068, NapiesGorge, AccountNation.Karus, level: 60);
+
+        var packet = new Packet(GameOpcodes.GS_OBJECT_EVENT);
+        packet.WriteShort(gateObject);
+        packet.WriteInt(roomGate.UniqueId);
+        await World(provider).HandleObjectEventAsync(player.Client, packet);
+
+        roomGate.GateOpen.Should().BeFalse();
+    }
+
+    private static int Notices(Player player)
+        => player.Sent.Count(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_CHAT);
 
     private sealed record Player(UserSession Session, IClient Client, PacketLog Sent);
 

@@ -117,16 +117,13 @@ public class UserSession
     // fan-out to a fixed cadence (instead of one broadcast per received move packet).
     public volatile bool MovePending;
 
-    // Speed-hack check: last validated position. Reset on warp/zone change.
-    public float SpeedLastX { get; set; }
-    public float SpeedLastZ { get; set; }
-
     public MovementCheckState MoveCheck { get; } = new();
 
     public TravelState Travel { get; } = new();
 
     private short _hp;
-    private int _deathHandled;
+    private bool _deathHandled;
+    private bool _revivalPending;
 
     // Derived stats
     public short MaxHp { get; set; }
@@ -136,13 +133,41 @@ public class UserSession
         get => _hp;
         set
         {
+            using var scope = _sync.EnterScope();
             _hp = value;
-            if (value > 0)
-                Volatile.Write(ref _deathHandled, 0);
+            if (value <= 0)
+                return;
+
+            _deathHandled = false;
+            _revivalPending = false;
         }
     }
 
-    public bool TryBeginDeath() => Interlocked.CompareExchange(ref _deathHandled, 1, 0) == 0;
+    public bool TryBeginDeath()
+    {
+        using var scope = _sync.EnterScope();
+        if (_hp > 0 || _deathHandled)
+            return false;
+
+        _deathHandled = true;
+        return true;
+    }
+
+    public bool TryClaimRevival()
+    {
+        using var scope = _sync.EnterScope();
+        if (_hp > 0 || _revivalPending)
+            return false;
+
+        _revivalPending = true;
+        return true;
+    }
+
+    public void ReleaseRevival()
+    {
+        using var scope = _sync.EnterScope();
+        _revivalPending = false;
+    }
 
     public DamageOutcome ApplyDamage(int amount)
     {
@@ -153,6 +178,13 @@ public class UserSession
         var dealt = Math.Min(amount, (int)_hp);
         _hp = (short)(_hp - dealt);
         return new DamageOutcome(dealt, _hp <= 0);
+    }
+
+    public void ClampHpToMax()
+    {
+        using var scope = _sync.EnterScope();
+        if (_hp > MaxHp)
+            _hp = MaxHp;
     }
 
     public int Heal(int amount)
@@ -292,7 +324,7 @@ public class UserSession
     public long CastCommitTicks { get; set; }
     public long CastExpireTicks { get; set; }
     public ConcurrentDictionary<int, long> AcceptedCasts { get; } = new();
-    public ConcurrentDictionary<int, int> PendingArrowHits { get; } = new();
+    public ConcurrentDictionary<int, PendingVolley> PendingArrowHits { get; } = new();
     public long SkillBurstTicks { get; set; }
     public long LastPotionTicks { get; set; }
 
@@ -540,6 +572,7 @@ public class UserSession
         {
             Trade.ExchangeUser = -1;
             Trade.AskedForExchange = false;
+            Trade.ExchangeStarted = false;
         }
 
         return unreturned;
@@ -571,5 +604,6 @@ public class UserSession
         Trade.ExchangeUser = -1;
         Trade.ExchangeOk = false;
         Trade.AskedForExchange = false;
+        Trade.ExchangeStarted = false;
     }
 }

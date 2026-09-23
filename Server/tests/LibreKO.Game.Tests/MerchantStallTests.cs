@@ -18,6 +18,8 @@ public class MerchantStallTests : EconomyTestBase
     private const int Price = 1_000;
     private const short WornDurability = 40;
     private const ushort WantedCount = 5;
+    private const ushort PotionStack = 100;
+    private const int HalfTheCoinCap = CoinMax / 2;
 
     [Fact]
     public async Task StagingAnItemNeedsTheStallSetupOpen()
@@ -192,6 +194,21 @@ public class MerchantStallTests : EconomyTestBase
             sellers.Sum(seller => seller.Money).Should().Be(Price);
             owner.Trade.BuyMerchantItems[0].Should().Match<MerchantItem>(item => item.IsEmpty || item.Count == 0);
         }
+    }
+
+    [Theory]
+    [InlineData(Price, true)]
+    [InlineData(HalfTheCoinCap, false)]
+    public async Task AListingWhoseWholeStackPassesTheCoinCapIsRefused(int unitPrice, bool listed)
+    {
+        using var provider = Provider();
+        var seller = Player(provider, 8201, out _);
+        Give(seller, 0, Potion, PotionStack);
+        seller.Trade.IsSellingMerchantPreparing = true;
+
+        await Merchant(provider, seller, Add(Potion, PotionStack, unitPrice, 0, 0));
+
+        (seller.Trade.MerchantItems[0] is { IsEmpty: false }).Should().Be(listed);
     }
 
     private ServiceProvider Provider() => CreateProvider(_ => { }, gameData =>

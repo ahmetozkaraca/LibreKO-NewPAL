@@ -578,7 +578,7 @@ public class AdminPanelPacketCoordinator(
 
     private async Task RefillVitalsAsync(UserSession session)
     {
-        if (session.Hp > session.MaxHp) session.Hp = session.MaxHp;
+        session.ClampHpToMax();
         if (session.Mp > session.MaxMp) session.Mp = session.MaxMp;
         await combatNotificationService.SendHpChangeAsync(session);
         await combatNotificationService.SendMspChangeAsync(session);

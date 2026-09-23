@@ -44,6 +44,7 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
     private IReadOnlyDictionary<(short NpcType, int TrapNumber), int> _eventTriggersByNpc = new Dictionary<(short, int), int>();
     private IReadOnlyDictionary<(int SellingGroup, byte Line, byte Index), SellingGroupItemData> _sellingGroupItems =
         new Dictionary<(int, byte, byte), SellingGroupItemData>();
+    private IReadOnlySet<int> _sellingGroups = new HashSet<int>();
     public IReadOnlyDictionary<(short Index, bool IsMonster), NpcItemData> NpcItemTable { get; private set; } = new Dictionary<(short, bool), NpcItemData>();
     public IReadOnlyDictionary<int, int[]> MakeItemGroupTable { get; private set; } = new Dictionary<int, int[]>();
     public IReadOnlyDictionary<int, AttendanceRewardData> AttendanceRewardTable { get; private set; } = new Dictionary<int, AttendanceRewardData>();
@@ -208,6 +209,8 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
         return _sellingGroupItems.TryGetValue((sellingGroup, line, index), out var item) ? item : null;
     }
 
+    public bool HasSellingGroup(int sellingGroup) => _sellingGroups.Contains(sellingGroup);
+
     public int GetPremiumProperty(byte premiumType, PremiumPropertyType property)
     {
         if (premiumType == 0)
@@ -291,6 +294,7 @@ public class GameDataService(IServiceScopeFactory scopeFactory, ILogger<GameData
 
             _sellingGroupItems = LoadSeedDictionary(
                 new SellingGroupItemSeed(), x => (x.SellingGroup, x.Line, x.Index), "selling group entries");
+            _sellingGroups = _sellingGroupItems.Keys.Select(key => key.SellingGroup).ToHashSet();
 
             var eventTriggers = await LoadListAsync(db.EventTriggers, "event trigger entries", cancellationToken);
             EventTriggerTable = eventTriggers.ToDictionary(x => x.Index);

@@ -408,12 +408,10 @@ public partial class World
                     if (!HasPendingCast(skillId)) EndCast(skillId);
                     if (requested && s != null && !HasPendingCast(skillId))
                         LogSkillOutcome(s, miss);
-                    if (s != null)
-                    {
-                        if (requested) EnsureSkillCooldown(s);
-                        if (!miss && affected == _myId) ApplyMoveSpeedBuff(s, BuffSeconds(s, data));
-                    }
+                    if (requested && s != null) EnsureSkillCooldown(s);
                 }
+                if (!miss && s != null && affected == _myId)
+                    ApplyMoveSpeedBuff(s, BuffSeconds(s, data));
                 if (!miss && s != null)
                     RegisterBuff(s, affected, BuffSeconds(s, data));
                 if (!miss && s?.IsResurrect == true) Revive(affected);

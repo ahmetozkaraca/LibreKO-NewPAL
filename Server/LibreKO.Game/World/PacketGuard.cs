@@ -14,7 +14,7 @@ public static class OpcodePolicies
     private static readonly TokenRate Inventory = new(40, 20);
     private static readonly TokenRate WorldQuery = new(30, 10);
     private static readonly TokenRate ZoneChange = new(10, 2);
-    private static readonly TokenRate StateToggle = new(10, 2);
+    private static readonly TokenRate StateToggle = new(20, 10);
     private static readonly TokenRate Lookup = new(10, 2);
     private static readonly TokenRate Settings = new(10, 1);
     private static readonly TokenRate Persistence = new(2, 1.0 / 30);
@@ -62,7 +62,11 @@ public sealed class PacketGuard(
 
     public bool Admit(IClient client, GameOpcodes opcode)
     {
-        if (OpcodePolicies.IsServerOnly(opcode) && sessionManager.GetByClientId(client.Id)?.IsGM != true)
+        var session = sessionManager.GetByClientId(client.Id);
+        if (session is { IsClosing: true })
+            return false;
+
+        if (OpcodePolicies.IsServerOnly(opcode) && session?.IsGM != true)
         {
             violations.Report(client, ViolationKind.ServerOnlyOpcode, $"sent server-only opcode {opcode}");
             return false;

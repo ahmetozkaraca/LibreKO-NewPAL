@@ -31,8 +31,6 @@ public class VipWarehousePacketCoordinator(
     private const int VaultDurationDaysSafe1 = 1;
     private const int VaultDurationDaysSafe7 = 7;
     private const int VipWarehousePageSize = 12;
-    private const int ItemNoTradeMin = 900_000_001;
-    private const int ItemNoTradeMax = 999_999_999;
     private const int PinLength = 4;
     private const int PinGuessLimit = 5;
     private const int PinUnlockMinutes = 10;
@@ -89,7 +87,7 @@ public class VipWarehousePacketCoordinator(
 
     private async Task OpenAsync(UserSession session)
     {
-        if (session.VipVaultExpiry <= DateTime.UtcNow)
+        if (session.VipVaultExpiry <= Now)
         {
             await SendResult(session, VipWarehouseSubOpcode.Open, VipWarehouseResult.Expired);
             return;
@@ -105,22 +103,10 @@ public class VipWarehousePacketCoordinator(
         await SendOpenResponseAsync(session);
     }
 
-    private static async Task SendOpenResponseAsync(UserSession session)
+    private async Task SendOpenResponseAsync(UserSession session)
     {
-        // Remaining seconds — client uses this for "expires in X" display.
-        var remaining = (long)Math.Max(0, (session.VipVaultExpiry - DateTime.UtcNow).TotalSeconds);
-
-        var slots = session.WithLock(s =>
-        {
-            var copies = new List<ItemSlot>(UserSession.VipWarehouseMax);
-            for (var i = 0; i < UserSession.VipWarehouseMax; i++)
-            {
-                var copy = new ItemSlot();
-                ItemSlotState.Of(s.VipWarehouse[i]).RestoreTo(copy);
-                copies.Add(copy);
-            }
-            return copies;
-        });
+        var remaining = (long)Math.Max(0, (session.VipVaultExpiry - Now).TotalSeconds);
+        var slots = session.WithLock(s => s.VipWarehouse.Select(slot => ItemStack.Of(slot).ToSlot()).ToList());
 
         await session.Client.SendPacket(WarehousePacketWriter.VipContents(
             VipWarehouseSubOpcode.Open, VipWarehouseResult.Succeeded, (int)Math.Min(remaining, int.MaxValue), slots));
@@ -128,7 +114,7 @@ public class VipWarehousePacketCoordinator(
 
     private async Task InputAsync(UserSession session, Packet packet)
     {
-        if (session.VipVaultExpiry <= DateTime.UtcNow)
+        if (session.VipVaultExpiry <= Now)
         {
             await SendResult(session, VipWarehouseSubOpcode.Input, VipWarehouseResult.Expired);
             return;
@@ -145,16 +131,13 @@ public class VipWarehousePacketCoordinator(
         if (itemData == null
             || srcPos >= InventoryConstants.HaveMax
             || dstPos >= VipWarehousePageSize
-            || (itemId >= ItemNoTradeMin && itemId <= ItemNoTradeMax)
-            || count <= 0
-            || count > InventoryConstants.MaxStackCount
-            || (itemData.Countable == 0 && count != 1))
+            || !ItemTransfer.IsTransferableCount(itemData, count))
         {
             await SendResult(session, VipWarehouseSubOpcode.Input, VipWarehouseResult.Failed);
             return;
         }
 
-        var absSrc = InventoryConstants.SlotMax + srcPos;
+        var absSrc = InventoryConstants.InventoryStart + srcPos;
         var realDst = page * VipWarehousePageSize + dstPos;
         if (realDst >= UserSession.VipWarehouseMax)
         {
@@ -166,11 +149,13 @@ public class VipWarehousePacketCoordinator(
         {
             var source = s.Inventory[absSrc];
             var destination = s.VipWarehouse[realDst];
-            if (source.ItemId != itemId || source.Count < count || !VaultTransfer.Fits(itemData, source, destination, count))
+            if (!ItemTransfer.Holds(source, itemId, itemData, count) || !ItemTransfer.CanEnterAccountVault(source, itemData))
                 return null;
 
-            var change = new VaultChange().Touch(source).Touch(destination);
-            VaultTransfer.Move(source, destination, count);
+            var change = new VaultChange().Touch(source, ItemTransfer.Bag(s.Inventory)).Touch(destination, s.VipWarehouse);
+            if (!ItemTransfer.TryTransfer(source, destination, (ushort)count, itemData.Countable != 0))
+                return null;
+
             s.RecalculateStatsWithBuffs(gameDataService);
             return change;
         });
@@ -194,7 +179,7 @@ public class VipWarehousePacketCoordinator(
         var dstPos = packet.ReadByte();
         var count = packet.ReadInt();
 
-        if (srcPos >= VipWarehousePageSize || dstPos >= InventoryConstants.HaveMax || count <= 0)
+        if (srcPos >= VipWarehousePageSize || dstPos >= InventoryConstants.HaveMax)
         {
             await SendResult(session, VipWarehouseSubOpcode.Output, VipWarehouseResult.Failed);
             return;
@@ -208,25 +193,25 @@ public class VipWarehousePacketCoordinator(
         }
 
         var itemData = gameDataService.GetItem(itemId);
-        if (itemData == null)
+        if (itemData == null || !ItemTransfer.IsTransferableCount(itemData, count))
         {
             await SendResult(session, VipWarehouseSubOpcode.Output, VipWarehouseResult.Failed);
             return;
         }
 
-        var absDst = InventoryConstants.SlotMax + dstPos;
+        var absDst = InventoryConstants.InventoryStart + dstPos;
 
         var success = await CommitAsync(session, s =>
         {
             var source = s.VipWarehouse[realSrc];
             var destination = s.Inventory[absDst];
-            if (source.ItemId != itemId || source.Count < count
-                || (itemData.Countable == 0 && count != 1)
-                || !VaultTransfer.Fits(itemData, source, destination, count))
+            if (!ItemTransfer.Holds(source, itemId, itemData, count))
                 return null;
 
-            var change = new VaultChange().Touch(source).Touch(destination);
-            VaultTransfer.Move(source, destination, count);
+            var change = new VaultChange().Touch(source, s.VipWarehouse).Touch(destination, ItemTransfer.Bag(s.Inventory));
+            if (!ItemTransfer.TryTransfer(source, destination, (ushort)count, itemData.Countable != 0))
+                return null;
+
             s.RecalculateStatsWithBuffs(gameDataService);
             return change;
         });
@@ -243,7 +228,7 @@ public class VipWarehousePacketCoordinator(
 
     private async Task MoveAsync(UserSession session, Packet packet)
     {
-        if (session.VipVaultExpiry <= DateTime.UtcNow)
+        if (session.VipVaultExpiry <= Now)
         {
             await SendResult(session, VipWarehouseSubOpcode.Store, VipWarehouseResult.Expired);
             return;
@@ -273,13 +258,8 @@ public class VipWarehousePacketCoordinator(
         {
             var source = s.VipWarehouse[realSrc];
             var destination = s.VipWarehouse[realDst];
-            if (source.ItemId != itemId || source.IsEmpty || !destination.IsEmpty)
-                return null;
-
-            var change = new VaultChange().Touch(source).Touch(destination);
-            ItemSlotState.Of(source).RestoreTo(destination);
-            source.Clear();
-            return change;
+            var change = new VaultChange().Touch(source, s.VipWarehouse).Touch(destination, s.VipWarehouse);
+            return ItemTransfer.TryMove(source, destination, itemId) ? change : null;
         });
 
         await SendResult(session, VipWarehouseSubOpcode.Store, moved ? VipWarehouseResult.Succeeded : VipWarehouseResult.Failed);
@@ -299,20 +279,10 @@ public class VipWarehousePacketCoordinator(
             return;
         }
 
-        var absSrc = InventoryConstants.SlotMax + srcPos;
-        var absDst = InventoryConstants.SlotMax + dstPos;
+        var absSrc = InventoryConstants.InventoryStart + srcPos;
+        var absDst = InventoryConstants.InventoryStart + dstPos;
 
-        var moved = session.WithLock(s =>
-        {
-            var source = s.Inventory[absSrc];
-            var destination = s.Inventory[absDst];
-            if (source.ItemId != itemId || source.IsEmpty || !destination.IsEmpty)
-                return false;
-
-            ItemSlotState.Of(source).RestoreTo(destination);
-            source.Clear();
-            return true;
-        });
+        var moved = session.WithLock(s => ItemTransfer.TryMove(s.Inventory[absSrc], s.Inventory[absDst], itemId));
 
         await SendResult(session, VipWarehouseSubOpcode.InventoryMove, moved ? VipWarehouseResult.Succeeded : VipWarehouseResult.Failed);
     }
@@ -342,16 +312,16 @@ public class VipWarehousePacketCoordinator(
         var extended = await CommitAsync(session, s =>
         {
             var keySlot = FindKeyItemSlot(s, itemId);
-            if (keySlot < 0)
+            if (keySlot == ItemTransfer.NoSlot)
                 return null;
 
             var slot = s.Inventory[keySlot];
-            var change = new VaultChange { VaultExpiryBefore = s.VipVaultExpiry }.Touch(slot);
-            var basis = s.VipVaultExpiry > DateTime.UtcNow ? s.VipVaultExpiry : DateTime.UtcNow;
+            var change = new VaultChange { VaultExpiryBefore = s.VipVaultExpiry }.Touch(slot, ItemTransfer.Bag(s.Inventory));
+            var now = Now;
+            var basis = s.VipVaultExpiry > now ? s.VipVaultExpiry : now;
             s.VipVaultExpiry = basis.AddDays(days);
 
-            slot.Count--;
-            if (slot.Count == 0) slot.Clear();
+            ItemTransfer.Take(slot, ItemTransfer.SingleItem);
             return change;
         });
 
@@ -363,7 +333,7 @@ public class VipWarehousePacketCoordinator(
 
         var newExpiry = session.VipVaultExpiry;
         await session.Client.SendPacket(WarehousePacketWriter.VipVaultExtended(
-            VipWarehouseSubOpcode.UseVault, VipWarehouseResult.Succeeded, (int)(newExpiry - DateTime.UtcNow).TotalSeconds));
+            VipWarehouseSubOpcode.UseVault, VipWarehouseResult.Succeeded, (int)(newExpiry - Now).TotalSeconds));
 
         logger.LogInformation("{Name} activated VIP vault with key {ItemId}: expires {Expiry:u}",
             session.Name, itemId, newExpiry);
@@ -378,7 +348,7 @@ public class VipWarehousePacketCoordinator(
             if (session.Inventory[i].ItemId == itemId && session.Inventory[i].Count > 0)
                 return i;
         }
-        return -1;
+        return ItemTransfer.NoSlot;
     }
 
     private static async Task SendResult(UserSession session, VipWarehouseSubOpcode sub, VipWarehouseResult result)
@@ -438,7 +408,7 @@ public class VipWarehousePacketCoordinator(
         await session.Client.SendPacket(WarehousePacketWriter.VipPasswordAccepted(
             VipWarehouseSubOpcode.EnterPassword, VipWarehouseResult.Succeeded));
 
-        if (session.VipVaultExpiry > DateTime.UtcNow)
+        if (session.VipVaultExpiry > Now)
             await SendOpenResponseAsync(session);
     }
 
@@ -449,6 +419,8 @@ public class VipWarehousePacketCoordinator(
             s.VipPassword = pin;
             return change;
         });
+
+    private DateTime Now => timeProvider.GetUtcNow().UtcDateTime;
 
     private bool IsUnlocked(UserSession session) =>
         session.VipPassword.Length != PinLength || timeProvider.GetUtcNow() < session.VipUnlockedUntil;
@@ -474,7 +446,12 @@ public class VipWarehousePacketCoordinator(
     private Task<bool> CommitAsync(UserSession session, Func<UserSession, VaultChange?> mutate) =>
         characterStatePersister.RunAsync(session, false, async unit =>
         {
-            var change = session.WithLock(mutate);
+            var change = session.WithLock(s =>
+            {
+                var applied = mutate(s);
+                applied?.Slots.Settle();
+                return applied;
+            });
             if (change == null)
                 return false;
 
@@ -485,34 +462,34 @@ public class VipWarehousePacketCoordinator(
             }
             catch (Exception ex)
             {
-                session.WithLock(s => change.Undo(s, gameDataService));
                 logger.LogWarning(ex, "VIP vault change by {Name} could not be stored", session.Name);
+                if (!session.WithLock(s => change.Undo(s, gameDataService)))
+                    logger.LogError("VIP vault change by {Name} could not be fully undone", session.Name);
                 return false;
             }
         });
 
     private sealed class VaultChange
     {
-        private readonly List<(ItemSlot Slot, ItemSlotState Before)> _touched = [];
-
+        public SlotLedger Slots { get; } = new();
         public DateTime? VaultExpiryBefore { get; init; }
         public string? PinBefore { get; init; }
 
-        public VaultChange Touch(ItemSlot slot)
+        public VaultChange Touch(ItemSlot slot, IReadOnlyList<ItemSlot> home)
         {
-            _touched.Add((slot, ItemSlotState.Of(slot)));
+            Slots.Touch(slot, home);
             return this;
         }
 
-        public void Undo(UserSession session, IGameDataService gameData)
+        public bool Undo(UserSession session, IGameDataService gameData)
         {
-            foreach (var (slot, before) in _touched)
-                before.RestoreTo(slot);
+            var reverted = Slots.Revert(gameData);
             if (VaultExpiryBefore is { } expiry)
                 session.VipVaultExpiry = expiry;
             if (PinBefore != null)
                 session.VipPassword = PinBefore;
             session.RecalculateStatsWithBuffs(gameData);
+            return reverted;
         }
     }
 }

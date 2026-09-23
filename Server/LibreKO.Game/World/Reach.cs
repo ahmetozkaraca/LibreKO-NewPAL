@@ -18,12 +18,13 @@ public static class Reach
         => Within(session.X, session.Z, x, z, range);
 
     public static bool Within(UserSession a, UserSession b, float range)
-        => a.ZoneId == b.ZoneId && Within(a.X, a.Z, b.X, b.Z, range);
+        => a.ZoneId == b.ZoneId && a.Room == b.Room && Within(a.X, a.Z, b.X, b.Z, range);
 
     public static bool Within(UserSession session, NpcInstance npc, float range)
-        => session.ZoneId == npc.ZoneId && Within(session.X, session.Z, npc.X, npc.Z, range);
+        => session.ZoneId == npc.ZoneId && session.Room == npc.Room && Within(session.X, session.Z, npc.X, npc.Z, range);
 
     public static bool CanInteract(UserSession session, NpcInstance npc)
         => session.ZoneId == npc.ZoneId
+            && session.Room == npc.Room
             && DistanceSquared(session.X, session.Z, npc.X, npc.Z) <= GameConstants.MaxNpcInteractionRangeSq;
 }

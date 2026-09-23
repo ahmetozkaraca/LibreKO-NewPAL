@@ -147,12 +147,9 @@ public class MailService(
             }
             catch (Exception ex)
             {
-                session.WithLock(s =>
-                {
-                    parcel.Restore(s);
-                    s.RecalculateStatsWithBuffs(gameDataService);
-                });
                 logger.LogWarning(ex, "Mail from {Sender} to {Recipient} could not be stored", session.Name, recipient.Name);
+                if (!session.WithLock(s => parcel.Restore(s, gameDataService)))
+                    logger.LogError("Mail from {Sender} could not be fully returned to the bag", session.Name);
                 return SendOutcome.Refused("The mail could not be sent.");
             }
 
@@ -165,7 +162,7 @@ public class MailService(
             return;
         }
 
-        foreach (var slot in outcome.Parcel.Taken.Keys)
+        foreach (var slot in outcome.Parcel.Slots)
         {
             var entry = session.Inventory[slot];
             await userNotificationService.SendStackChangeAsync(session, (byte)slot, entry.ItemId, entry.Count, entry.Durability);
@@ -173,7 +170,7 @@ public class MailService(
 
         if (outcome.Parcel.Gold > 0)
             await userNotificationService.SendGoldLossAsync(session, outcome.Parcel.Gold);
-        if (outcome.Parcel.Taken.Count > 0)
+        if (outcome.Parcel.Slots.Count > 0)
             await userNotificationService.SendWeightChangeAsync(session);
 
         logger.LogInformation("{Sender} mailed {Recipient}: '{Subject}' with {Attachments} attachments",
@@ -233,8 +230,9 @@ public class MailService(
             }
             catch (Exception ex)
             {
-                session.WithLock(delivery.Undo);
                 logger.LogWarning(ex, "{Name} could not claim mail {MailId}", session.Name, mailId);
+                if (!session.WithLock(delivery.Undo))
+                    logger.LogError("{Name} kept part of mail {MailId} after the claim failed", session.Name, mailId);
                 return ClaimOutcome.Refused("The attachments could not be claimed.");
             }
 
@@ -282,13 +280,12 @@ public class MailService(
         foreach (var (slot, count, itemData) in picks)
         {
             var entry = session.Inventory[slot];
-            parcel.Taken[slot] = ItemSlotState.Of(entry);
-            var durability = entry.Durability;
-            entry.Count = (ushort)(entry.Count - count);
-            if (entry.Count == 0)
-                entry.Clear();
-            parcel.Drafts.Add(new MailAttachmentDraft(MailAttachmentKind.Item, itemData.Num, count, entry.IsEmpty ? durability : itemData.Duration));
+            parcel.Take(slot, session.Inventory);
+            var taken = ItemTransfer.Take(entry, count);
+            parcel.Drafts.Add(new MailAttachmentDraft(MailAttachmentKind.Item, itemData.Num, count, entry.IsEmpty ? taken.Durability : itemData.Duration));
         }
+
+        parcel.Ledger.Settle();
 
         if (gold > 0)
         {
@@ -306,7 +303,7 @@ public class MailService(
     {
         var delivery = new Delivery(gameDataService);
         var gold = attachments.Where(a => a.Kind == MailAttachmentKind.Gold).Sum(a => (long)a.Count);
-        if (session.Money + gold > ExchangePacketConstants.CoinMax)
+        if (!Coins.CanCredit(session.Money, gold))
             return delivery.Refuse("You cannot carry that much gold.");
 
         foreach (var attachment in attachments.Where(a => a.Kind == MailAttachmentKind.Item))
@@ -320,7 +317,8 @@ public class MailService(
 
         delivery.Gold = (int)gold;
         session.Money += delivery.Gold;
-        if (delivery.Before.Count > 0)
+        delivery.Ledger.Settle();
+        if (delivery.Slots.Count > 0)
             session.RecalculateStatsWithBuffs(gameDataService);
         return delivery;
     }
@@ -331,21 +329,19 @@ public class MailService(
         if (itemData == null)
             return true;
 
+        var stackable = itemData.Countable != 0;
+        var durability = attachment.Durability > 0 ? attachment.Durability : itemData.Duration;
         var remaining = attachment.Count;
         while (remaining > 0)
         {
-            var portion = itemData.Countable == 0 ? 1 : Math.Min(remaining, InventoryConstants.MaxStackCount);
-            var slot = session.FindSlotForItem(attachment.ItemId, gameDataService, (ushort)portion);
-            if (slot < 0)
+            var portion = (ushort)(stackable ? Math.Min(remaining, InventoryConstants.MaxStackCount) : ItemTransfer.SingleItem);
+            var incoming = ItemStack.Fresh(attachment.ItemId, durability, portion);
+            var slot = ItemTransfer.FindBagSlot(session.Inventory, incoming, stackable);
+            if (slot == ItemTransfer.NoSlot)
                 return false;
 
-            var entry = session.Inventory[slot];
-            delivery.Before.TryAdd(slot, ItemSlotState.Of(entry));
-            var isNew = entry.IsEmpty;
-            entry.ItemId = attachment.ItemId;
-            entry.Count = (ushort)(entry.Count + portion);
-            if (isNew)
-                entry.Durability = attachment.Durability > 0 ? attachment.Durability : itemData.Duration;
+            delivery.Touch(slot, session.Inventory);
+            ItemTransfer.Put(session.Inventory[slot], incoming);
             remaining -= portion;
         }
 
@@ -354,15 +350,16 @@ public class MailService(
 
     private async Task NotifyDeliveryAsync(UserSession session, Delivery delivery)
     {
-        foreach (var (slot, before) in delivery.Before)
+        foreach (var slot in delivery.Slots)
         {
             var entry = session.Inventory[slot];
-            await userNotificationService.SendStackChangeAsync(session, (byte)slot, entry.ItemId, entry.Count, entry.Durability, before.ItemId == 0);
+            await userNotificationService.SendStackChangeAsync(
+                session, (byte)slot, entry.ItemId, entry.Count, entry.Durability, delivery.Ledger.Before(entry).IsEmpty);
         }
 
         if (delivery.Gold > 0)
             await userNotificationService.SendGoldGainAsync(session, delivery.Gold);
-        if (delivery.Before.Count > 0)
+        if (delivery.Slots.Count > 0)
             await userNotificationService.SendWeightChangeAsync(session);
     }
 
@@ -435,23 +432,32 @@ public class MailService(
     private sealed class Parcel(int gold)
     {
         public int Gold { get; } = gold;
-        public Dictionary<int, ItemSlotState> Taken { get; } = [];
+        public List<int> Slots { get; } = [];
+        public SlotLedger Ledger { get; } = new();
         public List<MailAttachmentDraft> Drafts { get; } = [];
         public string? Error { get; private init; }
 
         public static Parcel Refused(string error) => new(0) { Error = error };
 
-        public void Restore(UserSession session)
+        public void Take(int slot, ItemSlot[] inventory)
         {
-            foreach (var (slot, before) in Taken)
-                before.RestoreTo(session.Inventory[slot]);
+            Slots.Add(slot);
+            Ledger.Touch(inventory[slot], ItemTransfer.Bag(inventory));
+        }
+
+        public bool Restore(UserSession session, IGameDataService gameData)
+        {
+            var restored = Ledger.Revert(gameData);
             session.Money += Gold;
+            session.RecalculateStatsWithBuffs(gameData);
+            return restored;
         }
     }
 
     private sealed class Delivery(IGameDataService gameData)
     {
-        public Dictionary<int, ItemSlotState> Before { get; } = [];
+        public List<int> Slots { get; } = [];
+        public SlotLedger Ledger { get; } = new();
         public int Gold { get; set; }
         public string? Error { get; private set; }
 
@@ -461,15 +467,22 @@ public class MailService(
             return this;
         }
 
-        public void Undo(UserSession session)
+        public void Touch(int slot, ItemSlot[] inventory)
         {
-            foreach (var (slot, before) in Before)
-                before.RestoreTo(session.Inventory[slot]);
+            if (!Slots.Contains(slot))
+                Slots.Add(slot);
+            Ledger.Touch(inventory[slot], ItemTransfer.Bag(inventory));
+        }
+
+        public bool Undo(UserSession session)
+        {
+            var reverted = Ledger.Revert(gameData);
             session.Money -= Gold;
             Gold = 0;
-            if (Before.Count > 0)
+            if (Slots.Count > 0)
                 session.RecalculateStatsWithBuffs(gameData);
-            Before.Clear();
+            Slots.Clear();
+            return reverted;
         }
     }
 }

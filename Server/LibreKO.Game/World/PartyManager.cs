@@ -6,6 +6,7 @@ public class PartyGroup
 {
     public const int MaxMembers = 8;
     public const short NoMember = -1;
+    public const int SmallestParty = 2;
 
     private readonly Lock _sync = new();
 
@@ -69,15 +70,22 @@ public class PartyGroup
         return true;
     }
 
-    public bool TryRemoveMember(short memberId)
+    public PartyRemoval Remove(short memberId, out short[] disbandedMembers)
     {
         using var scope = _sync.EnterScope();
+        disbandedMembers = [];
         var slot = FindMember(memberId);
-        if (slot <= 0)
-            return false;
+        if (slot < 0)
+            return PartyRemoval.NotMember;
+
+        if (slot == 0 || MemberCount <= SmallestParty)
+        {
+            disbandedMembers = Disband();
+            return PartyRemoval.Disbanded;
+        }
 
         MemberIds[slot] = NoMember;
-        return true;
+        return PartyRemoval.Removed;
     }
 
     public bool TryPromote(short leaderId, short newLeaderId)
@@ -101,6 +109,13 @@ public class PartyGroup
         Array.Fill(MemberIds, NoMember);
         return members;
     }
+}
+
+public enum PartyRemoval
+{
+    NotMember,
+    Removed,
+    Disbanded,
 }
 
 public readonly record struct PartyInvite(int PartyIndex, DateTimeOffset ExpiresAt);
@@ -132,16 +147,29 @@ public class PartyManager
         _parties.TryRemove(index, out _);
     }
 
-    public void Invite(int inviteeId, int partyIndex, DateTimeOffset now)
+    public int? Invite(int inviteeId, int partyIndex, DateTimeOffset now)
     {
+        var replaced = _invites.TryGetValue(inviteeId, out var previous) && previous.PartyIndex != partyIndex
+            ? previous.PartyIndex
+            : (int?)null;
+        _invites[inviteeId] = new PartyInvite(partyIndex, now + InviteLifetime);
+        return replaced;
+    }
+
+    public List<int> SweepLapsedInvites(DateTimeOffset now)
+    {
+        var lapsed = new List<int>();
         foreach (var pending in _invites)
         {
-            if (pending.Value.ExpiresAt < now)
-                _invites.TryRemove(pending);
+            if (pending.Value.ExpiresAt < now && _invites.TryRemove(pending))
+                lapsed.Add(pending.Value.PartyIndex);
         }
 
-        _invites[inviteeId] = new PartyInvite(partyIndex, now + InviteLifetime);
+        return lapsed;
     }
+
+    public bool HasLiveInvites(int partyIndex, DateTimeOffset now)
+        => _invites.Values.Any(invite => invite.PartyIndex == partyIndex && invite.ExpiresAt >= now);
 
     public bool TryTakeInvite(int inviteeId, out PartyInvite invite)
         => _invites.TryRemove(inviteeId, out invite);

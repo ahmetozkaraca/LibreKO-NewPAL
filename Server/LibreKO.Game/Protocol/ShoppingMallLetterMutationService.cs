@@ -147,8 +147,9 @@ public class ShoppingMallLetterMutationService(
             }
             catch (Exception ex)
             {
-                session.WithLock(s => taken.Undo(s, gameDataService));
                 logger.LogWarning(ex, "{Name} could not send a letter to {Recipient}", session.Name, recipientName);
+                if (!session.WithLock(s => taken.Undo(s, gameDataService)))
+                    logger.LogError("{Name} could not get back the item of an unsent letter", session.Name);
                 return Postage.Refused(Rejected);
             }
 
@@ -252,8 +253,9 @@ public class ShoppingMallLetterMutationService(
             }
             catch (Exception ex)
             {
-                session.WithLock(s => received.Undo(s, gameDataService));
                 logger.LogWarning(ex, "{Name} could not take the contents of letter {LetterId}", session.Name, letterId);
+                if (!session.WithLock(s => received.Undo(s, gameDataService)))
+                    logger.LogError("{Name} kept part of letter {LetterId} after the claim failed", session.Name, letterId);
                 return Receipt.Refused(Rejected);
             }
 
@@ -267,7 +269,7 @@ public class ShoppingMallLetterMutationService(
             return;
         }
 
-        if (receipt.Slot >= 0)
+        if (receipt.Slot != ItemTransfer.NoSlot)
         {
             var slotEntry = session.Inventory[receipt.Slot];
             await userNotificationService.SendStackChangeAsync(
@@ -276,7 +278,7 @@ public class ShoppingMallLetterMutationService(
                 slotEntry.ItemId,
                 slotEntry.Count,
                 slotEntry.Durability,
-                receipt.Before.ItemId == 0);
+                receipt.Before.IsEmpty);
         }
 
         if (receipt.Coins > 0)
@@ -294,7 +296,7 @@ public class ShoppingMallLetterMutationService(
         if (letterType != ShoppingMallLetterProtocol.LetterTypeItem)
         {
             session.Money -= cost;
-            return new Postage(Succeeded, cost, -1, default);
+            return new Postage(Succeeded, cost, ItemTransfer.NoSlot, default, new SlotLedger());
         }
 
         var sourceIndex = InventoryConstants.InventoryStart + sourcePosition;
@@ -308,40 +310,46 @@ public class ShoppingMallLetterMutationService(
         if (!ItemTransfer.CanLeaveOwner(itemSlot, gameDataService.GetItem(itemId)))
             return Postage.Refused(SendItemNotMailable);
 
-        var before = ItemSlotState.Of(itemSlot);
+        var before = ItemStack.Of(itemSlot);
+        var ledger = new SlotLedger().Touch(itemSlot, ItemTransfer.Bag(session.Inventory));
         session.Money -= cost;
         itemSlot.Clear();
+        ledger.Settle();
         session.RecalculateStatsWithBuffs(gameDataService);
-        return new Postage(Succeeded, cost, sourceIndex, before);
+        return new Postage(Succeeded, cost, sourceIndex, before, ledger);
     }
 
     private Receipt Receive(UserSession session, MailBox letter)
     {
-        if (letter.Coins < 0 || (long)session.Money + letter.Coins > ExchangePacketConstants.CoinMax)
+        if (!Coins.CanCredit(session.Money, letter.Coins))
             return Receipt.Refused(Rejected);
 
-        var slot = -1;
-        ItemSlotState before = default;
+        var slot = ItemTransfer.NoSlot;
+        ItemStack before = default;
+        var ledger = new SlotLedger();
         if (letter.ItemId > 0)
         {
-            slot = session.FindSlotForItem(letter.ItemId, gameDataService, (ushort)letter.Count);
             var itemData = gameDataService.GetItem(letter.ItemId);
-            if (slot < 0 || itemData == null || !CanReceiveItem(session, itemData, letter.Count))
+            if (itemData == null || !CanReceiveItem(session, itemData, letter.Count))
+                return Receipt.Refused(Rejected);
+
+            var incoming = ItemStack.Fresh(letter.ItemId, letter.Durability, (ushort)letter.Count);
+            slot = ItemTransfer.FindBagSlot(session.Inventory, incoming, itemData.Countable != 0);
+            if (slot == ItemTransfer.NoSlot)
                 return Receipt.Refused(Rejected);
 
             var slotEntry = session.Inventory[slot];
-            before = ItemSlotState.Of(slotEntry);
-            var isNewItem = slotEntry.IsEmpty;
-            slotEntry.ItemId = letter.ItemId;
-            slotEntry.Count += (ushort)letter.Count;
-            slotEntry.Durability = isNewItem
-                ? letter.Durability
-                : (short)(slotEntry.Durability + letter.Durability);
+            before = ItemStack.Of(slotEntry);
+            ledger.Touch(slotEntry, ItemTransfer.Bag(session.Inventory));
+            ItemTransfer.Put(slotEntry, incoming);
+            if (!before.IsEmpty)
+                slotEntry.Durability = (short)(before.Durability + letter.Durability);
+            ledger.Settle();
             session.RecalculateStatsWithBuffs(gameDataService);
         }
 
         session.Money += letter.Coins;
-        return new Receipt(Succeeded, slot, before, letter.Coins);
+        return new Receipt(Succeeded, slot, before, ledger, letter.Coins);
     }
 
     private static bool CanReceiveItem(UserSession session, ItemData itemData, short count)
@@ -353,35 +361,37 @@ public class ShoppingMallLetterMutationService(
         return session.Stats.ItemWeight + totalWeight <= session.Stats.MaxWeight;
     }
 
-    private readonly record struct Postage(byte Result, int Cost, int SourceIndex, ItemSlotState Before)
+    private readonly record struct Postage(byte Result, int Cost, int SourceIndex, ItemStack Before, SlotLedger Ledger)
     {
-        public bool TookItem => SourceIndex >= 0;
+        public bool TookItem => SourceIndex != ItemTransfer.NoSlot;
 
-        public static Postage Refused(byte result) => new(result, 0, -1, default);
+        public static Postage Refused(byte result) => new(result, 0, ItemTransfer.NoSlot, default, new SlotLedger());
 
-        public void Undo(UserSession session, IGameDataService gameData)
+        public bool Undo(UserSession session, IGameDataService gameData)
         {
             session.Money += Cost;
             if (!TookItem)
-                return;
+                return true;
 
-            Before.RestoreTo(session.Inventory[SourceIndex]);
+            var restored = Ledger.Revert(gameData);
             session.RecalculateStatsWithBuffs(gameData);
+            return restored;
         }
     }
 
-    private readonly record struct Receipt(byte Result, int Slot, ItemSlotState Before, int Coins)
+    private readonly record struct Receipt(byte Result, int Slot, ItemStack Before, SlotLedger Ledger, int Coins)
     {
-        public static Receipt Refused(byte result) => new(result, -1, default, 0);
+        public static Receipt Refused(byte result) => new(result, ItemTransfer.NoSlot, default, new SlotLedger(), 0);
 
-        public void Undo(UserSession session, IGameDataService gameData)
+        public bool Undo(UserSession session, IGameDataService gameData)
         {
             session.Money -= Coins;
-            if (Slot < 0)
-                return;
+            if (Slot == ItemTransfer.NoSlot)
+                return true;
 
-            Before.RestoreTo(session.Inventory[Slot]);
+            var reverted = Ledger.Revert(gameData);
             session.RecalculateStatsWithBuffs(gameData);
+            return reverted;
         }
     }
 }

@@ -8,8 +8,8 @@ public partial class World
     private const int UpgradeSlotCount = 10;
     private const byte UpgradeTypeNormal = 1;
     private const byte UpgradeTypePreview = 2;
-    private const byte UpgradeResultFailed = 0;
-    private const byte UpgradeResultSucceeded = 1;
+    private const byte UpgradeResultFailed = UpgradeOutcome.Failed;
+    private const byte UpgradeResultSucceeded = UpgradeOutcome.Succeeded;
     private const byte UpgradeResultTrading = 2;
     private const byte UpgradeResultNeedCoins = 3;
     private const byte UpgradeResultNoMatch = 4;
@@ -49,7 +49,7 @@ public partial class World
     private Button _upgradeBtn = null!;
     private UpgradeSocket _upgradeResultSocket = null!;
     private bool _upgradeShown;
-    private bool _upgradeBusy;
+    private readonly PendingReply _upgradeReply = new();
     private int _upgradeAnvilId;
     private int _upgradePreviewId;
     private Notice? _upgradeConfirm;
@@ -191,7 +191,7 @@ public partial class World
     private void OnUpgradeOpen(int anvilId)
     {
         _upgradeAnvilId = anvilId;
-        _upgradeBusy = false;
+        _upgradeReply.Settle();
         ClearUpgradeSockets();
         RefreshUpgradeBackpack();
         _upgradeTarget.Text = "Place the item to upgrade.";
@@ -207,7 +207,7 @@ public partial class World
         if (!_upgradeShown) return;
         _upgradeShown = false;
         _upgradePanel.Visible = false;
-        _upgradeBusy = false;
+        _upgradeReply.Settle();
         HideItemTooltip();
         DismissUpgradeConfirm();
     }
@@ -281,7 +281,7 @@ public partial class World
 
     private void PlaceUpgradeItem(int absSlot)
     {
-        if (_upgradeBusy || absSlot < GridStart || absSlot >= Inv.Length || Inv[absSlot].IsEmpty)
+        if (_upgradeReply.Waiting || absSlot < GridStart || absSlot >= Inv.Length || Inv[absSlot].IsEmpty)
             return;
 
         int rel = absSlot - GridStart;
@@ -326,7 +326,7 @@ public partial class World
 
     private void ClearUpgradeSocket(int index)
     {
-        if (index < 0 || index >= _upgradeItemIds.Length || _upgradeBusy) return;
+        if (index < 0 || index >= _upgradeItemIds.Length || _upgradeReply.Waiting) return;
         if (_upgradeItemIds[index] == 0) return;
         _upgradeItemIds[index] = 0;
         _upgradePositions[index] = -1;
@@ -467,14 +467,18 @@ public partial class World
     {
         _upgradeConfirm = null;
         if (!CanSendUpgrade()) return;
-        _upgradeBusy = true;
+        AwaitReply(_upgradeReply, () =>
+        {
+            RefreshUpgradeActions();
+            SetUpgradeStatus(NoReplyText, true);
+        });
         RefreshUpgradeActions();
         SetUpgradeStatus($"{UpgradeOperationName()} in progress...", false);
         Net.I.SendUpgradeRequest(_upgradeAnvilId, _upgradeItemIds, _upgradePositions, preview: false);
     }
 
     private bool CanSendUpgrade()
-        => _upgradeShown && !_upgradeBusy && _upgradeAnvilId != 0
+        => _upgradeShown && !_upgradeReply.Waiting && _upgradeAnvilId != 0
            && _upgradeItemIds[0] != 0 && _upgradePreviewId != 0;
 
     private void OnUpgradeResult(UpgradeResult result)
@@ -485,7 +489,7 @@ public partial class World
             return;
         }
 
-        _upgradeBusy = false;
+        _upgradeReply.Settle();
         int resultItemId = result.Slots.Length > 0 ? result.Slots[0].ItemId : 0;
 
         switch (result.ResultCode)
@@ -495,6 +499,10 @@ public partial class World
                 _upgradeResultSocket.Set(resultItemId, 1, ResultDurability(resultItemId));
                 SetUpgradeStatus("Upgrade succeeded.", false);
                 CombatNotice($"Upgrade succeeded: {ItemData.DisplayName(resultItemId)}");
+                break;
+            case UpgradeResultFailed when resultItemId != 0:
+                SetUpgradeStatus("Upgrade failed — the item survived.", true);
+                CombatNotice($"The upgrade failed but {ItemData.DisplayName(resultItemId)} survived.");
                 break;
             case UpgradeResultFailed:
                 SetUpgradeStatus("Upgrade failed — the item was destroyed.", true);
@@ -633,7 +641,7 @@ public partial class World
             }
         }
         RefreshUpgradeBackpack();
-        if (dropped && !_upgradeBusy) OnUpgradeBenchChanged();
+        if (dropped && !_upgradeReply.Waiting) OnUpgradeBenchChanged();
     }
 
     private void OnUpgradeInventoryGrid(ItemSlot[] items)

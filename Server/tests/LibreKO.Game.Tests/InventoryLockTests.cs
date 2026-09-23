@@ -96,6 +96,7 @@ public class InventoryLockTests : EconomyTestBase
             case LockedBy.Trade:
                 player.Trade.ExchangeUser = partner.CharacterId;
                 partner.Trade.ExchangeUser = player.CharacterId;
+                player.Trade.ExchangeStarted = partner.Trade.ExchangeStarted = true;
                 break;
             case LockedBy.StallSetup:
                 player.Trade.IsSellingMerchantPreparing = true;

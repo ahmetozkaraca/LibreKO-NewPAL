@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
@@ -11,6 +11,10 @@ public sealed class PartyPacketWriter
     public const byte MemberPromotedToLeader = 100;
 
     public const int NoTargetMark = -1;
+
+    public const short InviteFailed = -1;
+    public const short LevelGapTooWide = -2;
+    public const short DifferentZone = -3;
     private const byte TrailingDefault = 0;
 
     public readonly record struct MemberState(

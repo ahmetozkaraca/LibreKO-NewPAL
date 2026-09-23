@@ -27,9 +27,6 @@ public class KingElectionTimerService(
     private const byte ELECTION_TYPE_TERM_STARTED = 6;
     private const byte ELECTION_TYPE_TERM_ENDED = 7;
 
-    private const byte ELECTION_LIST_SENATOR = 3;
-    private const byte ELECTION_LIST_CANDIDATE = 4;
-
     private DateTime _lastBroadcast = DateTime.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -205,7 +202,7 @@ public class KingElectionTimerService(
             appDb.KingElectionList.Add(new KingElectionList
             {
                 Nation = nation,
-                Type = ELECTION_LIST_SENATOR,
+                Type = KingPacketConstants.ElectionListSenator,
                 Name = clan.Chief,
                 Knights = clan.Id,
                 Money = 0

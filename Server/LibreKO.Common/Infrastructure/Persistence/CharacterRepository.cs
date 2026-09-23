@@ -37,6 +37,12 @@ public class CharacterRepository(AppDbContext context) : ICharacterRepository
         return await context.Characters.AnyAsync(c => c.Name == name);
     }
 
+    public Task<bool> ExistsInNationAsync(string name, AccountNation nation)
+        => context.Characters
+            .Where(character => character.Name == name)
+            .Join(context.Accounts, character => character.AccountId, account => account.Id, (_, account) => account.Nation)
+            .AnyAsync(accountNation => accountNation == nation);
+
     public async Task<Character?> GetByName(string name)
     {
         return await context.Characters.SingleOrDefaultAsync(c => c.Name == name);

@@ -48,7 +48,7 @@ public class MagicOverTimeService(
         var npcTargets = new List<NpcInstance>();
         ResolveOverTimeTargets(caster, magic, type3Data, targetId, data, isHeal, playerTargets, npcTargets);
 
-        if ((targetId != -1 && playerTargets.Count == 0 && npcTargets.Count == 0) || !await charge.TryPayAsync())
+        if ((targetId != MagicTargetingService.AreaTargetId && playerTargets.Count == 0 && npcTargets.Count == 0) || !await charge.TryPayAsync())
         {
             await MagicCombatHelper.SendMagicFailAsync(caster, skillId);
             return;
@@ -97,7 +97,7 @@ public class MagicOverTimeService(
                     MagicProcessOpcode.Effecting,
                     skillId,
                     (short)caster.CharacterId,
-                    -1,
+                    MagicTargetingService.AreaTargetId,
                     data),
                 excludeSender: false);
             return;
@@ -124,7 +124,7 @@ public class MagicOverTimeService(
         List<UserSession> playerTargets,
         List<NpcInstance> npcTargets)
     {
-        if (type3Data.Radius > 0 && (targetId == -1 || HasAreaCoordinates(data)))
+        if (type3Data.Radius > 0 && (targetId == MagicTargetingService.AreaTargetId || HasAreaCoordinates(data)))
         {
             ResolveAreaTargets(caster, magic, type3Data, data, playerTargets, npcTargets);
             return;
@@ -498,7 +498,7 @@ public class MagicOverTimeService(
         || (data.Length > 2 && data[2] != 0);
 
     private static bool IsAreaEffect(MagicType3Data type3Data, int targetId, int[] data) =>
-        type3Data.Radius > 0 && (targetId == -1 || HasAreaCoordinates(data));
+        type3Data.Radius > 0 && (targetId == MagicTargetingService.AreaTargetId || HasAreaCoordinates(data));
 
     private static float GetAreaCoordinate(int value, float fallback)
     {

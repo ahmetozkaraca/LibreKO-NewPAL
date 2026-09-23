@@ -49,9 +49,6 @@ public class PreGameService(
     private const byte NewCharacterStartZone = (byte)ZoneId.Moradon;
     private const int MaxSocialNumberLength = 15;
 
-    private const byte ChangeHairSucceeded = 0;
-    private const byte ChangeHairFailed = 1;
-
     public async Task<GameLoginResult> LoginAsync(string login, string password)
     {
         var loggedLogin = LogSanitizer.Clean(login);
@@ -329,20 +326,20 @@ public class PreGameService(
     {
         if (subOpcode is not 0 and not 1 || !CharacterRules.IsValidAppearance(face, hair))
         {
-            return PreGamePacketWriter.ChangeHairResult(ChangeHairFailed);
+            return PreGamePacketWriter.ChangeHairResult(PreGamePacketWriter.ChangeHairFailed);
         }
 
         var character = await characterRepository.GetByName(characterName);
         if (character == null || character.AccountId != accountId || character.DeletionTime != null)
         {
-            return PreGamePacketWriter.ChangeHairResult(ChangeHairFailed);
+            return PreGamePacketWriter.ChangeHairResult(PreGamePacketWriter.ChangeHairFailed);
         }
 
         character.Face = face;
         character.Hair = hair;
         await characterRepository.UpdateAsync(character);
 
-        return PreGamePacketWriter.ChangeHairResult(ChangeHairSucceeded);
+        return PreGamePacketWriter.ChangeHairResult(PreGamePacketWriter.ChangeHairSucceeded);
     }
 
     public async Task<List<Packet>> GameStartAsync(int characterId, int accountId, byte subOpcode, UserSession? session = null)

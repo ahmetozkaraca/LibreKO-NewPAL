@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
 using FluentAssertions;
 using LibreKO.Common.Infrastructure.Network;
@@ -20,7 +20,7 @@ public class ClientTests
         using var serverSocket = await listener.AcceptSocketAsync();
         await connectTask;
 
-        using var client = new Client(serverSocket, ServerType.Game, NullLogger<Client>.Instance);
+        using var client = new Client(serverSocket, ServerType.Game, NullLogger<Client>.Instance, new ConnectionLimitsSettings(), TimeProvider.System);
         client.Dispose();
 
         var packet = new Packet(0x01);

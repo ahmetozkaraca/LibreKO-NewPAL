@@ -16,11 +16,8 @@ public static class StealthSight
     public static bool DetectsUnaided(UserSession viewer, UserSession target)
         => viewer.CharacterId == target.CharacterId
             || viewer.IsGM
-            || SharesParty(viewer, target)
+            || PvpRules.SharesPartyWith(viewer, target)
             || IsCompatriot(viewer, target);
-
-    private static bool SharesParty(UserSession viewer, UserSession target)
-        => viewer.IsInParty && viewer.PartyIndex == target.PartyIndex;
 
     private static bool IsCompatriot(UserSession viewer, UserSession target)
         => viewer.Nation == target.Nation

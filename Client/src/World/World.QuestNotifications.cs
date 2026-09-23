@@ -101,11 +101,8 @@ public partial class World
 
     private void DismissQuestNotifications()
     {
-        var ids = _questNotifications.Select(q => q.QuestId).ToArray();
         _questNotifications.Clear();
         _questNotificationIndex = 0;
         RefreshQuestNotification();
-        foreach (var id in ids)
-            Net.I.SendQuestNotificationReply(id, -1);
     }
 }

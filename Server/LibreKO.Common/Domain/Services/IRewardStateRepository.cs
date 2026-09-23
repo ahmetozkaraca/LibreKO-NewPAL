@@ -10,7 +10,7 @@ public interface IRewardStateRepository
     Task<IReadOnlyList<RouletteSpin>> GetRecentSpinsAsync(int characterId, int count);
     Task<IReadOnlyList<PrizePool>> GetDailyClaimsAsync(int accountId, DateOnly day);
     Task SaveQuestProgressAsync(IReadOnlyCollection<CharacterRewardQuest> progress);
-    Task<bool> ClaimQuestAsync(CharacterRewardQuest claim, int eventCoins);
-    Task<bool> SpendEventCoinsAsync(RouletteSpin spin, int cost);
-    Task<bool> ClaimDailyRewardAsync(DailyRewardClaim claim);
+    Task<bool> StageQuestClaimAsync(CharacterRewardQuest claim, int eventCoins);
+    Task<bool> StageRouletteSpinAsync(RouletteSpin spin, int cost);
+    Task<bool> StageDailyRewardClaimAsync(DailyRewardClaim claim);
 }

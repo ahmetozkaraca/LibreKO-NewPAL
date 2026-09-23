@@ -18,6 +18,9 @@ public sealed class MovementCheckState
     public long Timestamp;
     public float Budget;
     public long GraceUntil;
+    public bool PardonPending;
+    public float GrantedSpeed;
+    public long SlowdownGraceUntil;
 }
 
 public interface IMovementValidator
@@ -34,6 +37,7 @@ public sealed class MovementValidator(
 
     private const float PositionEpsilon = 0.05f;
     private const float PercentScale = 100f;
+    private const long NoSlowdownGrace = 0;
 
     public MoveVerdict Check(UserSession session, float x, float z)
     {
@@ -47,7 +51,7 @@ public sealed class MovementValidator(
             return MoveVerdict.Accept;
         }
 
-        var maxSpeed = MaxSpeed(session, options);
+        var maxSpeed = GrantedSpeed(state, MaxSpeed(session, options), now, options);
         if (!state.Initialized || Relocated(session, state))
         {
             state.Budget = state.Initialized ? 0f : maxSpeed * options.BurstSeconds;
@@ -56,6 +60,7 @@ public sealed class MovementValidator(
             state.Z = session.Z;
             state.Timestamp = now;
             state.GraceUntil = now + Ticks(options.RelocationGraceSeconds);
+            state.PardonPending = true;
         }
 
         var elapsed = (float)time.GetElapsedTime(state.Timestamp, now).TotalSeconds;
@@ -74,6 +79,12 @@ public sealed class MovementValidator(
             return MoveVerdict.Ignore;
 
         state.GraceUntil = now + Ticks(options.RelocationGraceSeconds);
+        if (state.PardonPending)
+        {
+            state.PardonPending = false;
+            return MoveVerdict.Reject;
+        }
+
         violations.Report(
             session,
             distance > TeleportDistance ? ViolationKind.Teleport : ViolationKind.SpeedHack,
@@ -89,6 +100,21 @@ public sealed class MovementValidator(
             : speed;
     }
 
+    private float GrantedSpeed(MovementCheckState state, float speed, long now, MovementCheckSettings options)
+    {
+        if (speed < state.GrantedSpeed)
+        {
+            if (state.SlowdownGraceUntil == NoSlowdownGrace)
+                state.SlowdownGraceUntil = now + Ticks(options.SlowdownGraceSeconds);
+            if (now < state.SlowdownGraceUntil)
+                return state.GrantedSpeed;
+        }
+
+        state.GrantedSpeed = speed;
+        state.SlowdownGraceUntil = NoSlowdownGrace;
+        return speed;
+    }
+
     private static bool Relocated(UserSession session, MovementCheckState state)
         => MathF.Abs(session.X - state.X) > PositionEpsilon || MathF.Abs(session.Z - state.Z) > PositionEpsilon;
 
@@ -99,6 +125,7 @@ public sealed class MovementValidator(
         state.Z = z;
         state.Timestamp = now;
         state.Budget = budget;
+        state.PardonPending = false;
     }
 
     private long Ticks(float seconds) => (long)(seconds * time.TimestampFrequency);

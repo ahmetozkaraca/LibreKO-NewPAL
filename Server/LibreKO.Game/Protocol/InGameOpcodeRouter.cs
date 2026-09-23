@@ -72,6 +72,8 @@ public class InGameOpcodeRouter : IInGameOpcodeRouter
         IDailyQuestPacketCoordinator dailyQuest,
         ICollectionRacePacketCoordinator collectionRace,
         ILotteryPacketCoordinator lottery,
+        IBeautyShopPacketCoordinator beautyShop,
+        IClanPremiumPacketCoordinator clanPremium,
         SessionManager sessionManager,
         ISessionTerminationService sessionTermination,
         ILogger<InGameOpcodeRouter> logger)
@@ -126,6 +128,8 @@ public class InGameOpcodeRouter : IInGameOpcodeRouter
             [GameOpcodes.GS_GENIE] = genie.HandleAsync,
             [GameOpcodes.GS_GENIE_SYSTEM] = genieSystem.HandleAsync,
             [GameOpcodes.GS_CLIENT_SETTINGS] = clientSettings.HandleAsync,
+            [GameOpcodes.GS_CHANGE_HAIR] = beautyShop.HandleAsync,
+            [GameOpcodes.GS_CLAN_PREMIUM] = clanPremium.HandleAsync,
             [GameOpcodes.GS_HOME] = (c, _) => world.HandleHomeAsync(c),
             [GameOpcodes.GS_REGIONCHANGE] = (c, _) => world.HandleRegionChangeAsync(c),
             [GameOpcodes.GS_NPC_REGION] = (c, _) => world.HandleNpcRegionAsync(c),
@@ -186,7 +190,7 @@ public class InGameOpcodeRouter : IInGameOpcodeRouter
             [GameOpcodes.GS_DATASAVE] = async (c, _) =>
             {
                 var session = sessionManager.GetByClientId(c.Id);
-                if (session != null) await sessionTermination.SaveAsync(session);
+                if (session != null) await sessionTermination.RequestSaveAsync(session);
             },
             // GS_CONCURRENTUSER is routed to misc.HandleConcurrentUserAsync below
             // (the real GM-gated handler). The inline lambda that used to live here
@@ -209,7 +213,7 @@ public class InGameOpcodeRouter : IInGameOpcodeRouter
             [GameOpcodes.GS_RENTAL] = misc.HandleRentalAsync,
             [GameOpcodes.GS_MINING] = mining.HandleAsync,
 
-            [GameOpcodes.GS_SPEEDHACK_CHECK] = world.HandleSpeedHackCheckAsync,
+            [GameOpcodes.GS_SPEEDHACK_CHECK] = NoOp,
             [GameOpcodes.GS_CONCURRENTUSER] = misc.HandleConcurrentUserAsync,
             [GameOpcodes.GS_ZONE_CONCURRENT] = misc.HandleZoneConcurrentAsync,
             [GameOpcodes.GS_LOGOSSHOUT] = misc.HandleLogosShoutAsync,

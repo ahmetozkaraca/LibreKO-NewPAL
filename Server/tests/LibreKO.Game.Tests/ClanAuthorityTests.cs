@@ -1,6 +1,7 @@
 ﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
+using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
@@ -22,6 +23,10 @@ public class ClanAuthorityTests : GameTestBase
     private const short KeepCape = -1;
     private const int Crimson = 0x0000FF;
     private const int PaintCost = 36_000;
+    private const byte TraineeFame = 5;
+    private const int Donation = 1_000;
+    private const int Departures = 10;
+    private const int FoundingFee = KnightsPacketConstants.ClanCoinRequirement;
 
     [Fact]
     public async Task AnOfficerCannotDraftSomeoneWhoNeverApplied()
@@ -86,6 +91,23 @@ public class ClanAuthorityTests : GameTestBase
     }
 
     [Fact]
+    public async Task TheChiefHearsBackOnEveryRejection()
+    {
+        using var provider = CreateGuildHall(out _);
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var chief = CreatePlayer(sessionManager, 850, "HeroChief", Heroes, ChiefFame);
+        var applicant = CreatePlayer(sessionManager, 851, "Applicant", 0, 0);
+
+        await Knights(provider).HandleProcessAsync(chief.Client, Reject(applicant));
+        await Knights(provider).HandleProcessAsync(applicant.Client, Apply(Heroes));
+        await Knights(provider).HandleProcessAsync(chief.Client, Reject(applicant));
+
+        MembershipResults(chief, KnightsSubOpcode.Reject).Should().Equal(
+            (byte)KnightsResult.NoSuchUser, (byte)KnightsResult.Succeeded);
+        MembershipResults(applicant, KnightsSubOpcode.Reject).Should().Equal((byte)KnightsResult.UserDeclined);
+    }
+
+    [Fact]
     public async Task PaintingTheCapeAlwaysCostsClanPoints()
     {
         using var provider = CreateGuildHall(out _);
@@ -120,6 +142,149 @@ public class ClanAuthorityTests : GameTestBase
 
         clan.CapeR.Should().Be(0xFF);
         clan.ClanPointFund.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ResendingTheCurrentDyeIsNotChargedAsARepaint()
+    {
+        using var provider = CreateGuildHall(out _);
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var chief = CreatePlayer(sessionManager, 852, "HeroChief", Heroes, ChiefFame);
+        var clan = sessionManager.Knights.GetClan(Heroes)!;
+        clan.CapeR = (byte)Crimson;
+        clan.ClanPointFund = PaintCost;
+        TalkToCapeMerchant(sessionManager, chief);
+
+        await provider.GetRequiredService<IKnightsCapePacketCoordinator>()
+            .HandleAsync(chief.Client, CapeRequest(NormalPurchase, KeepCape, Crimson));
+
+        clan.ClanPointFund.Should().Be(PaintCost);
+    }
+
+    [Fact]
+    public async Task AClanNeverHearsFromAnApplicantOfTheOtherNation()
+    {
+        using var provider = CreateGuildHall(out _);
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var chief = CreatePlayer(sessionManager, 811, "HeroChief", Heroes, ChiefFame);
+        var foreigner = CreatePlayer(sessionManager, 812, "Foreigner", 0, 0);
+        foreigner.Nation = AccountNation.ElMorad;
+
+        await Knights(provider).HandleProcessAsync(foreigner.Client, Apply(Heroes));
+        await chief.Client.DidNotReceive().SendPacket(Arg.Any<Packet>(), Arg.Any<CancellationToken>());
+
+        foreigner.Nation = AccountNation.Karus;
+        await Knights(provider).HandleProcessAsync(chief.Client, Admit(foreigner));
+
+        foreigner.KnightsId.Should().Be(0);
+        sessionManager.Knights.GetClan(Heroes)!.Members.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task AMemberWhoLeftCannotBeKickedOutOfASecondSeat()
+    {
+        using var provider = CreateGuildHall(out _);
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var chief = CreatePlayer(sessionManager, 813, "HeroChief", Heroes, ChiefFame);
+        var member = CreatePlayer(sessionManager, 814, "Member", Heroes, TraineeFame);
+        var clan = sessionManager.Knights.GetClan(Heroes)!;
+        clan.Members = 2;
+
+        await Knights(provider).HandleProcessAsync(member.Client, Withdraw());
+        await Knights(provider).HandleProcessAsync(chief.Client, Named(KnightsSubOpcode.Remove, member.Name));
+
+        member.KnightsId.Should().Be(0);
+        clan.Members.Should().Be(1);
+    }
+
+    [Fact]
+    public void OnlyOneOfTwoSimultaneousDeparturesClaimsTheMember()
+    {
+        using var provider = CreateGuildHall(out _);
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var runtime = provider.GetRequiredService<IKnightsRuntimeService>();
+        var member = CreatePlayer(sessionManager, 815, "Member", Heroes, TraineeFame);
+
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            member.KnightsId = Heroes;
+            var claims = new bool[2];
+            Parallel.Invoke(
+                () => claims[0] = runtime.TryLeaveClan(member, Heroes),
+                () => claims[1] = runtime.TryLeaveClan(member, Heroes));
+
+            claims.Count(claimed => claimed).Should().Be(1);
+            member.KnightsId.Should().Be(0);
+        }
+    }
+
+    [Fact]
+    public async Task SimultaneousDeparturesEachTakeTheirOwnDonationFromTheFund()
+    {
+        using var provider = CreateGuildHall(out _);
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var clan = sessionManager.Knights.GetClan(Heroes)!;
+        clan.Members = Departures + 1;
+        clan.ClanPointFund = Departures * Donation;
+        var members = Enumerable.Range(0, Departures).Select(index =>
+        {
+            var member = CreatePlayer(sessionManager, 820 + index, $"Donor{index}", Heroes, TraineeFame);
+            member.KnightsPoints = Donation;
+            return member;
+        }).ToList();
+
+        await Task.WhenAll(members.Select(member =>
+            Task.Run(() => Knights(provider).HandleProcessAsync(member.Client, Withdraw()))));
+
+        clan.ClanPointFund.Should().Be(0);
+        clan.Members.Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData("Bad Name")]
+    [InlineData("Bad	Name")]
+    [InlineData("X")]
+    public async Task AClanNameOutsideTheNameRulesIsRefusedForFree(string name)
+    {
+        using var provider = CreateGuildHall(out _);
+        var founder = CreatePlayer(provider.GetRequiredService<SessionManager>(), 830, "Founder", 0, 0);
+        founder.Money = FoundingFee;
+
+        await Knights(provider).HandleProcessAsync(founder.Client, Named(KnightsSubOpcode.Create, name));
+
+        founder.KnightsId.Should().Be(0);
+        founder.Money.Should().Be(FoundingFee);
+    }
+
+    [Fact]
+    public async Task AClanThatCannotBeSavedRefundsItsFoundingFee()
+    {
+        var repository = Substitute.For<IKnightsRepository>();
+        repository.CreateAsync(Arg.Any<KnightsEntity>()).Returns(Task.FromException(new InvalidOperationException()));
+        using var provider = CreateProvider(_ => { }, configureServices: services => services.AddScoped(_ => repository));
+        var founder = CreatePlayer(provider.GetRequiredService<SessionManager>(), 831, "Founder", 0, 0);
+        founder.Money = FoundingFee;
+
+        await Knights(provider).HandleProcessAsync(founder.Client, Named(KnightsSubOpcode.Create, "Founders"));
+
+        MembershipResults(founder, KnightsSubOpcode.Create).Should().Equal((byte)KnightsCreateResult.TryAgainLater);
+        founder.Money.Should().Be(FoundingFee);
+        founder.KnightsId.Should().Be(0);
+    }
+
+    private static List<byte> MembershipResults(UserSession session, KnightsSubOpcode sub) =>
+        session.Client.ReceivedCalls()
+            .Where(call => call.GetMethodInfo().Name == nameof(IClient.SendPacket))
+            .Select(call => (Packet)call.GetArguments()[0]!)
+            .Where(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_KNIGHTS_PROCESS && packet.GetData()[0] == (byte)sub)
+            .Select(packet => packet.GetData()[1])
+            .ToList();
+
+    private static Packet Withdraw()
+    {
+        var packet = new Packet(GameOpcodes.GS_KNIGHTS_PROCESS);
+        packet.WriteByte((byte)KnightsSubOpcode.Withdraw);
+        return packet;
     }
 
     private static IKnightsPacketCoordinator Knights(ServiceProvider provider)

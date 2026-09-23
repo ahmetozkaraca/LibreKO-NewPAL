@@ -25,8 +25,6 @@ public partial class Net
     private const int SealRequestNoWindow = -1;
     private const byte UpgradeRequestNormal = 1;
     private const byte UpgradeRequestPreview = 2;
-    private const byte UpgradeResultFailed = 0;
-    private const byte UpgradeResultSucceeded = 1;
     private const int UpgradeSlotCount = 10;
     private const int AccessoryScrollFirst = 379159000;
     private const int AccessoryScrollLast = 379164000;
@@ -115,51 +113,15 @@ public partial class Net
 
     private void ApplyUpgradeResultToLastInventory(byte upgradeType, byte result, UpgradeSlotResult[] slots)
     {
-        if (upgradeType != UpgradeRequestNormal || slots.Length == 0)
+        if (upgradeType != UpgradeRequestNormal)
             return;
 
-        var origin = slots[0];
-        if (origin.Position >= 0 && origin.Position < InventoryConstants.HaveMax)
+        var changes = UpgradeOutcome.Changes(LastEnter.Inventory, result, slots,
+            itemId => (short)(ItemData.Get(itemId)?.Duration ?? 0));
+        foreach (var (abs, item) in changes)
         {
-            int abs = InventoryConstants.InventoryStart + origin.Position;
-            if (result == UpgradeResultSucceeded && origin.ItemId != 0)
-            {
-                var def = ItemData.Get(origin.ItemId);
-                var updated = new ItemSlot
-                {
-                    ItemId = origin.ItemId,
-                    Count = 1,
-                    Durability = (short)(def?.Duration ?? 0),
-                };
-                SetLastInventorySlot(abs, updated);
-                InventorySlotEvent?.Invoke(abs, updated);
-            }
-            else if (result == UpgradeResultFailed)
-            {
-                SetLastInventorySlot(abs, default);
-                InventorySlotEvent?.Invoke(abs, default);
-            }
-        }
-
-        for (int i = 1; i < slots.Length; i++)
-        {
-            var slot = slots[i];
-            if (slot.Position < 0 || slot.Position >= InventoryConstants.HaveMax)
-                continue;
-
-            int abs = InventoryConstants.InventoryStart + slot.Position;
-            var inv = LastEnter.Inventory;
-            var current = inv != null && abs < inv.Length ? inv[abs] : default;
-            if (current.ItemId == 0 || current.ItemId != slot.ItemId)
-                continue;
-
-            if (current.Count > 1)
-                current.Count--;
-            else
-                current = default;
-
-            SetLastInventorySlot(abs, current);
-            InventorySlotEvent?.Invoke(abs, current);
+            SetLastInventorySlot(abs, item);
+            InventorySlotEvent?.Invoke(abs, item);
         }
     }
 

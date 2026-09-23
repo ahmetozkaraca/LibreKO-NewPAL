@@ -16,21 +16,23 @@ public sealed class ScriptEffectApplier(
     IGameDataService gameData,
     ICharacterStatePersister statePersister,
     IServiceProvider serviceProvider,
-    TimeProvider timeProvider,
+    SummonQuota summonQuota,
     ILogger<ScriptEffectApplier> logger) : IScriptEffectApplier
 {
-    public const int MaxLiveSummonsPerPlayer = 4;
-    public const int MaxLiveSummonsPerZone = 40;
-    public static readonly TimeSpan SummonCooldown = TimeSpan.FromMinutes(1);
-
-    private readonly record struct LiveSummon(int OwnerId, short ZoneId, NpcInstance Npc);
-
-    private readonly Lock _summonSync = new();
-    private readonly List<LiveSummon> _liveSummons = [];
-    private readonly Dictionary<int, DateTimeOffset> _lastSummonAt = [];
-    private readonly Dictionary<short, int> _reservedSlots = [];
-
     public async Task ApplyAsync(UserSession session, QuestScriptContext context, string scriptName)
+    {
+        try
+        {
+            await ApplyEffectsAsync(session, context, scriptName);
+        }
+        finally
+        {
+            if (context.SummonGrant != null)
+                summonQuota.Release(context.SummonGrant);
+        }
+    }
+
+    private async Task ApplyEffectsAsync(UserSession session, QuestScriptContext context, string scriptName)
     {
         foreach (var packet in context.QueuedPackets)
             await session.Client.SendPacket(packet);
@@ -41,7 +43,7 @@ public sealed class ScriptEffectApplier(
 
         if (context.QuestStateDirty)
         {
-            _ = statePersister.SaveQuestStateAsync(session);
+            _ = statePersister.RequestSaveAsync(session);
             await serviceProvider.GetRequiredService<Protocol.IAchievementProgressService>().RefreshAsync(session);
         }
 
@@ -135,8 +137,8 @@ public sealed class ScriptEffectApplier(
             return;
         }
 
-        var allowance = ReserveSummonSlots(session);
-        if (allowance == 0)
+        var grant = context.SummonGrant ?? summonQuota.Reserve(session);
+        if (grant == null)
         {
             logger.LogInformation(
                 "Script {Script}: summon refused for {Name} — summon cooldown or live summon limit reached in zone {Zone}",
@@ -145,20 +147,18 @@ public sealed class ScriptEffectApplier(
         }
 
         var summons = serviceProvider.GetRequiredService<INpcSummonService>();
-        var summoned = new List<NpcInstance>();
         try
         {
             foreach (var (npcId, count, x, z) in context.PendingSummons)
             {
-                var remaining = allowance - summoned.Count;
-                if (remaining <= 0)
+                if (grant.Remaining <= 0)
                     break;
 
                 var spawnX = x > 0 ? x : (int)session.X;
                 var spawnZ = z > 0 ? z : (int)session.Z;
                 var spawned = await summons.SummonAsync(
                     npcId, session.ZoneId, session.Room, spawnX, spawnZ,
-                    Math.Min(Math.Clamp(count, 1, MaxSummonCount), remaining), session.Y);
+                    Math.Min(Math.Clamp(count, 1, MaxSummonCount), grant.Remaining), session.Y, grant);
                 if (spawned.Count == 0)
                 {
                     logger.LogWarning("Script {Script}: cannot summon NPC {NpcId} for {Name} — not in the NPC table",
@@ -166,56 +166,14 @@ public sealed class ScriptEffectApplier(
                     continue;
                 }
 
-                summoned.AddRange(spawned);
                 logger.LogInformation("Script {Script}: {Name} summoned {Count} of NPC {NpcId} in zone {Zone} at {X},{Z}",
                     scriptName, session.Name, spawned.Count, npcId, session.ZoneId, spawnX, spawnZ);
             }
         }
         finally
         {
-            SettleSummonSlots(session, allowance, summoned);
+            summonQuota.Release(grant);
         }
-    }
-
-    private int ReserveSummonSlots(UserSession session)
-    {
-        var now = timeProvider.GetUtcNow();
-        using var scope = _summonSync.EnterScope();
-
-        _liveSummons.RemoveAll(summon => !summon.Npc.IsAlive);
-        foreach (var ownerId in _lastSummonAt.Where(entry => now - entry.Value >= SummonCooldown)
-                     .Select(entry => entry.Key).ToList())
-            _lastSummonAt.Remove(ownerId);
-
-        if (_lastSummonAt.ContainsKey(session.CharacterId))
-            return 0;
-
-        var allowance = Math.Min(
-            MaxLiveSummonsPerPlayer - _liveSummons.Count(summon => summon.OwnerId == session.CharacterId),
-            MaxLiveSummonsPerZone - _liveSummons.Count(summon => summon.ZoneId == session.ZoneId)
-                - _reservedSlots.GetValueOrDefault(session.ZoneId));
-        if (allowance <= 0)
-            return 0;
-
-        _lastSummonAt[session.CharacterId] = now;
-        _reservedSlots[session.ZoneId] = _reservedSlots.GetValueOrDefault(session.ZoneId) + allowance;
-        return allowance;
-    }
-
-    private void SettleSummonSlots(UserSession session, int allowance, List<NpcInstance> summoned)
-    {
-        using var scope = _summonSync.EnterScope();
-
-        var reserved = _reservedSlots.GetValueOrDefault(session.ZoneId) - allowance;
-        if (reserved > 0)
-            _reservedSlots[session.ZoneId] = reserved;
-        else
-            _reservedSlots.Remove(session.ZoneId);
-
-        foreach (var npc in summoned)
-            _liveSummons.Add(new LiveSummon(session.CharacterId, session.ZoneId, npc));
-        if (summoned.Count == 0)
-            _lastSummonAt.Remove(session.CharacterId);
     }
 
     private async Task ApplyPendingNpcDespawnAsync(

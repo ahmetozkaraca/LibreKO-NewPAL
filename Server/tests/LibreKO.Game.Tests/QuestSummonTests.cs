@@ -100,11 +100,13 @@ public class QuestSummonTests
             .AddSingleton(gameData)
             .AddSingleton(Substitute.For<IMonsterAggressionPolicy>())
             .AddSingleton<INpcLifecycleService>(new NpcLifecycleService(sessions, Substitute.For<ILogger<NpcLifecycleService>>()))
+            .AddSingleton(new InstanceRoomRegistry(sessions, Substitute.For<ILogger<InstanceRoomRegistry>>()))
+            .AddSingleton(new SummonQuota(sessions, TimeProvider.System))
             .AddSingleton<INpcSummonService, NpcSummonService>()
             .BuildServiceProvider();
 
         await new ScriptEffectApplier(gameData, Substitute.For<ICharacterStatePersister>(), provider,
-                TimeProvider.System, Substitute.For<ILogger<ScriptEffectApplier>>())
+                provider.GetRequiredService<SummonQuota>(), Substitute.For<ILogger<ScriptEffectApplier>>())
             .ApplyAsync(session, context, "25022_21.quest");
 
         var guard = sessions.Regions.GetNearbyNpcs(session).Should().ContainSingle(n => n.NpcId == GuardOfBlackMarketer).Subject;

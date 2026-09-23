@@ -142,7 +142,8 @@ public class GamePacketHandler(
     private async Task<GameLoginResult> AuthenticateAsync(
         IClient client, string login, string password, IPreGameService preGameService)
     {
-        if (loginAttempts.IsLockedOut(client.RemoteAddress, login))
+        using var admission = await loginAttempts.AdmitAsync(client.RemoteAddress, login);
+        if (admission == null)
         {
             logger.LogDebug("Refused credentials for {Login} from client {ClientId}: too many recent failures",
                 LogSanitizer.Clean(login), client.Id);
@@ -152,7 +153,7 @@ public class GamePacketHandler(
 
         var auth = await preGameService.LoginAsync(login, password);
         if (auth.Success)
-            loginAttempts.RecordSuccess(login);
+            loginAttempts.RecordSuccess(client.RemoteAddress, login);
         else
             RecordCredentialFailure(client, login);
 
@@ -267,6 +268,9 @@ public class GamePacketHandler(
     {
         switch (opcode)
         {
+            case GameOpcodes.GS_GAMESTART or GameOpcodes.GS_CHAT when !packetGuard.Admit(client, opcode):
+                return;
+
             case GameOpcodes.GS_GAMESTART:
                 {
                     // Rare (per login) — the only in-game opcode needing scoped services.
@@ -313,8 +317,12 @@ public class GamePacketHandler(
         {
             await LoadWorldAsync(client, preGameService, gameSessionInitializer);
         }
-        else if (subOpcode == GameStartSubOpcode.Ready && session != null && !ReferenceEquals(state.EnteredWorld, session))
+        else if (subOpcode == GameStartSubOpcode.Ready && (session == null || !ReferenceEquals(state.EnteredWorld, session)))
         {
+            session ??= await InitializeSessionAsync(client, gameSessionInitializer);
+            if (session == null)
+                return;
+
             state.EnteredWorld = session;
             await EnterWorldAsync(client, session, preGameService);
         }
@@ -329,14 +337,9 @@ public class GamePacketHandler(
         IPreGameService preGameService,
         IGameSessionInitializer gameSessionInitializer)
     {
-        var session = await gameSessionInitializer.InitializeAsync(client);
+        var session = await InitializeSessionAsync(client, gameSessionInitializer);
         if (session == null)
-        {
-            logger.LogWarning("Closing client {ClientId}: character {CharacterId} cannot enter the game",
-                client.Id, client.CharacterId);
-            client.Disconnect();
             return;
-        }
 
         logger.LogDebug(
             "GameStart subOp=1: {Name} (id={Id}) entered zone={Zone} pos=({X},{Z}) region=({RX},{RZ})",
@@ -356,6 +359,18 @@ public class GamePacketHandler(
             await worldPacketCoordinator.SendRegionUserListAsync(session);
             await worldPacketCoordinator.SendNpcRegionListAsync(session);
         }
+    }
+
+    private async Task<UserSession?> InitializeSessionAsync(IClient client, IGameSessionInitializer gameSessionInitializer)
+    {
+        var session = await gameSessionInitializer.InitializeAsync(client);
+        if (session != null)
+            return session;
+
+        logger.LogWarning("Closing client {ClientId}: character {CharacterId} cannot enter the game",
+            client.Id, client.CharacterId);
+        client.Disconnect();
+        return null;
     }
 
     private async Task EnterWorldAsync(IClient client, UserSession session, IPreGameService preGameService)

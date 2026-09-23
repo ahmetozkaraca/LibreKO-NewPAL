@@ -650,7 +650,7 @@ public partial class World
         8 => "That clan is full.",
         9 => "You can't pick yourself.",
         10 => "Not a member of that clan.",
-        11 => "They declined.",
+        11 => sub == ClanRejectSub ? "Your clan application was declined." : "They declined.",
         12 => "Not allowed in this zone.",
         _ => "That clan action was refused.",
     };
@@ -668,6 +668,7 @@ public partial class World
     }, true);
 
     private const int ClanResultOk = 1;
+    private const int ClanRejectSub = 0x07;
 
     private void SetClanStatus(string text, bool warn)
     {

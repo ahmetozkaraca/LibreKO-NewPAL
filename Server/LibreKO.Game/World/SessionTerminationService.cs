@@ -7,7 +7,7 @@ namespace LibreKO.Game.World;
 
 public interface ISessionTerminationService
 {
-    Task SaveAsync(UserSession session, CancellationToken cancellationToken = default);
+    Task RequestSaveAsync(UserSession session);
     Task LogoutAsync(IClient client, CancellationToken cancellationToken = default);
     Task DisconnectAsync(IClient client, CancellationToken cancellationToken = default);
     Task EvictForTakeoverAsync(UserSession session);
@@ -16,7 +16,9 @@ public interface ISessionTerminationService
 public class SessionTerminationService(
     SessionManager sessionManager,
     ICharacterStatePersister characterStatePersister,
+    IRewardStateService rewardStates,
     IChallengePacketCoordinator challengePacketCoordinator,
+    IChatRoomPacketCoordinator chatRoomPacketCoordinator,
     IEventSystemsPacketCoordinator eventSystemsPacketCoordinator,
     IExchangePacketCoordinator exchangePacketCoordinator,
     IMerchantPacketCoordinator merchantPacketCoordinator,
@@ -31,10 +33,7 @@ public class SessionTerminationService(
     private const int MaxConcurrentDisconnectDbOps = 24;
     private static readonly SemaphoreSlim DisconnectDbGate = new(MaxConcurrentDisconnectDbOps);
 
-    public async Task SaveAsync(UserSession session, CancellationToken cancellationToken = default)
-    {
-        await characterStatePersister.RequestSaveAsync(session);
-    }
+    public Task RequestSaveAsync(UserSession session) => characterStatePersister.RequestSaveAsync(session);
 
     public async Task LogoutAsync(IClient client, CancellationToken cancellationToken = default)
     {
@@ -128,6 +127,7 @@ public class SessionTerminationService(
             await DisconnectDbGate.WaitAsync(cancellationToken);
             try
             {
+                await rewardStates.FlushAsync(session);
                 await characterStatePersister.SaveFinalAsync(session, cancellationToken);
             }
             finally
@@ -154,6 +154,7 @@ public class SessionTerminationService(
         if (session.IsInParty)
             await partyPacketCoordinator.RemoveMemberAsync(session, (short)session.CharacterId);
 
+        chatRoomPacketCoordinator.Forget(session.CharacterId);
         session.IsMining = false;
         session.IsFishing = false;
     }

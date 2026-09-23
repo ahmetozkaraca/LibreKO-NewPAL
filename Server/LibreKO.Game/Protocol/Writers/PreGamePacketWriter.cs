@@ -1,4 +1,4 @@
-using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
@@ -67,6 +67,8 @@ public sealed class PreGamePacketWriter
         return packet;
     }
 
+    public const byte ChangeHairSucceeded = 0;
+    public const byte ChangeHairFailed = 1;
     public const byte ChangeHairOpenShop = 2;
 
     public static Packet ChangeHairShop() => ChangeHairResult(ChangeHairOpenShop);

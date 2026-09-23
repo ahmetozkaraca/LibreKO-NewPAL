@@ -276,7 +276,7 @@ public class MerchantBuyingService(
         if (!IsSanePrice(price) || price > merchant.Money)
             return BuyingMerchantResult.BuyerFundsTooLow;
 
-        if (!CanReceive(session, price))
+        if (!Coins.CanCredit(session.Money, price))
             return BuyingMerchantResult.OverMaxLimit;
 
         return BuyingMerchantResult.Accepted;

@@ -26,13 +26,8 @@ public class MagicPacketCoordinator(
     ILogger<MagicPacketCoordinator> logger) : IMagicPacketCoordinator
 {
     private const int HeaderBytes = 13;
-    private const int PayloadSlots = 7;
     private const int PayloadSlotBytes = 4;
-    private const byte PotionItemGroup = 9;
     private const int NoTarget = 0;
-    private const int MinimumVolley = 1;
-
-    private static readonly TimeSpan ArrowFlightAllowance = TimeSpan.FromSeconds(3);
 
     public async Task HandleAsync(IClient client, Packet packet)
     {
@@ -44,7 +39,7 @@ public class MagicPacketCoordinator(
         var skillId = packet.ReadInt();
         var casterId = packet.ReadInt();
         var targetId = packet.ReadInt();
-        var data = new int[PayloadSlots];
+        var data = new int[MagicProcessPacketWriter.PayloadSlotCount];
         for (var i = 0; i < data.Length && packet.RemainingBytes >= PayloadSlotBytes; i++)
             data[i] = packet.ReadInt();
 
@@ -95,8 +90,7 @@ public class MagicPacketCoordinator(
             case MagicProcessOpcode.Cancel:
             case MagicProcessOpcode.SkillValueUpdate:
             case MagicProcessOpcode.DurationExpired:
-                if (magicTimingService.OnCastAborted(session, skillId))
-                    session.CombatActions.CastBindings.TryRemove(skillId, out _);
+                AbandonCast(session, skillId);
                 if (!IsPlayerCancellable(magic, skillId))
                     return;
 
@@ -145,28 +139,41 @@ public class MagicPacketCoordinator(
 
     private async Task HandleFlyingAsync(UserSession session, MagicData magic, int targetId)
     {
-        var binding = magic.PrimaryType == MagicSkillType.Ranged
-            && MayCast(session, magic)
-            && AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), MagicProcessOpcode.Flying)
-            && MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, magic.Id, out _)
-                ? ReleaseTarget(session, magic, targetId)
-                : null;
+        var isVolley = magic.PrimaryType == MagicSkillType.Ranged;
+        if (!MayCast(session, magic)
+            || !AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), MagicProcessOpcode.Flying)
+            || (isVolley && !MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, magic.Id, out _)))
+        {
+            await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        var binding = ReleaseTarget(session, magic, targetId);
         if (binding == null)
         {
-            await SendMagicFailAsync(session, magic.Id);
+            await RefuseReleaseAsync(session, magic);
             return;
         }
 
-        var arrows = VolleySize(magic);
-        if (!await magicCostService.TryPayAsync(session, magicCostService.VolleyCostOf(magic, arrows)))
+        if (!isVolley && !TryMarkFlown(session, magic.Id))
         {
             await SendMagicFailAsync(session, magic.Id);
             return;
         }
 
-        magicTimingService.OnVolleyAccepted(session, magic, arrows);
-        session.CombatActions.CastBindings.TryRemove(magic.Id, out _);
-        MarkCombatAction(session);
+        if (isVolley)
+        {
+            var arrows = VolleySize(magic);
+            if (!await magicCostService.TryPayAsync(session, magicCostService.VolleyCostOf(magic, arrows)))
+            {
+                await RefuseReleaseAsync(session, magic);
+                return;
+            }
+
+            magicTimingService.OnVolleyAccepted(session, magic, arrows);
+            session.CombatActions.CastBindings.TryRemove(magic.Id, out _);
+            MarkCombatAction(session);
+        }
 
         await sessionManager.Regions.SendToRegion(
             session,
@@ -193,12 +200,16 @@ public class MagicPacketCoordinator(
             return;
         }
 
-        var binding = AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), MagicProcessOpcode.Effecting)
-            ? ReleaseTarget(session, magic, targetId)
-            : null;
-        if (binding == null)
+        if (!AllowTiming(session, magic, magicTimingService.CheckRelease(session, magic), MagicProcessOpcode.Effecting))
         {
             await SendMagicFailAsync(session, magic.Id);
+            return;
+        }
+
+        var binding = ReleaseTarget(session, magic, targetId);
+        if (binding == null)
+        {
+            await RefuseReleaseAsync(session, magic);
             return;
         }
 
@@ -207,7 +218,8 @@ public class MagicPacketCoordinator(
 
         if (OpensTransformationList(session, magic))
         {
-            await session.Client.SendPacket(MagicProcessPacketWriter.CreateTransformationList(magic.Id));
+            magicTimingService.RefundCooldown(session, magic.Id);
+            await SendMagicFailAsync(session, magic.Id);
             return;
         }
 
@@ -230,8 +242,8 @@ public class MagicPacketCoordinator(
         var hit = magicTargetingService.CheckRelease(
             session,
             magic,
-            new MagicCastBinding(targetId, new int[PayloadSlots]),
-            (float)(magicTimingService.CastDuration(session, magic) + ArrowFlightAllowance).TotalSeconds);
+            new MagicCastBinding(targetId, new int[MagicProcessPacketWriter.PayloadSlotCount]),
+            (float)(magicTimingService.CastDuration(session, magic) + MagicTimingService.ArrowFlightAllowance).TotalSeconds);
         if (hit.Binding == null)
         {
             await SendMagicFailAsync(session, magic.Id);
@@ -245,10 +257,10 @@ public class MagicPacketCoordinator(
 
     private async Task AbortAsync(UserSession session, MagicData magic)
     {
-        if (!magicTimingService.OnCastAborted(session, magic.Id))
+        session.CombatActions.CastBindings.TryGetValue(magic.Id, out var binding);
+        if (!AbandonCast(session, magic.Id))
             return;
 
-        session.CombatActions.CastBindings.TryRemove(magic.Id, out var binding);
         await sessionManager.Regions.SendToRegion(
             session,
             MagicProcessPacketWriter.Create(
@@ -257,6 +269,26 @@ public class MagicPacketCoordinator(
                 session.CharacterId,
                 binding?.TargetId ?? NoTarget),
             excludeSender: true);
+    }
+
+    private async Task RefuseReleaseAsync(UserSession session, MagicData magic)
+    {
+        AbandonCast(session, magic.Id);
+        await SendMagicFailAsync(session, magic.Id);
+    }
+
+    private static bool TryMarkFlown(UserSession session, int skillId) =>
+        session.CombatActions.CastBindings.TryGetValue(skillId, out var bound)
+        && !bound.HasFlown
+        && session.CombatActions.CastBindings.TryUpdate(skillId, bound with { HasFlown = true }, bound);
+
+    private bool AbandonCast(UserSession session, int skillId)
+    {
+        if (!magicTimingService.OnCastAborted(session, skillId))
+            return false;
+
+        session.CombatActions.CastBindings.TryRemove(skillId, out _);
+        return true;
     }
 
     private bool MayCast(UserSession session, MagicData magic)
@@ -290,7 +322,7 @@ public class MagicPacketCoordinator(
         }
 
         return MagicWeaponRequirement.IsMet(magic, session, gameDataService)
-            && (magic.UseItem == 0 || magic.ItemGroup != PotionItemGroup || session.CanUsePotions);
+            && (magic.UseItem == 0 || magic.ItemGroup != MagicWeaponRequirement.PotionItemGroup || session.CanUsePotions);
     }
 
     private bool IsSelfRevival(MagicData magic) =>
@@ -316,8 +348,8 @@ public class MagicPacketCoordinator(
 
     private int VolleySize(MagicData magic) =>
         MagicTypeLookup.TryResolve(gameDataService.MagicType2Table, magic, magic.Id, out var type2Data)
-            ? Math.Max(MinimumVolley, (int)type2Data.NeedArrow)
-            : MinimumVolley;
+            ? Math.Max(MagicTimingService.MinimumVolley, (int)type2Data.NeedArrow)
+            : MagicTimingService.MinimumVolley;
 
     private void MarkCombatAction(UserSession session)
     {

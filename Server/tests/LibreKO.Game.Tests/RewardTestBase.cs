@@ -80,34 +80,6 @@ public abstract class RewardTestBase : GameTestBase
         }
     }
 
-    protected sealed class FailingWritesRepository(AppDbContext context) : IRewardStateRepository
-    {
-        private readonly RewardStateRepository _inner = new(context);
-
-        public Task<IReadOnlyList<CharacterRewardQuest>> GetQuestProgressAsync(int characterId, DateOnly since) =>
-            _inner.GetQuestProgressAsync(characterId, since);
-
-        public Task<int> GetEventCoinsAsync(int characterId) => _inner.GetEventCoinsAsync(characterId);
-
-        public Task<IReadOnlyList<RouletteSpin>> GetRecentSpinsAsync(int characterId, int count) =>
-            _inner.GetRecentSpinsAsync(characterId, count);
-
-        public Task<IReadOnlyList<PrizePool>> GetDailyClaimsAsync(int accountId, DateOnly day) =>
-            _inner.GetDailyClaimsAsync(accountId, day);
-
-        public Task SaveQuestProgressAsync(IReadOnlyCollection<CharacterRewardQuest> progress) =>
-            _inner.SaveQuestProgressAsync(progress);
-
-        public Task<bool> ClaimQuestAsync(CharacterRewardQuest claim, int eventCoins) =>
-            throw new InvalidOperationException("database unavailable");
-
-        public Task<bool> SpendEventCoinsAsync(RouletteSpin spin, int cost) =>
-            throw new InvalidOperationException("database unavailable");
-
-        public Task<bool> ClaimDailyRewardAsync(DailyRewardClaim claim) =>
-            throw new InvalidOperationException("database unavailable");
-    }
-
     protected sealed class RewardCatalog
     {
         public List<RewardQuestData> Quests { get; } = [];
@@ -234,11 +206,12 @@ public abstract class RewardTestBase : GameTestBase
         ManualClock clock,
         IRewardRandom? random = null,
         Action<IServiceCollection>? configureServices = null,
-        RewardCatalog? catalog = null)
+        RewardCatalog? catalog = null,
+        Action<AppDbContext>? seed = null)
     {
         var rewards = catalog ?? DefaultCatalog();
         return CreateProvider(
-            _ => { },
+            seed ?? (_ => { }),
             rewards.Apply,
             configureServices: services =>
             {
@@ -279,13 +252,34 @@ public abstract class RewardTestBase : GameTestBase
         return Player(provider, player.Session.CharacterId, player.Session.AccountId, player.Session.Level);
     }
 
-    protected static void Give(UserSession session, int slot, int itemId, ushort count)
+    protected static void Give(UserSession session, int slot, int itemId, ushort count, ItemFlag flag = ItemFlag.Unsealed)
     {
         var entry = session.Inventory[slot];
         entry.ItemId = itemId;
         entry.Count = count;
         entry.Durability = 1;
+        entry.Flag = (byte)flag;
     }
+
+    protected static Action<AppDbContext> StoredCharacter(int characterId, int accountId) => db =>
+    {
+        db.Accounts.Add(new Account { Id = accountId, Login = $"account{accountId}", Password = "pw", Nation = AccountNation.Karus });
+        db.Characters.Add(new Character
+        {
+            Id = characterId,
+            AccountId = accountId,
+            Name = $"Player{characterId}",
+            Items = new byte[InventoryConstants.InventoryTotal * UserSessionBinaryState.BytesPerItem],
+        });
+    };
+
+    protected static Task<Character> StoredCharacterAsync(ServiceProvider provider, int characterId) =>
+        InScopeAsync(provider, db => db.Characters.AsNoTracking().SingleAsync(character => character.Id == characterId));
+
+    protected static SaveChangesProbe FailingCommitsOf<TEntity>() where TEntity : class => new()
+    {
+        FailWhen = db => db.ChangeTracker.Entries<TEntity>().Any(entry => entry.State is EntityState.Added or EntityState.Modified),
+    };
 
     protected static void FillInventoryGrid(UserSession session, int itemId)
     {

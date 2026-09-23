@@ -1,4 +1,4 @@
-namespace LibreKO.Game.World;
+﻿namespace LibreKO.Game.World;
 
 public static class PvpRules
 {
@@ -35,6 +35,6 @@ public static class PvpRules
             && BattleZoneManager.AllowsNationCombat(attacker.ZoneId);
     }
 
-    private static bool SharesPartyWith(UserSession attacker, UserSession target)
+    public static bool SharesPartyWith(UserSession attacker, UserSession target)
         => attacker.IsInParty && attacker.PartyIndex == target.PartyIndex;
 }

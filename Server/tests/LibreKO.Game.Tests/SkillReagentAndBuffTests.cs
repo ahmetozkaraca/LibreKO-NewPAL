@@ -177,7 +177,7 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
     }
 
     [Fact]
-    public async Task ADisguiseScrollOpensTheTransformationListInsteadOfCasting()
+    public async Task ADisguiseScrollIsRefusedWithoutSpendingItsCooldownWhileThereIsNoPicker()
     {
         const int DisguiseScroll = 472001;
 
@@ -212,10 +212,10 @@ public class SkillReagentAndBuffTests(ITestOutputHelper output) : GameTestBase
         var reply = sent.Should().ContainSingle().Subject;
         reply.GetOpcode().Should().Be((byte)GameOpcodes.GS_MAGIC_PROCESS);
         reply.ReadByte().Should().Be(
-            (byte)MagicProcessOpcode.TransformationList,
-            "a scroll with no primary type opens the mob picker rather than casting");
+            (byte)MagicProcessOpcode.Fail,
+            "the client has no mob picker, so the scroll must resolve its pending cast");
         reply.ReadInt().Should().Be(DisguiseScroll);
-        reply.RemainingBytes.Should().Be(0);
+        caster.SkillCooldowns.Should().NotContainKey(DisguiseScroll);
     }
 
     [Fact]

@@ -5,7 +5,6 @@ using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Common.Infrastructure.Persistence;
 using LibreKO.Game.World;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -48,15 +47,12 @@ public class KingSystemRuntimeService(
         if (string.IsNullOrEmpty(kingName))
             return false;
 
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var nation = (AccountNation)kingData.Nation;
-        var kingExists = await db.Characters
-            .Where(character => character.Name == kingName)
-            .Join(db.Accounts, character => character.AccountId, account => account.Id, (_, account) => account.Nation)
-            .AnyAsync(accountNation => accountNation == nation);
-        if (kingExists)
-            return false;
+        using (var scope = scopeFactory.CreateScope())
+        {
+            var characters = scope.ServiceProvider.GetRequiredService<ICharacterRepository>();
+            if (await characters.ExistsInNationAsync(kingName, (AccountNation)kingData.Nation))
+                return false;
+        }
 
         logger.LogWarning(
             "Nation {Nation} names {KingName} as its king, but no character of that nation carries the name; the throne is left empty",

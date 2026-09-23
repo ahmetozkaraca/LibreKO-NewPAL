@@ -2,6 +2,7 @@
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Game.Protocol;
+using Microsoft.Extensions.Logging;
 
 namespace LibreKO.Game.World;
 
@@ -20,24 +21,20 @@ public enum RewardGrantStatus : byte
     UnknownItem,
 }
 
-internal readonly record struct RewardSlotChange(int Index, int ItemId, int Delta, short Durability);
-
-internal readonly record struct RewardSlotImage(int Index, int ItemId, short Durability, ushort Count, byte Flag, long ExpiresAt);
-
 public sealed class RewardGrant
 {
-    private static readonly IReadOnlyList<RewardSlotChange> NoChanges = [];
+    private static readonly IReadOnlyDictionary<int, ItemStack> NoChanges = new Dictionary<int, ItemStack>();
 
     internal RewardGrant(RewardGrantStatus status)
     {
         Status = status;
-        Changes = NoChanges;
+        Planned = NoChanges;
     }
 
-    internal RewardGrant(IReadOnlyList<RewardSlotChange> changes, int gold, int eventCoins, long experience)
+    internal RewardGrant(IReadOnlyDictionary<int, ItemStack> planned, int gold, int eventCoins, long experience)
     {
         Status = RewardGrantStatus.Ready;
-        Changes = changes;
+        Planned = planned;
         Gold = gold;
         EventCoins = eventCoins;
         Experience = experience;
@@ -49,9 +46,8 @@ public sealed class RewardGrant
     public long Experience { get; }
     public bool IsReady => Status == RewardGrantStatus.Ready;
 
-    internal IReadOnlyList<RewardSlotChange> Changes { get; }
-    internal Dictionary<int, RewardSlotImage> Originals { get; } = [];
-    internal List<RewardSlotImage> Updated { get; } = [];
+    internal IReadOnlyDictionary<int, ItemStack> Planned { get; }
+    internal SlotLedger Ledger { get; } = new();
     internal int CoinsAdded { get; set; }
 }
 
@@ -60,18 +56,16 @@ public interface IRewardGrantService
     int CountItem(UserSession session, int itemId);
     RewardGrant Plan(UserSession session, IReadOnlyList<ItemRequirement> consumed, IReadOnlyList<RewardLine> granted);
     void Apply(UserSession session, RewardGrant grant);
-    void Revert(UserSession session, RewardGrant grant);
+    bool Revert(UserSession session, RewardGrant grant);
     Task NotifyAsync(UserSession session, RewardGrant grant);
 }
 
 public sealed class RewardGrantService(
     IGameDataService gameData,
     IUserNotificationService userNotification,
-    IPlayerProgressionService playerProgression) : IRewardGrantService
+    IPlayerProgressionService playerProgression,
+    ILogger<RewardGrantService> logger) : IRewardGrantService
 {
-    private const int EmptyItemId = 0;
-    private const int NoSlot = -1;
-    private const int SingleUnit = 1;
     private const int GridStart = InventoryConstants.InventoryStart;
     private const int GridEnd = InventoryConstants.InventoryStart + InventoryConstants.HaveMax;
 
@@ -80,7 +74,7 @@ public sealed class RewardGrantService(
         var total = 0;
         for (var index = InventoryConstants.InventoryStart; index < session.Inventory.Length; index++)
         {
-            if (session.Inventory[index].ItemId == itemId)
+            if (session.Inventory[index].ItemId == itemId && IsConsumable(session.Inventory[index]))
                 total += session.Inventory[index].Count;
         }
 
@@ -93,22 +87,15 @@ public sealed class RewardGrantService(
         if (touchesInventory && session.Trade.LocksInventory)
             return new RewardGrant(RewardGrantStatus.InventoryLocked);
 
-        var ids = new int[session.Inventory.Length];
-        var counts = new int[session.Inventory.Length];
-        for (var index = 0; index < ids.Length; index++)
-        {
-            ids[index] = session.Inventory[index].ItemId;
-            counts[index] = session.Inventory[index].Count;
-        }
-
-        var changes = new List<RewardSlotChange>();
+        var slots = session.Inventory.Select(ItemStack.Of).ToArray();
+        var touched = new HashSet<int>();
         long weight = 0;
         foreach (var requirement in consumed.Where(requirement => requirement.Count > 0))
         {
             var item = gameData.GetItem(requirement.ItemId);
             if (item == null)
                 return new RewardGrant(RewardGrantStatus.UnknownItem);
-            if (!Take(ids, counts, requirement, changes))
+            if (!Take(session, slots, requirement, touched))
                 return new RewardGrant(RewardGrantStatus.MissingItems);
 
             weight -= (long)item.Weight * requirement.Count;
@@ -130,7 +117,7 @@ public sealed class RewardGrantService(
                 var item = gameData.GetItem(line.ItemId);
                 if (item == null)
                     return new RewardGrant(RewardGrantStatus.UnknownItem);
-                if (!Place(ids, counts, item, line.Count, changes))
+                if (!Place(slots, item, line.Count, touched))
                     return new RewardGrant(RewardGrantStatus.InventoryFull);
 
                 weight += (long)item.Weight * line.Count;
@@ -139,72 +126,57 @@ public sealed class RewardGrantService(
 
         if (weight > 0 && session.Stats.ItemWeight + weight > session.Stats.MaxWeight)
             return new RewardGrant(RewardGrantStatus.TooHeavy);
-        if (session.Money + gold > ExchangePacketConstants.CoinMax)
+        if (!Coins.CanCredit(session.Money, gold))
             return new RewardGrant(RewardGrantStatus.PurseFull);
 
-        return new RewardGrant(changes, (int)gold, (int)Math.Min(coins, int.MaxValue), experience);
+        var planned = touched.ToDictionary(index => index, index => slots[index]);
+        return new RewardGrant(planned, (int)gold, (int)Math.Min(coins, int.MaxValue), experience);
     }
 
     public void Apply(UserSession session, RewardGrant grant)
     {
-        foreach (var change in grant.Changes)
+        foreach (var (index, stack) in grant.Planned)
         {
-            var slot = session.Inventory[change.Index];
-            grant.Originals.TryAdd(change.Index, Image(change.Index, slot));
-
-            if (slot.IsEmpty)
-            {
-                slot.Clear();
-                slot.ItemId = change.ItemId;
-                slot.Durability = change.Durability;
-            }
-
-            slot.Count = (ushort)(slot.Count + change.Delta);
-            if (slot.Count == 0)
-                slot.Clear();
+            var slot = session.Inventory[index];
+            grant.Ledger.Touch(slot, ItemTransfer.Bag(session.Inventory));
+            stack.WriteTo(slot);
         }
+
+        grant.Ledger.Settle();
 
         session.Money += grant.Gold;
         var coins = (int)Math.Min((long)session.Rewards.EventCoins + grant.EventCoins, int.MaxValue);
         grant.CoinsAdded = coins - session.Rewards.EventCoins;
         session.Rewards.EventCoins = coins;
 
-        foreach (var index in grant.Originals.Keys)
-            grant.Updated.Add(Image(index, session.Inventory[index]));
-
-        if (grant.Changes.Count > 0)
+        if (grant.Planned.Count > 0)
             session.RecalculateStatsWithBuffs(gameData);
     }
 
-    public void Revert(UserSession session, RewardGrant grant)
+    public bool Revert(UserSession session, RewardGrant grant)
     {
-        foreach (var original in grant.Originals.Values)
-        {
-            var slot = session.Inventory[original.Index];
-            slot.ItemId = original.ItemId;
-            slot.Durability = original.Durability;
-            slot.Count = original.Count;
-            slot.Flag = original.Flag;
-            slot.ExpiresAt = original.ExpiresAt;
-        }
+        var reverted = grant.Ledger.Revert(gameData);
+        if (!reverted)
+            logger.LogError("The reward items of {Name} could not be taken back", session.Name);
 
         session.Money = Math.Max(0, session.Money - grant.Gold);
         session.Rewards.EventCoins = Math.Max(0, session.Rewards.EventCoins - grant.CoinsAdded);
 
-        if (grant.Changes.Count > 0)
+        if (grant.Planned.Count > 0)
             session.RecalculateStatsWithBuffs(gameData);
+        return reverted;
     }
 
     public async Task NotifyAsync(UserSession session, RewardGrant grant)
     {
-        foreach (var slot in grant.Updated)
+        foreach (var (index, stack) in grant.Planned)
         {
-            var isNewItem = slot.ItemId != EmptyItemId && slot.ItemId != grant.Originals[slot.Index].ItemId;
+            var isNewItem = !stack.IsEmpty && stack.ItemId != grant.Ledger.Before(session.Inventory[index]).ItemId;
             await userNotification.SendStackChangeAsync(
-                session, (byte)slot.Index, slot.ItemId, slot.Count, slot.Durability, isNewItem);
+                session, (byte)index, stack.ItemId, stack.Count, stack.Durability, isNewItem);
         }
 
-        if (grant.Updated.Count > 0)
+        if (grant.Planned.Count > 0)
             await userNotification.SendWeightChangeAsync(session);
         if (grant.Gold > 0)
             await userNotification.SendGoldGainAsync(session, grant.Gold);
@@ -212,81 +184,47 @@ public sealed class RewardGrantService(
             await playerProgression.AwardExperienceAsync(session, grant.Experience);
     }
 
-    private static bool Take(int[] ids, int[] counts, ItemRequirement requirement, List<RewardSlotChange> changes)
+    private static bool IsConsumable(ItemSlot slot) => slot.IsTradable && !slot.Expires;
+
+    private static bool Take(UserSession session, ItemStack[] slots, ItemRequirement requirement, HashSet<int> touched)
     {
         var remaining = requirement.Count;
-        for (var index = InventoryConstants.InventoryStart; index < ids.Length && remaining > 0; index++)
+        for (var index = InventoryConstants.InventoryStart; index < slots.Length && remaining > 0; index++)
         {
-            if (ids[index] != requirement.ItemId || counts[index] <= 0)
+            if (slots[index].ItemId != requirement.ItemId || !IsConsumable(session.Inventory[index]))
                 continue;
 
-            var taken = Math.Min(counts[index], remaining);
-            counts[index] -= taken;
-            if (counts[index] == 0)
-                ids[index] = EmptyItemId;
-
+            var taken = Math.Min(slots[index].Count, remaining);
+            slots[index] = taken == slots[index].Count
+                ? default
+                : slots[index] with { Count = (ushort)(slots[index].Count - taken) };
             remaining -= taken;
-            changes.Add(new RewardSlotChange(index, requirement.ItemId, -taken, default));
+            touched.Add(index);
         }
 
         return remaining == 0;
     }
 
-    private static bool Place(int[] ids, int[] counts, ItemData item, int count, List<RewardSlotChange> changes)
+    private static bool Place(ItemStack[] slots, ItemData item, int count, HashSet<int> touched)
     {
-        if (item.Countable != 0)
+        var stackable = item.Countable != 0;
+        if (stackable && count > InventoryConstants.MaxStackCount)
+            return false;
+
+        var perSlot = stackable ? count : ItemTransfer.SingleItem;
+        var placements = stackable ? ItemTransfer.SingleItem : count;
+        for (var placed = 0; placed < placements; placed++)
         {
-            if (count > InventoryConstants.MaxStackCount)
+            var incoming = ItemStack.Fresh(item.Num, item.Duration, (ushort)perSlot);
+            var position = ItemTransfer.FindSlot(slots[GridStart..GridEnd], incoming, stackable);
+            if (position == ItemTransfer.NoSlot)
                 return false;
 
-            var slot = FindStack(ids, counts, item.Num, count);
-            if (slot == NoSlot)
-                slot = FindEmpty(ids);
-            if (slot == NoSlot)
-                return false;
-
-            ids[slot] = item.Num;
-            counts[slot] += count;
-            changes.Add(new RewardSlotChange(slot, item.Num, count, item.Duration));
-            return true;
-        }
-
-        for (var unit = 0; unit < count; unit++)
-        {
-            var slot = FindEmpty(ids);
-            if (slot == NoSlot)
-                return false;
-
-            ids[slot] = item.Num;
-            counts[slot] = SingleUnit;
-            changes.Add(new RewardSlotChange(slot, item.Num, SingleUnit, item.Duration));
+            var index = GridStart + position;
+            slots[index] = ItemTransfer.Merge(slots[index], incoming);
+            touched.Add(index);
         }
 
         return true;
     }
-
-    private static int FindStack(int[] ids, int[] counts, int itemId, int count)
-    {
-        for (var index = GridStart; index < GridEnd; index++)
-        {
-            if (ids[index] == itemId && counts[index] + count <= InventoryConstants.MaxStackCount)
-                return index;
-        }
-
-        return NoSlot;
-    }
-
-    private static int FindEmpty(int[] ids)
-    {
-        for (var index = GridStart; index < GridEnd; index++)
-        {
-            if (ids[index] == EmptyItemId)
-                return index;
-        }
-
-        return NoSlot;
-    }
-
-    private static RewardSlotImage Image(int index, ItemSlot slot) =>
-        new(index, slot.ItemId, slot.Durability, slot.Count, slot.Flag, slot.ExpiresAt);
 }

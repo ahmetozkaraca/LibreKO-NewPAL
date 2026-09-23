@@ -8,6 +8,7 @@ public class RegionManager
     public const float RegionSize = 48.0f;
     public const int ViewDistance = 1; // ±1 neighbors (3x3 grid)
     public const long NoRegionKey = -1;
+    public const ushort OpenWorldRoom = 0;
 
     // Key: packed zoneId|regionX|regionZ -> set of session IDs in that region
     private readonly ConcurrentDictionary<long, ConcurrentDictionary<int, UserSession>> _regions = new();
@@ -24,8 +25,14 @@ public class RegionManager
     private readonly ConcurrentDictionary<int, LootBundle> _bundles = new();
     private int _nextBundleId = 1;
 
+    private const int RoomShift = 40;
+    private const int ZoneShift = 32;
+    private const int RegionXShift = 16;
+    private const int RegionMask = 0xFFFF;
+
     private static long RegionKey(ushort room, byte zoneId, int rx, int rz) =>
-        ((long)room << 40) | ((long)zoneId << 32) | ((long)(rx & 0xFFFF) << 16) | (long)(rz & 0xFFFF);
+        ((long)room << RoomShift) | ((long)zoneId << ZoneShift)
+        | ((long)(rx & RegionMask) << RegionXShift) | (long)(rz & RegionMask);
 
     public static bool IsInWorld(UserSession session) => session.RegisteredRegionKey != NoRegionKey;
 
@@ -65,6 +72,20 @@ public class RegionManager
 
     public IEnumerable<UserSession> GetNearbyUsers(UserSession session)
         => GetNearbyUsersAt(session.Room, session.ZoneId, session.RegionX, session.RegionZ, session.CharacterId);
+
+    public IEnumerable<UserSession> GetUsersAroundRegistration(UserSession session)
+    {
+        var key = session.RegisteredRegionKey;
+        if (key == NoRegionKey)
+            return [];
+
+        return GetNearbyUsersAt(
+            (ushort)(key >> RoomShift),
+            (byte)(key >> ZoneShift),
+            (short)(key >> RegionXShift),
+            (short)key,
+            session.CharacterId);
+    }
 
     public IEnumerable<UserSession> GetNearbyUsersAt(ushort room, byte zoneId, int regionX, int regionZ, int excludeCharacterId)
     {
@@ -139,11 +160,11 @@ public class RegionManager
         return npc;
     }
 
-    public NpcInstance? GetNpcByProtoId(byte zoneId, short npcId)
+    public NpcInstance? GetNpcByProtoId(ushort room, byte zoneId, short npcId)
     {
         foreach (var npc in _npcs.Values)
         {
-            if (npc.ZoneId == zoneId && npc.NpcId == npcId)
+            if (npc.Room == room && npc.ZoneId == zoneId && npc.NpcId == npcId)
                 return npc;
         }
         return null;

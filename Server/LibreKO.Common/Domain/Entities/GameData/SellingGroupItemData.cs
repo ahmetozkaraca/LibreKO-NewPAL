@@ -6,5 +6,4 @@ public class SellingGroupItemData
     public byte Line { get; set; }
     public byte Index { get; set; }
     public int ItemId { get; set; }
-    public int Price { get; set; }
 }

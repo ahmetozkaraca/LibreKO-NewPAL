@@ -53,7 +53,7 @@ public class SocialPacketCoordinator(
         {
             writer = ChatTargetPacketWriter.WhisperTargetNotFound();
         }
-        else if (target.BlockPrivateChat)
+        else if (target.BlockPrivateChat && !session.IsGM)
         {
             writer = ChatTargetPacketWriter.WhisperTargetBlocked(target.Name);
         }

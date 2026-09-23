@@ -1,8 +1,10 @@
 ﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
+using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
+using LibreKO.Game.Protocol.Writers;
 using LibreKO.Game.World;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
@@ -25,6 +27,10 @@ public class ItemTransferRuleTests : EconomyTestBase
     private const byte MoveRequest = 1;
     private const byte ArrangeRequest = 2;
     private const byte FreePosition = 5;
+    private const ushort Taken = 5;
+    private const ushort Held = 7;
+    private const ushort ArrivedMeanwhile = 3;
+    private const int HomeSlots = 4;
 
     [Fact]
     public async Task ARentedItemCannotBeSealedIntoAPermanentOne()
@@ -183,6 +189,172 @@ public class ItemTransferRuleTests : EconomyTestBase
 
         TotalHeld(player, Arrow).Should().Be(0);
         bundle.SnapshotItems().Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task ARefusedDropIsAnsweredWithAnEmptyDrop()
+    {
+        using var provider = Provider();
+        var player = Player(provider, 9110, out var sent);
+        Give(player, 0, Sword, flag: ItemFlag.Bound);
+
+        await Drop(provider, player, 0, Sword);
+
+        Bag(player, 0).ItemId.Should().Be(Sword);
+        var reply = Last(sent, GameOpcodes.GS_ITEM_DROP);
+        reply.Should().NotBeNull();
+        reply!.ReadInt().Should().Be(player.CharacterId);
+        reply.ReadInt().Should().Be(ItemDropPacketWriter.NoBundle);
+        reply.ReadByte().Should().Be(0);
+    }
+
+    [Fact]
+    public void RevertingAnUntouchedSlotRestoresIt()
+    {
+        var home = Home(ItemStack.Fresh(Arrow, 0, Held));
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Take(home[0], Taken);
+        ledger.Settle();
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].Count.Should().Be(Held);
+    }
+
+    [Fact]
+    public void RevertingKeepsWhatArrivedAfterTheChange()
+    {
+        var home = Home();
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Put(home[0], ItemStack.Fresh(Arrow, 0, Taken));
+        ledger.Settle();
+        home[0].Count += ArrivedMeanwhile;
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].ItemId.Should().Be(Arrow);
+        home[0].Count.Should().Be(ArrivedMeanwhile);
+    }
+
+    [Fact]
+    public void RevertingAnEmptiedSlotAddsBackOntoWhatArrived()
+    {
+        var home = Home(ItemStack.Fresh(Arrow, 0, Taken));
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Take(home[0], Taken);
+        ledger.Settle();
+        ItemTransfer.Put(home[0], ItemStack.Fresh(Arrow, 0, ArrivedMeanwhile));
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].Count.Should().Be(Taken + ArrivedMeanwhile);
+    }
+
+    [Fact]
+    public void RevertingNeverStacksAnItemThatDoesNotStack()
+    {
+        var home = Home(ItemStack.Fresh(Sword, WornDurability, ItemTransfer.SingleItem));
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Take(home[0], ItemTransfer.SingleItem);
+        ledger.Settle();
+        ItemTransfer.Put(home[0], ItemStack.Fresh(Sword, SwordDuration, ItemTransfer.SingleItem));
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].Count.Should().Be(ItemTransfer.SingleItem);
+        home[0].Durability.Should().Be(SwordDuration);
+        home[1].ItemId.Should().Be(Sword);
+        home[1].Count.Should().Be(ItemTransfer.SingleItem);
+        home[1].Durability.Should().Be(WornDurability);
+    }
+
+    [Fact]
+    public void RevertingReturnsTheItemToAFreeSlotWhenADifferentItemArrived()
+    {
+        var home = Home(ItemStack.Fresh(Arrow, 0, Taken));
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Take(home[0], Taken);
+        ledger.Settle();
+        ItemTransfer.Put(home[0], ItemStack.Fresh(Sword, SwordDuration, ItemTransfer.SingleItem));
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].ItemId.Should().Be(Sword);
+        home[1].ItemId.Should().Be(Arrow);
+        home[1].Count.Should().Be(Taken);
+    }
+
+    [Fact]
+    public void RevertingChangesNothingWhenAnySlotCannotBeReverted()
+    {
+        var bag = new[] { ItemStack.Fresh(Arrow, 0, Taken).ToSlot() };
+        var vault = Home();
+        var ledger = new SlotLedger().Touch(bag[0], bag).Touch(vault[0], vault);
+        ItemTransfer.TryTransfer(bag[0], vault[0], Taken, stackable: true).Should().BeTrue();
+        ledger.Settle();
+        ItemTransfer.Put(bag[0], ItemStack.Fresh(Sword, SwordDuration, ItemTransfer.SingleItem));
+
+        ledger.Revert(Catalog()).Should().BeFalse();
+
+        bag[0].ItemId.Should().Be(Sword);
+        vault[0].ItemId.Should().Be(Arrow);
+        vault[0].Count.Should().Be(Taken);
+    }
+
+    [Fact]
+    public void RevertingGivesBackWhatWasTakenFromASlotThatEmptiedMeanwhile()
+    {
+        var home = Home(ItemStack.Fresh(Arrow, 0, Held));
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Take(home[0], Taken);
+        ledger.Settle();
+        home[0].Clear();
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].ItemId.Should().Be(Arrow);
+        home[0].Count.Should().Be(Taken);
+    }
+
+    [Fact]
+    public void RevertingRefusesToTakeBackWhatAlreadyLeftTheSlot()
+    {
+        var home = Home();
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemTransfer.Put(home[0], ItemStack.Fresh(Arrow, 0, Taken));
+        ledger.Settle();
+        home[0].Clear();
+
+        ledger.Revert(Catalog()).Should().BeFalse();
+
+        home[0].IsEmpty.Should().BeTrue();
+    }
+
+    [Fact]
+    public void RevertingASwappedSlotKeepsWhatArrivedAndReturnsTheOriginal()
+    {
+        var home = Home(ItemStack.Fresh(Sword, SwordDuration, ItemTransfer.SingleItem));
+        var ledger = new SlotLedger().Touch(home[0], home);
+        ItemStack.Fresh(Arrow, 0, Taken).WriteTo(home[0]);
+        ledger.Settle();
+        home[0].Count += ArrivedMeanwhile;
+
+        ledger.Revert(Catalog()).Should().BeTrue();
+
+        home[0].ItemId.Should().Be(Arrow);
+        home[0].Count.Should().Be(ArrivedMeanwhile);
+        home[1].ItemId.Should().Be(Sword);
+    }
+
+    private static ItemSlot[] Home(params ItemStack[] stacks) =>
+        Enumerable.Range(0, HomeSlots).Select(index => index < stacks.Length ? stacks[index].ToSlot() : new ItemSlot()).ToArray();
+
+    private static IGameDataService Catalog()
+    {
+        var gameData = Substitute.For<IGameDataService>();
+        gameData.GetItem(Sword).Returns(new ItemData { Num = Sword, Countable = 0, Duration = SwordDuration });
+        gameData.GetItem(Arrow).Returns(new ItemData { Num = Arrow, Countable = 1 });
+        return gameData;
     }
 
     private ServiceProvider Provider() => CreateProvider(_ => { }, gameData =>

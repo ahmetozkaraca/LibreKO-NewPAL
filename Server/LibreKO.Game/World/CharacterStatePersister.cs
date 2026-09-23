@@ -25,8 +25,6 @@ public interface ICharacterStatePersister
     Task<TResult> RunAsync<TResult>(UserSession session, TResult refused, Func<ICharacterUnitOfWork, Task<TResult>> work);
 
     Task SetOnlineStateAsync(int characterId, bool isOnline, CancellationToken cancellationToken = default);
-
-    Task SaveQuestStateAsync(UserSession session, CancellationToken cancellationToken = default);
 }
 
 public class CharacterStatePersister(
@@ -44,9 +42,6 @@ public class CharacterStatePersister(
 
     public Task<bool> SaveFinalAsync(UserSession session, CancellationToken cancellationToken = default) =>
         ExclusiveAsync(session.CharacterId, () => WriteAsync(session, final: true, cancellationToken), cancellationToken);
-
-    public Task SaveQuestStateAsync(UserSession session, CancellationToken cancellationToken = default) =>
-        RequestSaveAsync(session);
 
     public Task<bool> RequestSaveAsync(UserSession session)
     {

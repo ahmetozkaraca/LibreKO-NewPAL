@@ -63,9 +63,8 @@ var builder = Host.CreateDefaultBuilder(args)
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IAccountRepository, AccountRepository>();
         services.AddScoped<ILoginService, LoginService>();
-        services.AddSingleton(sp => new LoginAttemptLimiter(
-            sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections,
-            sp.GetRequiredService<TimeProvider>()));
+        services.AddSingleton<IOptions<ConnectionLimitsSettings>, ConnectionLimitsOptions<LoginServerSettings>>();
+        services.AddSingleton<LoginAttemptLimiter>();
         services.AddSingleton<AccountCreationThrottle>();
 
         services.AddSingleton<IPatchRepository, PatchRepository>();
@@ -73,7 +72,8 @@ var builder = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IKingRepository, KingRepository>();
         services.AddSingleton<IClientFactory>(sp =>
             new ClientFactory(ServerType.Login, sp.GetRequiredService<ILogger<Client>>(),
-                sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections));
+                sp.GetRequiredService<IOptions<ConnectionLimitsSettings>>().Value,
+                sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<IPacketHandler, LoginPacketHandler>();
 
         services.AddSingleton(sp =>

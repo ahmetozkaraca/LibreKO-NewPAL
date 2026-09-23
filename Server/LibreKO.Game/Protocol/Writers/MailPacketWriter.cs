@@ -51,7 +51,7 @@ public sealed class MailPacketWriter
         var packet = Sub(SubRead);
         packet.WriteByte(ok ? Succeeded : Failed);
         packet.WriteInt(mailId);
-        packet.WriteSByteString(body);
+        packet.WriteString(body);
         return packet;
     }
 

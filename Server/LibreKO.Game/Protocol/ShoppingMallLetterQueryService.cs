@@ -26,7 +26,7 @@ public class ShoppingMallLetterQueryService(IServiceScopeFactory scopeFactory,
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         var count = await db.MailBoxes
-            .CountAsync(mail => mail.RecipientId == session.Name && mail.Status == 1 && !mail.Deleted);
+            .CountAsync(mail => mail.RecipientId == session.Name && mail.Status == ShoppingMallLetterProtocol.LetterStatusUnread && !mail.Deleted);
         logger.LogDebug("{Name} has {Count} unread mail", session.Name, count);
 
         await session.Client.SendPacket(ShoppingMallPacketWriter.UnreadCount(

@@ -8,10 +8,11 @@ public interface IClientFactory
     IClient Create(Socket socket);
 }
 
-public class ClientFactory(ServerType serverType, ILogger<Client> logger, ConnectionLimitsSettings limits) : IClientFactory
+public class ClientFactory(ServerType serverType, ILogger<Client> logger, ConnectionLimitsSettings limits, TimeProvider time)
+    : IClientFactory
 {
     public IClient Create(Socket socket)
     {
-        return new Client(socket, serverType, logger, limits);
+        return new Client(socket, serverType, logger, limits, time);
     }
 }

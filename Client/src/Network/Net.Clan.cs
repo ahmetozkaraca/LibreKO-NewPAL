@@ -74,6 +74,8 @@ public partial class Net
             case KnCapeNpc:
                 ClanCapeNpcEvent?.Invoke();
                 break;
+            case KnAdmit:
+            case KnReject:
             case KnWithdraw:
             case KnRemove:
             case KnDestroy:

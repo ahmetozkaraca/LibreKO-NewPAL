@@ -83,7 +83,7 @@ public class WorldTests : GameTestBase
 
         spawnMethod!.Invoke(bootstrapper, [gameData]);
 
-        var bindStone = sessionManager.Regions.GetNpcByProtoId(21, 1019);
+        var bindStone = sessionManager.Regions.GetNpcByProtoId(RegionManager.OpenWorldRoom, 21, 1019);
         bindStone.Should().NotBeNull();
         bindStone!.NpcId.Should().Be(1019);
         bindStone.X.Should().BeApproximately(673.1f, 0.01f);
@@ -214,8 +214,8 @@ public class WorldTests : GameTestBase
 
         spawnMethod!.Invoke(bootstrapper, [gameData]);
 
-        sessionManager.Regions.GetNpcByProtoId(21, 19000).Should().NotBeNull();
-        sessionManager.Regions.GetNpcByProtoId(22, 19000).Should().NotBeNull();
+        sessionManager.Regions.GetNpcByProtoId(RegionManager.OpenWorldRoom, 21, 19000).Should().NotBeNull();
+        sessionManager.Regions.GetNpcByProtoId(RegionManager.OpenWorldRoom, 22, 19000).Should().NotBeNull();
     }
 
     [Theory]

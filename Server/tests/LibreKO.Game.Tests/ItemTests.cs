@@ -67,6 +67,35 @@ public class ItemTests : GameTestBase
     }
 
     [Fact]
+    public async Task ItemPacketCoordinator_HandleMoveAsync_AnswersAnUnknownDirectionWithAFailure()
+    {
+        const int itemId = 600100;
+        const byte unknownDirection = 99;
+
+        using var provider = CreateProvider(_ => { });
+        var client = Substitute.For<IClient>();
+        client.Id.Returns(Guid.NewGuid());
+        var sentPackets = new List<Packet>();
+        client.SendPacket(Arg.Do<Packet>(packet => sentPackets.Add(packet)), Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+        provider.GetRequiredService<SessionManager>().CreateSession(client, characterId: 401, accountId: 411);
+
+        var packet = new Packet(GameOpcodes.GS_ITEM_MOVE);
+        packet.WriteByte(1);
+        packet.WriteByte(unknownDirection);
+        packet.WriteInt(itemId);
+        packet.WriteByte(0);
+        packet.WriteByte(1);
+
+        await provider.GetRequiredService<IItemPacketCoordinator>().HandleMoveAsync(client, packet);
+
+        var itemMovePacket = sentPackets.Single(sent => sent.GetOpcode() == (byte)GameOpcodes.GS_ITEM_MOVE);
+        itemMovePacket.ResetOffset();
+        itemMovePacket.ReadByte().Should().Be(1);
+        itemMovePacket.ReadByte().Should().Be(0);
+    }
+
+    [Fact]
     public async Task ItemPacketCoordinator_HandleMoveAsync_RemovesEquippedItemOpBuffOnUnequip()
     {
         const int itemId = 700100;
@@ -958,6 +987,7 @@ public class ItemTests : GameTestBase
             _ => { },
             gameData =>
             {
+                gameData.HasSellingGroup(1).Returns(true);
                 gameData.GetItem(itemId).Returns(new ItemData
                 {
                     Num = itemId,
@@ -1027,6 +1057,7 @@ public class ItemTests : GameTestBase
             _ => { },
             gameData =>
             {
+                gameData.HasSellingGroup(1).Returns(true);
                 gameData.GetItem(baseItemId).Returns(new ItemData
                 {
                     Num = baseItemId,
@@ -1097,6 +1128,7 @@ public class ItemTests : GameTestBase
             _ => { },
             gameData =>
             {
+                gameData.HasSellingGroup(1).Returns(true);
                 gameData.GetCoefficient(101).Returns(CreateBasicCoefficient(101));
                 gameData.GetItem(itemId).Returns(new ItemData
                 {

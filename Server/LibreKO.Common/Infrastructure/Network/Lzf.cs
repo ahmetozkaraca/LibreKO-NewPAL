@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 
 namespace LibreKO.Common.Infrastructure.Network;
 
@@ -135,53 +135,6 @@ public static class Lzf
             output[outputIndex - lit - 1] = (byte)(lit - 1);
         else
             outputIndex--;
-
-        return outputIndex;
-    }
-
-    public static int Decompress(byte[] input, int inputLength, byte[] output, int outputLength)
-    {
-        int inputIndex = 0;
-        int outputIndex = 0;
-
-        while (inputIndex < inputLength)
-        {
-            int ctrl = input[inputIndex++];
-
-            if (ctrl < (1 << 5)) // Literal run
-            {
-                ctrl++;
-                if (outputIndex + ctrl > outputLength) return 0;
-                if (inputIndex + ctrl > inputLength) return 0;
-
-                Array.Copy(input, inputIndex, output, outputIndex, ctrl);
-                inputIndex += ctrl;
-                outputIndex += ctrl;
-            }
-            else // Backreference
-            {
-                int len = ctrl >> 5;
-                int reference = outputIndex - ((ctrl & 0x1f) << 8) - 1;
-
-                if (inputIndex >= inputLength) return 0;
-
-                if (len == 7)
-                {
-                    len += input[inputIndex++];
-                    if (inputIndex >= inputLength) return 0;
-                }
-
-                reference -= input[inputIndex++];
-                len += 2;
-
-                if (outputIndex + len > outputLength) return 0;
-                if (reference < 0) return 0;
-
-                // Copy byte-by-byte (may overlap)
-                for (int i = 0; i < len; i++)
-                    output[outputIndex++] = output[reference++];
-            }
-        }
 
         return outputIndex;
     }

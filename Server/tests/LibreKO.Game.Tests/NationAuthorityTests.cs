@@ -26,6 +26,16 @@ public class NationAuthorityTests : GameTestBase
     private const byte EventPrize = 3;
     private const int KingScepter = 910074311;
     private const byte VoterLevel = 60;
+    private const byte ElectionNominate = 2;
+    private const byte ElectionTypeNomination = 1;
+    private const byte SenatorListType = 3;
+    private const byte TaxCollect = 2;
+    private const int TerritoryTax = 1_000;
+    private const short SenatorClan = 31;
+    private const short OutsiderClan = 32;
+    private const short FirstNomineeClan = 33;
+    private const short SecondNomineeClan = 34;
+    private const int RacingSenators = 8;
 
     private const byte SiegeDelosNpc = 4;
     private const byte DelosCollectFunds = 2;
@@ -121,6 +131,92 @@ public class NationAuthorityTests : GameTestBase
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         (await db.KingSystem.SingleAsync(row => row.Nation == (byte)AccountNation.Karus)).KingName.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task OnlyASenatorNominatesAndOnlyOnce()
+    {
+        var kingData = new KingSystemData { Nation = (byte)AccountNation.Karus, Type = ElectionTypeNomination };
+        using var provider = CreateProvider(
+            db =>
+            {
+                db.Add(kingData);
+                db.KingElectionList.Add(new KingElectionList
+                {
+                    Nation = (byte)AccountNation.Karus, Type = SenatorListType, Name = "Senator", Knights = SenatorClan,
+                });
+            },
+            gameData => gameData.KingSystemTable.Returns(new Dictionary<byte, KingSystemData>
+            {
+                [(byte)AccountNation.Karus] = kingData,
+            }));
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var nation = provider.GetRequiredService<INationSystemsPacketCoordinator>();
+        var senator = CreateChief(sessionManager, 930, "Senator", SenatorClan);
+        var outsider = CreateChief(sessionManager, 931, "Outsider", OutsiderClan);
+        CreateChief(sessionManager, 932, "FirstNominee", FirstNomineeClan);
+        CreateChief(sessionManager, 933, "SecondNominee", SecondNomineeClan);
+
+        await nation.HandleKingAsync(outsider.Client, Nominate("FirstNominee"));
+        (await CandidatesAsync(provider)).Should().BeEmpty();
+
+        await nation.HandleKingAsync(senator.Client, Nominate("FirstNominee"));
+        await nation.HandleKingAsync(senator.Client, Nominate("SecondNominee"));
+
+        (await CandidatesAsync(provider)).Should().Equal("FirstNominee");
+    }
+
+    [Fact]
+    public async Task SimultaneousNominationsOfOnePlayerListHimOnce()
+    {
+        var kingData = new KingSystemData { Nation = (byte)AccountNation.Karus, Type = ElectionTypeNomination };
+        var senators = Enumerable.Range(0, RacingSenators).Select(index => $"Senator{index}").ToList();
+        using var provider = CreateProvider(
+            db =>
+            {
+                db.Add(kingData);
+                foreach (var name in senators)
+                {
+                    db.KingElectionList.Add(new KingElectionList
+                    {
+                        Nation = (byte)AccountNation.Karus, Type = SenatorListType, Name = name, Knights = SenatorClan,
+                    });
+                }
+            },
+            gameData => gameData.KingSystemTable.Returns(new Dictionary<byte, KingSystemData>
+            {
+                [(byte)AccountNation.Karus] = kingData,
+            }));
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var nation = provider.GetRequiredService<INationSystemsPacketCoordinator>();
+        var clients = senators.Select((name, index) => CreateChief(sessionManager, 940 + index, name, SenatorClan).Client).ToList();
+        CreateChief(sessionManager, 960, "FirstNominee", FirstNomineeClan);
+
+        await Task.WhenAll(clients.Select(client => Task.Run(() => nation.HandleKingAsync(client, Nominate("FirstNominee")))));
+
+        (await CandidatesAsync(provider)).Should().Equal("FirstNominee");
+    }
+
+    [Fact]
+    public async Task TaxCollectionNeverOverflowsTheKingsPurse()
+    {
+        using var provider = CreateKingdom(out var king, out var client);
+        var kingData = provider.GetRequiredService<IKingSystemRuntimeService>().GetKingData(AccountNation.Karus)!;
+        kingData.TerritoryTax = TerritoryTax;
+        king.Money = ExchangePacketConstants.CoinMax - 10;
+
+        await provider.GetRequiredService<INationSystemsPacketCoordinator>()
+            .HandleKingAsync(client, KingPacket(KingTax, TaxCollect));
+
+        king.Money.Should().Be(ExchangePacketConstants.CoinMax - 10);
+        kingData.TerritoryTax.Should().Be(TerritoryTax);
+
+        king.Money = 0;
+        await provider.GetRequiredService<INationSystemsPacketCoordinator>()
+            .HandleKingAsync(client, KingPacket(KingTax, TaxCollect));
+
+        king.Money.Should().Be(TerritoryTax);
+        kingData.TerritoryTax.Should().Be(0);
     }
 
     [Fact]
@@ -259,6 +355,33 @@ public class NationAuthorityTests : GameTestBase
             MaxHp = 1,
             Hp = 1,
         }).UniqueId;
+    }
+
+    private static UserSession CreateChief(SessionManager sessionManager, int characterId, string name, short clanId)
+    {
+        var (chief, _, _) = CreatePlayer(sessionManager, characterId, characterId, AccountNation.Karus);
+        chief.Name = name;
+        chief.KnightsId = clanId;
+        chief.KnightsFame = ClanChief;
+        return chief;
+    }
+
+    private static async Task<List<string>> CandidatesAsync(ServiceProvider provider)
+    {
+        await using var scope = provider.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<AppDbContext>().KingElectionList
+            .Where(entry => entry.Type == CandidateListType)
+            .Select(entry => entry.Name)
+            .ToListAsync();
+    }
+
+    private static Packet Nominate(string nominee)
+    {
+        var packet = new Packet(GameOpcodes.GS_KING);
+        packet.WriteByte(KingElection);
+        packet.WriteByte(ElectionNominate);
+        packet.WriteSByteString(nominee);
+        return packet;
     }
 
     private static Packet Vote(string candidate)

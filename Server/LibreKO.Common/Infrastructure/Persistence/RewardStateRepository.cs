@@ -55,7 +55,7 @@ public class RewardStateRepository(AppDbContext context) : IRewardStateRepositor
         await context.SaveChangesAsync();
     }
 
-    public async Task<bool> ClaimQuestAsync(CharacterRewardQuest claim, int eventCoins)
+    public async Task<bool> StageQuestClaimAsync(CharacterRewardQuest claim, int eventCoins)
     {
         var stored = await FindQuestAsync(claim);
         if (stored == null)
@@ -76,11 +76,10 @@ public class RewardStateRepository(AppDbContext context) : IRewardStateRepositor
         if (eventCoins > 0)
             await AddEventCoinsAsync(claim.CharacterId, eventCoins);
 
-        await context.SaveChangesAsync();
         return true;
     }
 
-    public async Task<bool> SpendEventCoinsAsync(RouletteSpin spin, int cost)
+    public async Task<bool> StageRouletteSpinAsync(RouletteSpin spin, int cost)
     {
         var wallet = await context.EventCoinWallets.FindAsync(spin.CharacterId);
         if (wallet == null || wallet.Coins < cost)
@@ -88,11 +87,10 @@ public class RewardStateRepository(AppDbContext context) : IRewardStateRepositor
 
         wallet.Coins -= cost;
         context.RouletteSpins.Add(spin);
-        await context.SaveChangesAsync();
         return true;
     }
 
-    public async Task<bool> ClaimDailyRewardAsync(DailyRewardClaim claim)
+    public async Task<bool> StageDailyRewardClaimAsync(DailyRewardClaim claim)
     {
         var claimed = await context.DailyRewardClaims.AnyAsync(stored =>
             stored.AccountId == claim.AccountId && stored.Pool == claim.Pool && stored.Day == claim.Day);
@@ -100,7 +98,6 @@ public class RewardStateRepository(AppDbContext context) : IRewardStateRepositor
             return false;
 
         context.DailyRewardClaims.Add(claim);
-        await context.SaveChangesAsync();
         return true;
     }
 

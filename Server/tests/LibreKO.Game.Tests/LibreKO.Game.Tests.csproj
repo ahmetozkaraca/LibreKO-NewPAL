@@ -30,7 +30,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\LibreKO.Common.Tests\ManualClock.cs" Link="ManualClock.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="LibreKO.Common.Tests" />
   </ItemGroup>
 
 </Project>

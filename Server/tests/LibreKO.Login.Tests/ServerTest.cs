@@ -78,9 +78,8 @@ public abstract class ServerTest : IDisposable
 
                 services.AddScoped<IAccountRepository, AccountRepository>();
                 services.AddScoped<ILoginService, LoginService>();
-                services.AddSingleton(sp => new LoginAttemptLimiter(
-                    sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections,
-                    sp.GetRequiredService<TimeProvider>()));
+                services.AddSingleton<IOptions<ConnectionLimitsSettings>, ConnectionLimitsOptions<LoginServerSettings>>();
+                services.AddSingleton<LoginAttemptLimiter>();
                 services.AddSingleton<AccountCreationThrottle>();
 
                 services.AddSingleton<IServerRepository, ServerRepository>();
@@ -88,7 +87,8 @@ public abstract class ServerTest : IDisposable
                 services.AddSingleton<IPatchRepository, PatchRepository>();
                 services.AddSingleton<IClientFactory>(sp =>
                     new ClientFactory(ServerType.Login, sp.GetRequiredService<ILogger<Client>>(),
-                        sp.GetRequiredService<IOptions<LoginServerSettings>>().Value.Connections));
+                        sp.GetRequiredService<IOptions<ConnectionLimitsSettings>>().Value,
+                        sp.GetRequiredService<TimeProvider>()));
                 services.AddSingleton<IPacketHandler, LoginPacketHandler>();
 
                 ConfigureServices(ctx, services);

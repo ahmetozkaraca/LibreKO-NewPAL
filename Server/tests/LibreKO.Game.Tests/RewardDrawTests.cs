@@ -1,6 +1,6 @@
 ﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
-using LibreKO.Common.Domain.Services;
+using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
@@ -54,7 +54,7 @@ public class RewardDrawTests : RewardTestBase
         player.Session.Money.Should().Be(DailyHuntGold + RouletteGold);
         player.Session.Rewards.EventCoins.Should().Be(0);
         (await StoredCoinsAsync(provider, 7002)).Should().Be(0);
-        ViolationScore(provider, player).Should().Be(ViolationMonitor.InvalidStateWeight);
+        ViolationScore(provider, player).Should().Be(0, "repeating a claim that already paid is a stale window, not an attack");
     }
 
     [Fact]
@@ -228,7 +228,7 @@ public class RewardDrawTests : RewardTestBase
             .Should().Equal((Succeeded, GenieHighTierGold), (Failed, 0));
         player.Session.Money.Should().Be(GenieHighTierGold);
         altStatus.Should().BeFalse();
-        ViolationScore(provider, player).Should().Be(ViolationMonitor.InvalidStateWeight);
+        ViolationScore(provider, player).Should().Be(0, "repeating a claim that already paid is a stale window, not an attack");
     }
 
     [Fact]
@@ -266,7 +266,7 @@ public class RewardDrawTests : RewardTestBase
         using var provider = CreateRewardProvider(
             new ManualClock(),
             new ScriptedRandom(ItemPrizeRoll),
-            services => services.AddScoped<IRewardStateRepository, FailingWritesRepository>());
+            FailingCommitsOf<DailyRewardClaim>().Register);
         var player = Player(provider, 7016, 8016, level: 20);
         await FortuneStatusAsync(provider, player);
 
@@ -276,6 +276,93 @@ public class RewardDrawTests : RewardTestBase
         ReceivedNotice(player, RewardNotices.Unavailable).Should().BeTrue();
         CountItem(player.Session, PotionItemId).Should().Be(0);
         (await FortuneStatusAsync(provider, player)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Roulette_AFailedCommitKeepsTheCoinAndWithdrawsThePrize()
+    {
+        using var provider = CreateRewardProvider(
+            new ManualClock(),
+            new ScriptedRandom(ItemPrizeRoll),
+            FailingCommitsOf<RouletteSpin>().Register);
+        var player = Player(provider, 7017, 8017, level: 10);
+        await EarnDailyHuntAsync(provider, player);
+        await OpenRouletteAsync(provider, player);
+
+        await RouteAsync(provider, player, GameOpcodes.GS_EVENT_BOARD, RouletteSpin);
+
+        LastSpin(player).Should().Be((Failed, 0, 0));
+        ReceivedNotice(player, RewardNotices.Unavailable).Should().BeTrue();
+        CountItem(player.Session, PotionItemId).Should().Be(0);
+        player.Session.Rewards.EventCoins.Should().Be(DailyHuntCoins);
+        (await StoredCoinsAsync(provider, 7017)).Should().Be(DailyHuntCoins);
+        (await InScopeAsync(provider, db => db.RouletteSpins.CountAsync())).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Roulette_ALeavingPlayerCannotSpin()
+    {
+        using var provider = CreateRewardProvider(new ManualClock());
+        var player = Player(provider, 7018, 8018, level: 10);
+        await EarnDailyHuntAsync(provider, player);
+        await OpenRouletteAsync(provider, player);
+        var moneyBefore = player.Session.Money;
+        player.Session.TryBeginClosing();
+
+        var result = await provider.GetRequiredService<IRewardDrawService>().SpinRouletteAsync(player.Session);
+
+        result.Outcome.Should().Be(RewardOutcome.Unavailable);
+        player.Session.Money.Should().Be(moneyBefore);
+        player.Session.Rewards.EventCoins.Should().Be(DailyHuntCoins);
+        (await StoredCoinsAsync(provider, 7018)).Should().Be(DailyHuntCoins);
+        ViolationScore(provider, player).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Fortune_ALeavingPlayerCannotDraw()
+    {
+        using var provider = CreateRewardProvider(new ManualClock());
+        var player = Player(provider, 7019, 8019, level: 20);
+        await FortuneStatusAsync(provider, player);
+        player.Session.TryBeginClosing();
+
+        var result = await provider.GetRequiredService<IRewardDrawService>().ClaimDailyRewardAsync(player.Session, PrizePool.Fortune);
+
+        result.Outcome.Should().Be(RewardOutcome.Unavailable);
+        player.Session.Money.Should().Be(0);
+        (await InScopeAsync(provider, db => db.DailyRewardClaims.CountAsync())).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Fortune_TheDrawIsCommittedWithTheCharacter()
+    {
+        using var provider = CreateRewardProvider(new ManualClock(), seed: StoredCharacter(7020, 8020));
+        var player = Player(provider, 7020, 8020, level: 20);
+        await FortuneStatusAsync(provider, player);
+
+        await RouteAsync(provider, player, GameOpcodes.GS_FORTUNE, DrawSub);
+
+        LastDraw(player, GameOpcodes.GS_FORTUNE).Should().Be((Succeeded, 0, FortuneGold));
+        (await StoredCharacterAsync(provider, 7020)).Money.Should().Be(FortuneGold);
+        (await InScopeAsync(provider, db => db.DailyRewardClaims.CountAsync())).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Fortune_APrizeNeverStacksOntoARentedStack()
+    {
+        using var provider = CreateRewardProvider(new ManualClock(), new ScriptedRandom(ItemPrizeRoll));
+        var player = Player(provider, 7021, 8021, level: 20);
+        Give(player.Session, InventoryConstants.InventoryStart, PotionItemId, 1, ItemFlag.Rented);
+        await FortuneStatusAsync(provider, player);
+
+        await RouteAsync(provider, player, GameOpcodes.GS_FORTUNE, DrawSub);
+
+        LastDraw(player, GameOpcodes.GS_FORTUNE).Should().Be((Succeeded, PotionItemId, 0));
+        player.Session.Inventory[InventoryConstants.InventoryStart].Count.Should().Be(1);
+        var prize = player.Session.Inventory[InventoryConstants.InventoryStart + 1];
+        prize.ItemId.Should().Be(PotionItemId);
+        prize.Count.Should().Be(RoulettePotions);
+        prize.State.Should().Be(ItemFlag.Unsealed);
     }
 
     private static async Task EarnDailyHuntAsync(ServiceProvider provider, RewardPlayer player)

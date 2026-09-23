@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Text;
 
 namespace LibreKO.Common.Infrastructure.Network;
@@ -254,37 +254,5 @@ public class Packet(byte opcode)
         result.WriteUInt((uint)crc);
         result.WriteBytes(outBuffer.AsSpan(0, compressedLength).ToArray());
         return result;
-    }
-
-    private const int MaxDecompressedSize = 1024 * 1024; // 1 MB cap to prevent DoS
-
-    public static Packet? Decompress(Packet compressed)
-    {
-        int compressedLength = compressed.ReadInt();
-        int originalLength = compressed.ReadInt();
-        uint crc = compressed.ReadUInt();
-
-        if (compressedLength <= 0 || originalLength <= 0)
-            return null;
-
-        if (originalLength > MaxDecompressedSize || compressedLength > MaxDecompressedSize)
-            return null;
-
-        var compressedData = compressed.ReadBytes(compressedLength);
-        var decompressed = new byte[originalLength];
-
-        int result = Lzf.Decompress(compressedData, compressedLength, decompressed, originalLength);
-        if (result != originalLength)
-            return null;
-
-        if (Crc32.Compute(decompressed) != crc)
-            return null;
-
-        // First byte is the original opcode, rest is data
-        var pkt = new Packet(decompressed[0]);
-        if (originalLength > 1)
-            pkt.WriteBytes(decompressed.AsSpan(1, originalLength - 1).ToArray());
-        pkt.ResetOffset();
-        return pkt;
     }
 }

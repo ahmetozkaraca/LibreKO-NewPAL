@@ -21,6 +21,7 @@ public interface ICharacterRepository
 
     Task<bool> IsNameTaken(string name);
     Task<Character?> GetByName(string name);
+    Task<bool> ExistsInNationAsync(string name, AccountNation nation);
 
     Task<IReadOnlyList<CharacterRankRow>> GetTopByLoyalty(AccountNation nation, int count);
 

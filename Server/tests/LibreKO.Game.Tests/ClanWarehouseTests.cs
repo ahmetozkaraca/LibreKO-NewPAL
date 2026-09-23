@@ -32,6 +32,9 @@ public class ClanWarehouseTests : GameTestBase
     private const int StartingMoney = 50_000;
     private const int GoldDeposit = 1_500;
     private const ushort CrateCount = 7;
+    private const ushort ArrivedMeanwhile = 3;
+    private const byte FirstSlot = 0;
+    private const byte SecondSlot = 1;
 
     [Theory]
     [InlineData(false, 0f)]
@@ -117,6 +120,7 @@ public class ClanWarehouseTests : GameTestBase
         var (member, sent) = Member(provider, LeaderFame);
         var bag = Stock(member, CrateId, CrateCount);
         member.Trade.ExchangeUser = MemberId + 1;
+        member.Trade.ExchangeStarted = true;
 
         await Route(provider, member, Deposit(CrateId, CrateCount));
 
@@ -175,6 +179,94 @@ public class ClanWarehouseTests : GameTestBase
         bag.ItemId.Should().Be(CrateId);
         bag.Count.Should().Be(CrateCount);
         provider.GetRequiredService<SessionManager>().Knights.GetClanWarehouse(ClanId)![0].IsEmpty.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Withdraw_UndoKeepsWhatArrivedDuringTheCommit()
+    {
+        var probe = new SaveChangesProbe();
+        using var provider = Provider(probe);
+        var (member, sent) = Member(provider, LeaderFame);
+        var vault = provider.GetRequiredService<SessionManager>().Knights.GetClanWarehouse(ClanId)!;
+        vault[0].ItemId = CrateId;
+        vault[0].Count = CrateCount;
+        var bag = member.Inventory[InventoryConstants.InventoryStart];
+        probe.BeforeSave = _ =>
+        {
+            member.WithLock(s => s.Inventory[InventoryConstants.InventoryStart].Count += ArrivedMeanwhile);
+            return Task.CompletedTask;
+        };
+        probe.FailWhen = _ => true;
+
+        await Route(provider, member, Withdraw(CrateId, CrateCount));
+
+        Result(sent, WarehouseSubOpcode.Output).Should().Be((byte)ClanWarehouseResult.Failed);
+        vault[0].Count.Should().Be(CrateCount);
+        bag.ItemId.Should().Be(CrateId);
+        bag.Count.Should().Be(ArrivedMeanwhile);
+    }
+
+    [Fact]
+    public async Task Move_ShiftsAVaultSlotAndCommitsIt()
+    {
+        using var provider = Provider();
+        var (member, sent) = Member(provider, LeaderFame);
+        var vault = provider.GetRequiredService<SessionManager>().Knights.GetClanWarehouse(ClanId)!;
+        vault[FirstSlot].ItemId = CrateId;
+        vault[FirstSlot].Count = CrateCount;
+
+        await Route(provider, member, Shift(WarehouseSubOpcode.Move, CrateId, FirstSlot, SecondSlot));
+
+        Result(sent, WarehouseSubOpcode.Move).Should().Be((byte)ClanWarehouseResult.Succeeded);
+        vault[FirstSlot].IsEmpty.Should().BeTrue();
+        vault[SecondSlot].Count.Should().Be(CrateCount);
+        var stored = StoredSlots((await StoredClanAsync(provider)).ClanWarehouseItems, KnightsManager.ClanWarehouseSlots);
+        stored[SecondSlot].ItemId.Should().Be(CrateId);
+    }
+
+    [Theory]
+    [InlineData(LeaderFame, true)]
+    [InlineData(TraineeFame, false)]
+    public async Task Move_IsLimitedToTheLeaderAndAssistants(byte fame, bool moved)
+    {
+        using var provider = Provider();
+        var (member, sent) = Member(provider, fame);
+        var vault = provider.GetRequiredService<SessionManager>().Knights.GetClanWarehouse(ClanId)!;
+        vault[FirstSlot].ItemId = CrateId;
+        vault[FirstSlot].Count = CrateCount;
+
+        await Route(provider, member, Shift(WarehouseSubOpcode.Move, CrateId, FirstSlot, SecondSlot));
+
+        Result(sent, WarehouseSubOpcode.Move).Should().Be(moved ? (byte)ClanWarehouseResult.Succeeded : (byte)ClanWarehouseResult.Failed);
+        vault[SecondSlot].IsEmpty.Should().Be(!moved);
+    }
+
+    [Theory]
+    [InlineData(CrateId, true)]
+    [InlineData(UntradeableId, false)]
+    public async Task InventoryMove_OnlyMovesTheNamedItemIntoAnEmptySlot(int namedItem, bool moved)
+    {
+        using var provider = Provider();
+        var (member, sent) = Member(provider, LeaderFame);
+        Stock(member, CrateId, CrateCount);
+
+        await Route(provider, member, Shift(WarehouseSubOpcode.InventoryMove, namedItem, FirstSlot, SecondSlot));
+
+        Result(sent, WarehouseSubOpcode.InventoryMove).Should().Be(moved ? (byte)ClanWarehouseResult.Succeeded : (byte)ClanWarehouseResult.Failed);
+        member.Inventory[InventoryConstants.InventoryStart + SecondSlot].IsEmpty.Should().Be(!moved);
+        member.Inventory[InventoryConstants.InventoryStart + FirstSlot].IsEmpty.Should().Be(moved);
+    }
+
+    private static Packet Shift(WarehouseSubOpcode sub, int itemId, byte source, byte destination)
+    {
+        var packet = new Packet(GameOpcodes.GS_CLAN_WAREHOUSE);
+        packet.WriteByte((byte)sub);
+        packet.WriteInt(0);
+        packet.WriteInt(itemId);
+        packet.WriteByte(0);
+        packet.WriteByte(source);
+        packet.WriteByte(destination);
+        return packet;
     }
 
     private static ServiceProvider Provider(SaveChangesProbe? probe = null) => CreateProvider(

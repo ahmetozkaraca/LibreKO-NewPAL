@@ -1,6 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
 using System.Buffers;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Numerics;
@@ -32,7 +31,7 @@ public interface IClient
 
 public enum ServerType { Login, Game }
 
-public class Client(Socket socket, ServerType serverType, ILogger<Client> logger, ConnectionLimitsSettings? limits = null)
+public class Client(Socket socket, ServerType serverType, ILogger<Client> logger, ConnectionLimitsSettings limits, TimeProvider time)
     : IClient, IDisposable
 {
     public Guid Id { get; } = Guid.NewGuid();
@@ -72,6 +71,7 @@ public class Client(Socket socket, ServerType serverType, ILogger<Client> logger
     // a trickle becomes one write instead of several small send() syscalls. Trades a few
     // ms latency (fine for a ~10Hz game) for fewer syscalls + async transitions.
     private const int SendBatchWindowMs = 10;
+    private const long NoFrame = 0;
 
     private PacketCipher? packetCipher;
     private byte[]? loginSeedBytes;
@@ -91,9 +91,8 @@ public class Client(Socket socket, ServerType serverType, ILogger<Client> logger
     private int closeRequested;
     private int disposed;
 
-    private readonly ConnectionLimitsSettings connectionLimits = limits ?? new();
-    private readonly long connectedAt = Stopwatch.GetTimestamp();
-    private long lastPacketAt = Stopwatch.GetTimestamp();
+    private readonly long connectedAt = time.GetTimestamp();
+    private long lastPacketAt = time.GetTimestamp();
     private long frameStartedAt;
     private Action? markFrameStarted;
 
@@ -231,13 +230,13 @@ public class Client(Socket socket, ServerType serverType, ILogger<Client> logger
 
     public async Task<Packet> ReceivePacket(CancellationToken ct = default)
     {
-        Volatile.Write(ref frameStartedAt, 0);
+        Volatile.Write(ref frameStartedAt, NoFrame);
         var packet = await PacketProvider.ReadFromStream(
             readBuffer ??= new BufferedStream(stream, ReadBufferSize),
             markFrameStarted ??= MarkFrameStarted,
             ct);
-        Volatile.Write(ref frameStartedAt, 0);
-        Volatile.Write(ref lastPacketAt, Stopwatch.GetTimestamp());
+        Volatile.Write(ref frameStartedAt, NoFrame);
+        Volatile.Write(ref lastPacketAt, time.GetTimestamp());
 
         if (serverType == ServerType.Login && loginSeedBytes != null)
         {
@@ -263,22 +262,22 @@ public class Client(Socket socket, ServerType serverType, ILogger<Client> logger
 
     public string? ExpiredDeadline()
     {
-        var now = Stopwatch.GetTimestamp();
+        var now = time.GetTimestamp();
         var frameStarted = Volatile.Read(ref frameStartedAt);
 
-        if (frameStarted != 0 && Stopwatch.GetElapsedTime(frameStarted, now) > connectionLimits.PartialFrameTimeout)
-            return $"packet still incomplete after {connectionLimits.PartialFrameTimeoutSeconds}s";
+        if (frameStarted != NoFrame && time.GetElapsedTime(frameStarted, now) > limits.PartialFrameTimeout)
+            return $"packet still incomplete after {limits.PartialFrameTimeoutSeconds}s";
 
-        if (AccountId == 0 && Stopwatch.GetElapsedTime(connectedAt, now) > connectionLimits.LoginTimeout)
-            return $"no login within {connectionLimits.LoginTimeoutSeconds}s";
+        if (AccountId == 0 && time.GetElapsedTime(connectedAt, now) > limits.LoginTimeout)
+            return $"no login within {limits.LoginTimeoutSeconds}s";
 
-        if (Stopwatch.GetElapsedTime(Volatile.Read(ref lastPacketAt), now) > connectionLimits.IdleTimeout)
-            return $"no packet for {connectionLimits.IdleTimeoutSeconds}s";
+        if (time.GetElapsedTime(Volatile.Read(ref lastPacketAt), now) > limits.IdleTimeout)
+            return $"no packet for {limits.IdleTimeoutSeconds}s";
 
         return null;
     }
 
-    private void MarkFrameStarted() => Volatile.Write(ref frameStartedAt, Stopwatch.GetTimestamp());
+    private void MarkFrameStarted() => Volatile.Write(ref frameStartedAt, time.GetTimestamp());
 
     private void LogReceived(Packet packet)
     {

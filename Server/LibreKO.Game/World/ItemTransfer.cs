@@ -1,4 +1,5 @@
 ﻿using LibreKO.Common.Domain.Entities.GameData;
+using LibreKO.Common.Enums;
 using LibreKO.Game.Protocol;
 
 namespace LibreKO.Game.World;
@@ -6,6 +7,7 @@ namespace LibreKO.Game.World;
 public static class ItemTransfer
 {
     public const int NoSlot = -1;
+    public const ushort SingleItem = 1;
 
     public static bool IsInventoryLocked(UserSession session) =>
         session.Trade.LocksInventory || session.IsGathering;
@@ -14,12 +16,24 @@ public static class ItemTransfer
         itemId is >= ExchangePacketConstants.ItemNoTrade and < ExchangePacketConstants.ItemNoTradeMax;
 
     public static bool CanLeaveOwner(ItemSlot slot, ItemData? itemData) =>
+        IsTransferable(slot, itemData)
+        && slot.IsTradable
+        && !slot.Expires;
+
+    public static bool CanEnterAccountVault(ItemSlot slot, ItemData? itemData) =>
+        IsTransferable(slot, itemData)
+        && (slot.IsTradable || slot.State == ItemFlag.Rented);
+
+    private static bool IsTransferable(ItemSlot slot, ItemData? itemData) =>
         itemData != null
         && !slot.IsEmpty
-        && slot.IsTradable
-        && !slot.Expires
         && itemData.Race != ExchangePacketConstants.RaceUntradeable
         && !IsNoTradeItem(slot.ItemId);
+
+    public static bool IsStackable(ItemData? itemData) => itemData is { Countable: not 0 };
+
+    public static IReadOnlyList<ItemSlot> Bag(ItemSlot[] inventory) =>
+        new ArraySegment<ItemSlot>(inventory, InventoryConstants.InventoryStart, InventoryConstants.HaveMax);
 
     public static bool IsBagIndex(int index) =>
         index >= InventoryConstants.InventoryStart
@@ -48,6 +62,34 @@ public static class ItemTransfer
         else
             slot.Count -= count;
         return taken;
+    }
+
+    public static bool IsTransferableCount(ItemData itemData, int count) =>
+        count > 0
+        && count <= InventoryConstants.MaxStackCount
+        && (itemData.Countable != 0 || count == 1);
+
+    public static bool Holds(ItemSlot source, int itemId, ItemData itemData, int count) =>
+        source.ItemId == itemId
+        && source.Count >= count
+        && (itemData.Countable != 0 || source.Count == count);
+
+    public static bool TryMove(ItemSlot source, ItemSlot destination, int itemId)
+    {
+        if (source.IsEmpty || source.ItemId != itemId || !destination.IsEmpty)
+            return false;
+
+        Move(source, destination);
+        return true;
+    }
+
+    public static bool TryTransfer(ItemSlot source, ItemSlot destination, ushort count, bool stackable)
+    {
+        if (count == 0 || source.Count < count || !CanPut(destination, ItemStack.Of(source) with { Count = count }, stackable))
+            return false;
+
+        Put(destination, Take(source, count));
+        return true;
     }
 
     public static void Move(ItemSlot source, ItemSlot destination)

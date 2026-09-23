@@ -85,6 +85,7 @@ public class ItemMoveService(
         if (!Enum.IsDefined(typeof(ItemMoveDirection), directionByte))
         {
             logger.LogDebug("Rejected item move for {Name}: invalid direction {Direction}", session.Name, directionByte);
+            await SendItemMoveResponseAsync(session, 0);
             return;
         }
 

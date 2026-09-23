@@ -35,6 +35,7 @@ public partial class World
     private VBoxContainer _mailAttachRows = null!;
     private Label _mailComposeStatus = null!;
     private Button _mailSendBtn = null!;
+    private readonly PendingReply _mailSendReply = new();
 
     private readonly SortedSet<string> _mailContacts = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(int Slot, int Count)> _mailAttachments = [];
@@ -163,6 +164,7 @@ public partial class World
         _mailComposeWindow.Visible = true;
         _mailComposeWindow.GetParent()?.MoveChild(_mailComposeWindow, _mailComposeWindow.GetParent().GetChildCount() - 1);
         _mailComposeStatus.Text = "";
+        _mailSendReply.Settle();
         _mailSendBtn.Disabled = false;
         Net.I.SendFriendListRequest();
         Net.I.SendClanMembersRequest();
@@ -335,11 +337,13 @@ public partial class World
 
         _mailSendBtn.Disabled = true;
         _mailComposeStatus.Text = "Sending…";
+        AwaitReply(_mailSendReply, () => OnMailSendResult(false, NoReplyText));
         Net.I.SendMailSend(to, subject, _mailBody.Text, gold, items);
     }
 
     private void OnMailSendResult(bool ok, string message)
     {
+        _mailSendReply.Settle();
         if (ok)
         {
             _mailStatus.Text = message;

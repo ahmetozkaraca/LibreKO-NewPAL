@@ -163,14 +163,14 @@ public class ZoneTransitionService(
 
         var outcome = session.WithLock(s =>
         {
-            if (voluntary && (s.Hp <= 0 || IsArrivalPending(s, now) || !RegionManager.IsInWorld(s)))
+            if (voluntary && (s.Hp <= 0 || s.Trade.LocksInventory || IsArrivalPending(s, now) || !RegionManager.IsInWorld(s)))
                 return ZoneEntryResult.Busy;
 
             if (s.Money < fee)
                 return ZoneEntryResult.NotQualified;
 
             s.Money -= fee;
-            watchers = [.. sessionManager.Regions.GetNearbyUsers(s).Where(viewer => StealthSight.CanSee(viewer, s))];
+            watchers = [.. sessionManager.Regions.GetUsersAroundRegistration(s).Where(viewer => StealthSight.CanSee(viewer, s))];
             sessionManager.Regions.RemoveFromRegion(s);
             if (s.Room != 0 && !instanceRooms.Holds(s.Room, newZone))
                 instanceRooms.Leave(s);

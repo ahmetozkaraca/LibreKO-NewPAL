@@ -6,7 +6,10 @@ using LibreKO.Common.Infrastructure.Persistence;
 using LibreKO.Common.Infrastructure.Persistence.Seed.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 
 namespace LibreKO.Game.Tests;
 
@@ -164,6 +167,39 @@ public class RewardSeedTests
 
         context.Database.GetMigrations().Should().Contain(migration => migration.EndsWith(RewardMigrationSuffix));
         context.Database.HasPendingModelChanges().Should().BeFalse();
+    }
+
+    [Fact]
+    public void Migrations_TheRewardMigrationCreatesTheUniqueLoginIndexBeforeAnyTable()
+    {
+        using var context = RelationalContext();
+
+        var operations = RewardMigration(context).UpOperations;
+
+        operations[0].Should().BeOfType<CreateIndexOperation>()
+            .Which.Should().Match<CreateIndexOperation>(index => index.Table == nameof(AppDbContext.Accounts) && index.IsUnique);
+        operations.OfType<CreateTableOperation>().Should().NotBeEmpty();
+    }
+
+    [Fact]
+    public void Migrations_TheLatestMigrationTargetsTheCurrentModel()
+    {
+        using var context = RelationalContext();
+        var migrations = context.GetService<IMigrationsAssembly>();
+        var latest = migrations.CreateMigration(migrations.Migrations.MaxBy(migration => migration.Key).Value, context.Database.ProviderName!);
+
+        var target = context.GetService<IModelRuntimeInitializer>().Initialize(latest.TargetModel!);
+
+        context.GetService<IMigrationsModelDiffer>().HasDifferences(
+            target.GetRelationalModel(),
+            context.GetService<IDesignTimeModel>().Model.GetRelationalModel()).Should().BeFalse();
+    }
+
+    private static Migration RewardMigration(AppDbContext context)
+    {
+        var migrations = context.GetService<IMigrationsAssembly>();
+        var reward = migrations.Migrations.Single(migration => migration.Key.EndsWith(RewardMigrationSuffix));
+        return migrations.CreateMigration(reward.Value, context.Database.ProviderName!);
     }
 
     private static RewardQuestData Quest(QuestRecurrence recurrence, byte startMonth = 0, byte startDay = 0, short durationDays = 0) =>

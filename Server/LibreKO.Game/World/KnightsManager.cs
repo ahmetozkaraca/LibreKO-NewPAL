@@ -7,6 +7,9 @@ namespace LibreKO.Game.World;
 public class KnightsManager
 {
     public const int ClanWarehouseSlots = 192;
+    public const byte ChiefFame = 1;
+    public const byte ViceChiefFame = 2;
+    public const byte TraineeFame = 5;
 
     private readonly ConcurrentDictionary<int, KnightsEntity> _clans = new();
     private readonly ConcurrentDictionary<int, ItemSlot[]> _clanWarehouseCache = new();

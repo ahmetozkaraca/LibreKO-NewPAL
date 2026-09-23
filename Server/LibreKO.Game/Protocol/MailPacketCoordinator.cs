@@ -50,7 +50,7 @@ public class MailPacketCoordinator(
 
         var recipient = packet.ReadSByteString();
         var subject = packet.ReadSByteString();
-        var body = packet.ReadSByteString();
+        var body = packet.ReadString();
         if (packet.RemainingBytes < 5)
             return;
 

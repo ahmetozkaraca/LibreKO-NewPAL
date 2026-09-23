@@ -42,6 +42,23 @@ public class MagicTimingTests
     }
 
     [Fact]
+    public void AVolleyThatNeverLandsExpiresAfterItsFlightAllowance()
+    {
+        var (timing, clock) = Subject();
+        var session = Session();
+        var volley = new MagicData { Id = 108515, Type1 = 2, CastTime = 13, ReCastTime = 30 };
+
+        timing.OnCastAccepted(session, volley);
+        timing.OnVolleyAccepted(session, volley, arrows: 3);
+        clock.Advance(MagicTimingService.ArrowFlightAllowance);
+        timing.IsVolleyInFlight(session, volley.Id).Should().BeTrue("the arrows are still within their flight allowance");
+
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        timing.IsVolleyInFlight(session, volley.Id).Should().BeFalse("a volley cannot be banked and landed later");
+        session.PendingArrowHits.Should().BeEmpty();
+    }
+
+    [Fact]
     public void AVolleyReleasesOncePerArrowBeforeTheCooldownBites()
     {
         var (timing, clock) = Subject();

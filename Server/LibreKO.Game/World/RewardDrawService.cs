@@ -91,53 +91,61 @@ public sealed class RewardDrawService(
     private async Task<RewardDrawResult> SpinAsync(UserSession session, RewardState state)
     {
         var now = time.GetUtcNow().UtcDateTime;
+        var attempted = false;
+        var verdict = RewardVerdict.Unavailable;
         RewardPrizeData? prize = null;
         RewardGrant? grant = null;
 
-        var verdict = session.WithLock(s =>
-        {
-            if (state.EventCoins < SpinCost)
-                return RewardVerdict.Violated(state.OfferedDraws.Contains(PrizePool.Roulette)
-                    ? ViolationKind.InvalidState
-                    : ViolationKind.ForgedEvent);
+        var committed = await states.CommitAsync(session, "roulette spin",
+            () =>
+            {
+                attempted = true;
+                verdict = session.WithLock(s =>
+                {
+                    if (state.EventCoins < SpinCost)
+                        return state.OfferedDraws.Contains(PrizePool.Roulette)
+                            ? RewardVerdict.Repeated
+                            : RewardVerdict.Violated(ViolationKind.ForgedEvent);
 
-            var eligible = prizes.EligiblePrizes(PrizePool.Roulette, s.Level);
-            if (eligible.Count == 0)
-                return new RewardVerdict(RewardOutcome.Unavailable, null);
+                    var eligible = prizes.EligiblePrizes(PrizePool.Roulette, s.Level);
+                    if (eligible.Count == 0)
+                        return RewardVerdict.Unavailable;
 
-            var drawn = Draw(s, eligible, out prize, out grant);
-            if (drawn.Outcome == RewardOutcome.Succeeded)
-                state.EventCoins -= SpinCost;
+                    var drawn = Draw(s, eligible, out prize, out grant);
+                    if (drawn.Outcome == RewardOutcome.Succeeded)
+                        state.EventCoins -= SpinCost;
 
-            return drawn;
-        });
-
-        if (!Settle(session, verdict, PrizePool.Roulette))
-            return RewardDrawResult.Failed(verdict.Outcome);
-
-        var spin = new RouletteSpin
-        {
-            CharacterId = session.CharacterId,
-            Kind = prize!.Kind,
-            ItemId = prize.ItemId,
-            Count = prize.Count,
-            SpunAt = now,
-        };
-
-        if (!await states.SpendEventCoinsAsync(spin, SpinCost))
-        {
-            session.WithLock(s =>
+                    return drawn;
+                });
+                return verdict.Outcome == RewardOutcome.Succeeded;
+            },
+            db => db.StageRouletteSpinAsync(new RouletteSpin
+            {
+                CharacterId = session.CharacterId,
+                Kind = prize!.Kind,
+                ItemId = prize.ItemId,
+                Count = prize.Count,
+                SpunAt = now,
+            }, SpinCost),
+            () => session.WithLock(s =>
             {
                 grants.Revert(s, grant!);
                 state.EventCoins += SpinCost;
-            });
+            }));
+
+        if (!attempted)
+            return Unavailable;
+        if (!Settle(session, verdict, PrizePool.Roulette))
+            return RewardDrawResult.Failed(verdict.Outcome);
+        if (!committed)
+        {
             logger.LogWarning("{Name} could not record a roulette spin; the prize was withdrawn", session.Name);
             return Unavailable;
         }
 
-        session.WithLock(_ => state.RecordSpin(new RoulettePrizeRecord(prize.Kind, prize.ItemId, prize.Count, now)));
+        session.WithLock(_ => state.RecordSpin(new RoulettePrizeRecord(prize!.Kind, prize.ItemId, prize.Count, now)));
         await grants.NotifyAsync(session, grant!);
-        logger.LogInformation("{Name} spun the roulette and won prize {PrizeId}", session.Name, prize.Id);
+        logger.LogInformation("{Name} spun the roulette and won prize {PrizeId}", session.Name, prize!.Id);
         return new RewardDrawResult(RewardOutcome.Succeeded, prize.Kind, prize.ItemId, prize.Count);
     }
 
@@ -145,65 +153,79 @@ public sealed class RewardDrawService(
     {
         var now = time.GetUtcNow().UtcDateTime;
         var today = DateOnly.FromDateTime(now);
+        var attempted = false;
+        var verdict = RewardVerdict.Unavailable;
         RewardPrizeData? prize = null;
         RewardGrant? grant = null;
         DateOnly? previousClaim = null;
 
-        var verdict = session.WithLock(s =>
-        {
-            if (state.HasClaimed(pool, today))
-                return RewardVerdict.Violated(ViolationKind.InvalidState);
-
-            var eligible = prizes.EligiblePrizes(pool, s.Level);
-            if (eligible.Count == 0)
-                return RewardVerdict.Violated(state.OfferedDraws.Contains(pool) || !IsStatusGated(pool)
-                    ? ViolationKind.InvalidState
-                    : ViolationKind.ForgedEvent);
-
-            var drawn = Draw(s, eligible, out prize, out grant);
-            if (drawn.Outcome == RewardOutcome.Succeeded)
+        var committed = await states.CommitAsync(session, "daily reward claim",
+            () =>
             {
-                previousClaim = state.DailyClaims.TryGetValue(pool, out var claimedOn) ? claimedOn : null;
-                state.DailyClaims[pool] = today;
-            }
+                attempted = true;
+                verdict = session.WithLock(s =>
+                {
+                    if (state.HasClaimed(pool, today))
+                        return state.CollectedDraws.Contains(pool)
+                            ? RewardVerdict.Repeated
+                            : RewardVerdict.Violated(ViolationKind.InvalidState);
 
-            return drawn;
-        });
+                    var eligible = prizes.EligiblePrizes(pool, s.Level);
+                    if (eligible.Count == 0)
+                        return RewardVerdict.Violated(state.OfferedDraws.Contains(pool) || !IsStatusGated(pool)
+                            ? ViolationKind.InvalidState
+                            : ViolationKind.ForgedEvent);
 
-        if (!Settle(session, verdict, pool))
-            return RewardDrawResult.Failed(verdict.Outcome);
+                    var drawn = Draw(s, eligible, out prize, out grant);
+                    if (drawn.Outcome == RewardOutcome.Succeeded)
+                    {
+                        previousClaim = state.DailyClaims.TryGetValue(pool, out var claimedOn) ? claimedOn : null;
+                        state.DailyClaims[pool] = today;
+                    }
 
-        var claim = new DailyRewardClaim
-        {
-            AccountId = session.AccountId,
-            Pool = pool,
-            Day = today,
-            CharacterId = session.CharacterId,
-            Kind = prize!.Kind,
-            ItemId = prize.ItemId,
-            Count = prize.Count,
-            ClaimedAt = now,
-        };
-
-        if (!await states.ClaimDailyRewardAsync(claim))
-        {
-            session.WithLock(s =>
+                    return drawn;
+                });
+                return verdict.Outcome == RewardOutcome.Succeeded;
+            },
+            db => db.StageDailyRewardClaimAsync(new DailyRewardClaim
+            {
+                AccountId = session.AccountId,
+                Pool = pool,
+                Day = today,
+                CharacterId = session.CharacterId,
+                Kind = prize!.Kind,
+                ItemId = prize.ItemId,
+                Count = prize.Count,
+                ClaimedAt = now,
+            }),
+            () => session.WithLock(s =>
             {
                 grants.Revert(s, grant!);
                 if (previousClaim is { } day)
                     state.DailyClaims[pool] = day;
                 else
                     state.DailyClaims.Remove(pool);
-            });
+            }));
+
+        if (!attempted)
+            return Unavailable;
+        if (!Settle(session, verdict, pool))
+            return RewardDrawResult.Failed(verdict.Outcome);
+        if (!committed)
+        {
             logger.LogWarning("{Name} could not record the {Pool} reward for {Day}; the prize was withdrawn",
                 session.Name, pool, today);
             return Unavailable;
         }
 
-        session.WithLock(_ => state.OfferedDraws.Remove(pool));
+        session.WithLock(_ =>
+        {
+            state.OfferedDraws.Remove(pool);
+            state.CollectedDraws.Add(pool);
+        });
         await grants.NotifyAsync(session, grant!);
         logger.LogInformation("{Name} collected the {Pool} reward for {Day}: prize {PrizeId}",
-            session.Name, pool, today, prize.Id);
+            session.Name, pool, today, prize!.Id);
         return new RewardDrawResult(RewardOutcome.Succeeded, prize.Kind, prize.ItemId, prize.Count);
     }
 

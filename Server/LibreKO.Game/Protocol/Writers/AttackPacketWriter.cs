@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
@@ -15,15 +15,14 @@ public sealed class AttackPacketWriter
 
     public const byte NoCritical = 0;
 
-    public static Packet Create(
-        byte attackType, AttackResult result, int attackerId, int targetId, byte criticalHit = NoCritical)
+    public static Packet Create(AttackResult result, int attackerId, int targetId)
     {
         var packet = new Packet(GameOpcodes.GS_ATTACK);
-        packet.WriteByte(attackType);
+        packet.WriteByte(TypeMelee);
         packet.WriteByte((byte)result);
         packet.WriteInt(attackerId);
         packet.WriteInt(targetId);
-        packet.WriteByte(criticalHit);
+        packet.WriteByte(NoCritical);
         return packet;
     }
 }

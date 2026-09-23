@@ -418,6 +418,46 @@ public class EventTests : GameTestBase
         levelPacket.ReadLong().Should().Be(40);
     }
 
+    [Theory]
+    [InlineData(false, BundleOpenPacketWriter.Refused)]
+    [InlineData(true, BundleOpenPacketWriter.Empty)]
+    public async Task LootPacketCoordinator_HandleBundleOpenAsync_AnswersABoxItCannotOpen(bool vanished, byte expected)
+    {
+        const float outOfReach = 500;
+        const int strangerId = 999;
+
+        using var provider = CreateProvider(_ => { });
+        var client = Substitute.For<IClient>();
+        client.Id.Returns(Guid.NewGuid());
+        var sentPackets = new List<Packet>();
+        client.SendPacket(Arg.Do<Packet>(packet => sentPackets.Add(packet)), Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var session = sessionManager.CreateSession(client, characterId: 212, accountId: 312);
+        session.ZoneId = 21;
+        session.X = 100;
+        session.Z = 200;
+        session.Hp = 100;
+
+        var bundle = sessionManager.Regions.CreateBundle(outOfReach, outOfReach, session.Y);
+        bundle.ZoneId = session.ZoneId;
+        bundle.OwnerCharId = strangerId;
+        bundle.Items.Add(new LootItem { ItemId = 379109000, Count = 1 });
+        if (vanished)
+            sessionManager.Regions.RemoveBundle(bundle.BundleId);
+
+        var packet = new Packet(GameOpcodes.GS_BUNDLE_OPEN_REQ);
+        packet.WriteInt(bundle.BundleId);
+        await provider.GetRequiredService<ILootPacketCoordinator>().HandleBundleOpenAsync(client, packet);
+
+        var reply = sentPackets.Single(sent => sent.GetOpcode() == (byte)GameOpcodes.GS_BUNDLE_OPEN_REQ);
+        reply.ResetOffset();
+        reply.ReadInt().Should().Be(bundle.BundleId);
+        reply.ReadByte().Should().Be(expected);
+        reply.RemainingBytes.Should().Be(0);
+    }
+
     [Fact]
     public async Task LootPacketCoordinator_HandleBundleOpenAsync_SendsTheLootListWithBundleIdAndStatus()
     {

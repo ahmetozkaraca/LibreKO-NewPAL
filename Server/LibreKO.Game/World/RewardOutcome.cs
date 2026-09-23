@@ -14,6 +14,8 @@ public enum RewardOutcome : byte
 internal readonly record struct RewardVerdict(RewardOutcome Outcome, ViolationKind? Violation)
 {
     public static readonly RewardVerdict Succeeded = new(RewardOutcome.Succeeded, null);
+    public static readonly RewardVerdict Unavailable = new(RewardOutcome.Unavailable, null);
+    public static readonly RewardVerdict Repeated = new(RewardOutcome.Refused, null);
 
     public static RewardVerdict Violated(ViolationKind kind) => new(RewardOutcome.Refused, kind);
 

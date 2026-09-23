@@ -11,6 +11,8 @@ public class QuestAcceptGrantTests
     private const int GrantedItem = 900670000;
     private const int Abandoned = 4;
 
+    private const int GrantedStack = 3;
+
     private const string Source = """
         Bind Npc 25072 Zone 2
         Quest 1241 "Pocket money"
@@ -51,9 +53,26 @@ public class QuestAcceptGrantTests
         host.Received(2).GiveItem(GrantedItem, 1, Arg.Any<int>());
     }
 
-    private static (QuestProgram Program, IQuestHost Host) Compile()
+    [Fact]
+    public void ReacceptingWithPartOfAStackTopsItUpToTheGrantedCount()
     {
-        var compilation = QuestCompilation.Create(Source, "grant.quest");
+        var (program, host) = Compile(Source.Replace("Give 1 of", $"Give {GrantedStack} of"));
+        var held = 1;
+        host.ItemCount(GrantedItem).Returns(_ => held);
+        host.When(h => h.GiveItem(GrantedItem, Arg.Any<int>(), Arg.Any<int>()))
+            .Do(c => held += c.ArgAt<int>(1));
+
+        Accept(program, host);
+        host.SetQuestState(QuestId, Abandoned);
+        Accept(program, host);
+
+        host.Received(1).GiveItem(GrantedItem, GrantedStack - 1, Arg.Any<int>());
+        held.Should().Be(GrantedStack);
+    }
+
+    private static (QuestProgram Program, IQuestHost Host) Compile(string source = Source)
+    {
+        var compilation = QuestCompilation.Create(source, "grant.quest");
         compilation.Succeeded.Should().BeTrue(compilation.RenderDiagnostics());
         var program = QuestProgramComposer.Compose("grant", 25072, 2, [compilation.Program]);
 

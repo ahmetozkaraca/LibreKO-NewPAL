@@ -1,4 +1,5 @@
-﻿using LibreKO.Common.Enums;
+﻿using LibreKO.Common.Domain.Services;
+using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
 using Microsoft.Extensions.Logging;
@@ -14,6 +15,7 @@ public interface IExchangeLifecycleService
 }
 
 public class ExchangeLifecycleService(SessionManager sessionManager,
+    IGameDataService gameDataService,
     ILogger<ExchangeLifecycleService> logger) : IExchangeLifecycleService
 {
     public async Task RequestAsync(UserSession session, Packet packet)
@@ -47,14 +49,18 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
     public async Task AgreeAsync(UserSession session, Packet packet)
     {
         if (!session.Trade.IsTrading || session.Hp <= 0 || ExchangePacketConstants.IsBusyElsewhere(session)
-            || session.Trade.AskedForExchange)
+            || session.Trade.AskedForExchange || session.Trade.ExchangeStarted)
+        {
+            await CancelAsync(session);
             return;
+        }
 
         var agreed = packet.ReadByte();
         var asker = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
         if (asker == null || asker == session)
         {
             session.WithLock(s => Release(s, start: false));
+            await SendCancelAsync(session);
             return;
         }
 
@@ -70,11 +76,20 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
 
             Release(me, start: accepted);
             Release(other, start: accepted);
+            me.Trade.ExchangeStarted = accepted;
+            other.Trade.ExchangeStarted = accepted;
             answered = true;
         });
 
         if (!answered)
+        {
+            await SendCancelAsync(session);
             return;
+        }
+
+        if (accepted)
+            await session.Client.SendPacket(ExchangePacketWriter.Result(
+                ExchangePacketConstants.ExchangeAgree, ExchangePacketWriter.Succeeded));
 
         await asker.Client.SendPacket(ExchangePacketWriter.Result(
             ExchangePacketConstants.ExchangeAgree, accepted ? ExchangePacketWriter.Succeeded : ExchangePacketWriter.Failed));
@@ -86,7 +101,10 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
     public async Task CancelAsync(UserSession session, bool isOnDeath = false)
     {
         if (!session.Trade.IsTrading)
+        {
+            await SendCancelAsync(session);
             return;
+        }
 
         var partner = sessionManager.GetByCharacterId(session.Trade.ExchangeUser);
         var partnerReleased = false;
@@ -125,7 +143,7 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
         var paired = false;
         UserSession.WithBoth(asker, target, (a, t) =>
         {
-            if (a.Trade.IsTrading || ItemTransfer.IsInventoryLocked(t))
+            if (a.Trade.IsTrading || t.Trade.IsTrading || ItemTransfer.IsInventoryLocked(t))
                 return;
 
             a.Trade.ExchangeUser = t.CharacterId;
@@ -142,6 +160,7 @@ public class ExchangeLifecycleService(SessionManager sessionManager,
     private void Release(UserSession session, bool start)
     {
         var unreturned = session.InitExchange(start);
+        session.RecalculateStatsWithBuffs(gameDataService);
         if (unreturned.Count > 0)
         {
             logger.LogError("Could not return {Count} escrowed items to {Name}: {Items}",

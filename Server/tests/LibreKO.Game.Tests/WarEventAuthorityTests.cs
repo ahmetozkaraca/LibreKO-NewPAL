@@ -95,6 +95,44 @@ public class WarEventAuthorityTests : GameTestBase
     }
 
     [Fact]
+    public async Task AWarWonByItsNpcsIsDeclaredOnceAndNeverFlipsWhenItCloses()
+    {
+        using var provider = CreateWarProvider();
+        var battle = OpenWar(provider, WarZone);
+        var (killer, _, sent) = CreatePlayer(provider, 3007, AccountNation.ElMorad);
+
+        await KillAsync(provider, killer, KarusGatekeeper, WarZone);
+        await KillAsync(provider, killer, KarusGarrisonCaptain1, WarZone);
+        await KillAsync(provider, killer, KarusGarrisonCaptain2, WarZone);
+        for (var kill = 0; kill <= BattleZoneManager.NPC_KILL_VICTORY_COUNT; kill++)
+            battle.RegisterNpcKill(AccountNation.ElMorad).Should().Be(0);
+
+        await provider.GetRequiredService<IEventSystemsPacketCoordinator>().CloseBattleZoneAsync();
+
+        sent.Where(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_BATTLE_EVENT)
+            .Select(packet => packet.GetBytes())
+            .Where(bytes => bytes[1] == SubEventResult && bytes[2] == DeclareWinner)
+            .Should().ContainSingle()
+            .Which[3].Should().Be((byte)AccountNation.ElMorad);
+    }
+
+    [Fact]
+    public void AnUndecidedWarIsSettledOnceByItsScore()
+    {
+        var battle = new BattleZoneManager();
+        battle.OpenBattleZone(BattleZoneManager.NATION_BATTLE, WarZone).Should().BeTrue();
+        battle.RegisterNpcKill(AccountNation.Karus);
+
+        battle.SettleVictory(out var winner).Should().BeTrue();
+        winner.Should().Be((byte)AccountNation.ElMorad);
+
+        battle.RegisterNpcKill(AccountNation.ElMorad);
+        battle.RegisterNpcKill(AccountNation.ElMorad);
+        battle.SettleVictory(out winner).Should().BeFalse();
+        winner.Should().Be((byte)AccountNation.ElMorad);
+    }
+
+    [Fact]
     public async Task WarNpcsCountOnlyWhileTheWarRunsInTheirZone()
     {
         using var provider = CreateWarProvider();

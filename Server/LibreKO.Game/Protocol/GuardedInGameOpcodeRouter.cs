@@ -4,7 +4,7 @@ using LibreKO.Game.World;
 
 namespace LibreKO.Game.Protocol;
 
-public sealed class GuardedInGameOpcodeRouter(InGameOpcodeRouter inner, IPacketGuard guard, SessionManager sessions) : IInGameOpcodeRouter
+public sealed class GuardedInGameOpcodeRouter(InGameOpcodeRouter inner, IPacketGuard guard) : IInGameOpcodeRouter
 {
     private readonly ConcurrentDictionary<GameOpcodes, Func<IClient, Packet, Task>?> _guarded = new();
 
@@ -17,7 +17,7 @@ public sealed class GuardedInGameOpcodeRouter(InGameOpcodeRouter inner, IPacketG
         if (handler == null)
             return null;
 
-        return (client, packet) => sessions.GetByClientId(client.Id) is not { IsClosing: true } && guard.Admit(client, opcode)
+        return (client, packet) => guard.Admit(client, opcode)
             ? handler(client, packet)
             : Task.CompletedTask;
     }

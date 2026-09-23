@@ -13,6 +13,7 @@ public partial class World
     private bool _selfSitting;
     private bool _selfSitVisual;
     private bool _sitRequestPending;
+    private ulong _sitRequestedAtMs;
 
     private void StateVisualForgetEntity(int id)
     {
@@ -26,6 +27,7 @@ public partial class World
     private const float SitDrop = 0.42f;
     private const float SitTiltDeg = -14f;
     private const int SleepFxId = 13042;
+    private const ulong SitRequestTimeoutMs = 1500;
     private const float SleepFxLift = 0.4f;
 
     private void StateVisualInit()
@@ -88,9 +90,18 @@ public partial class World
 
     private void ToggleSitting()
     {
-        if (_selfDead || _sitRequestPending) return;
-        _sitRequestPending = true;
+        if (_selfDead || SitRequestInFlight()) return;
+        BeginSitRequest();
         Net.I.SendSitting(!_selfSitting);
+    }
+
+    private bool SitRequestInFlight()
+        => _sitRequestPending && Time.GetTicksMsec() - _sitRequestedAtMs < SitRequestTimeoutMs;
+
+    private void BeginSitRequest()
+    {
+        _sitRequestPending = true;
+        _sitRequestedAtMs = Time.GetTicksMsec();
     }
 
     private void ApplySitState(int charId, bool sitting)
@@ -180,7 +191,7 @@ public partial class World
     {
         _selfSitting = false;
         _selfSitVisual = false;
-        _sitRequestPending = true;
+        BeginSitRequest();
         if (GodotObject.IsInstanceValid(_selfVisual))
             _selfVisual.Transform = _selfStandingVisualTransform;
         _selfActionUntil = 0;

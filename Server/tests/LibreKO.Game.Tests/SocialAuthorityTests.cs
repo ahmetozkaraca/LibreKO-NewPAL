@@ -25,6 +25,9 @@ public class SocialAuthorityTests : GameTestBase
     private const short QuestId = 500;
     private const int AchievementId = 42;
     private const int AchievementReward = 389_010_000;
+    private const int ShoutFee = 3_000;
+    private const byte BelowShoutLevel = 20;
+    private const short ShoutMana = 100;
 
     [Fact]
     public async Task AWhisperIsRefusedOnceTheTargetBlocksWhispers()
@@ -44,6 +47,70 @@ public class SocialAuthorityTests : GameTestBase
 
         target.BlockPrivateChat.Should().BeTrue();
         targetSent.Should().NotContain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_CHAT);
+    }
+
+    [Fact]
+    public async Task AWhisperToSomeoneWhoLoggedOffIsAnswered()
+    {
+        using var provider = CreateProvider(_ => { });
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var (sender, senderClient, senderSent) = CreatePlayer(sessionManager, 1202, "Sender");
+        var (target, _, _) = CreatePlayer(sessionManager, 1203, "Target");
+        await provider.GetRequiredService<ISocialPacketCoordinator>()
+            .HandleChatTargetAsync(senderClient, ChatTarget(ChatTargetPacketWriter.TypeWhisper, "Target"));
+        sessionManager.RemoveSession(target);
+        senderSent.Clear();
+
+        await provider.GetRequiredService<IChatPacketCoordinator>().HandleAsync(sender, (byte)ChatType.Private, "hello");
+
+        var reply = senderSent.Should().ContainSingle(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_CHAT_TARGET).Subject;
+        reply.ResetOffset();
+        reply.ReadByte().Should().Be(ChatTargetPacketWriter.TypeWhisper);
+        reply.ReadShort().Should().Be((short)ChatTargetResult.TargetNotFound);
+    }
+
+    [Fact]
+    public async Task AGameMasterStillReachesAPlayerWhoBlocksWhispers()
+    {
+        using var provider = CreateProvider(_ => { });
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var (gm, gmClient, _) = CreatePlayer(sessionManager, 1210, "Operator");
+        var (_, targetClient, targetSent) = CreatePlayer(sessionManager, 1211, "Target");
+        gm.IsGM = true;
+        var social = provider.GetRequiredService<ISocialPacketCoordinator>();
+
+        await social.HandleChatTargetAsync(targetClient, BlockWhispers());
+        await social.HandleChatTargetAsync(gmClient, ChatTarget(ChatTargetPacketWriter.TypeWhisper, "Target"));
+        await provider.GetRequiredService<IChatPacketCoordinator>().HandleAsync(gm, (byte)ChatType.Private, "hello");
+
+        targetSent.Should().Contain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_CHAT);
+    }
+
+    [Fact]
+    public async Task ALowLevelShoutIsRefusedUntilTheFeeIsAffordable()
+    {
+        using var provider = CreateProvider(_ => { });
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var chat = provider.GetRequiredService<IChatPacketCoordinator>();
+        var (poor, _, _) = CreatePlayer(sessionManager, 1212, "Poor");
+        var (payer, _, _) = CreatePlayer(sessionManager, 1213, "Payer");
+        foreach (var shouter in new[] { poor, payer })
+        {
+            shouter.Level = BelowShoutLevel;
+            shouter.MaxMp = ShoutMana;
+            shouter.Mp = ShoutMana;
+        }
+
+        poor.Money = ShoutFee - 1;
+        payer.Money = ShoutFee;
+
+        await chat.HandleAsync(poor, (byte)ChatType.Shout, "hello");
+        await chat.HandleAsync(payer, (byte)ChatType.Shout, "hello");
+
+        poor.Money.Should().Be(ShoutFee - 1);
+        poor.Mp.Should().Be(ShoutMana);
+        payer.Money.Should().Be(0);
+        payer.Mp.Should().BeLessThan(ShoutMana);
     }
 
     [Fact]
@@ -125,6 +192,7 @@ public class SocialAuthorityTests : GameTestBase
             NpcId = 9000, ZoneId = session.ZoneId, X = session.X, Z = session.Z, MaxHp = 1, Hp = 1,
         }).UniqueId;
         session.Trade.ExchangeUser = 1208;
+        session.Trade.ExchangeStarted = true;
         var quests = new QuestProgressionService(
             sessionManager, Substitute.For<IGameDataService>(), runner, Substitute.For<IQuestDefinitionSource>(),
             Substitute.For<ICharacterStatePersister>(), Substitute.For<ILogger<QuestProgressionService>>());

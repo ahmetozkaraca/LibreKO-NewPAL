@@ -1107,31 +1107,6 @@ public class CharacterTests : GameTestBase
     }
 
     [Fact]
-    public void Packet_Decompress_RejectsCorruptedPayload()
-    {
-        var payload = new Packet(GameOpcodes.GS_CHAT);
-        payload.WriteBytes(new byte[700]);
-
-        var compressed = payload.CompressIfNeeded();
-        compressed.GetOpcode().Should().Be((byte)GameOpcodes.GS_COMPRESS_PACKET);
-        compressed.ResetOffset();
-
-        var compressedLength = compressed.ReadInt();
-        var originalLength = compressed.ReadInt();
-        var crc = compressed.ReadUInt();
-        var compressedData = compressed.ReadBytes(compressedLength);
-        compressedData[0] ^= 0xFF;
-
-        var corrupted = new Packet(GameOpcodes.GS_COMPRESS_PACKET);
-        corrupted.WriteInt(compressedLength);
-        corrupted.WriteInt(originalLength);
-        corrupted.WriteUInt(crc);
-        corrupted.WriteBytes(compressedData);
-
-        Packet.Decompress(corrupted).Should().BeNull();
-    }
-
-    [Fact]
     public async Task GameStartCommand_SerializesAuthorityAndZeroPremiumHoursForNonPremiumAccounts()
     {
         using var provider = CreateProvider(

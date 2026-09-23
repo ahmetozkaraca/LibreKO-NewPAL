@@ -42,6 +42,8 @@ internal sealed class ChatSystem
     private byte _sendChannel = 1;
     private string _whisperName = "";
     private string? _pendingWhisper;
+    private const ulong FloodIntervalMs = 300;
+    private ulong _lastSubmitMs;
     private string _pendingWhisperTo = "";
 
     private readonly Queue<string> _log = new();
@@ -367,6 +369,14 @@ internal sealed class ChatSystem
         if (text.Length == 0) { Close(); return; }
 
         if (text[0] == '/' && LocalCommand?.Invoke(text.Substring(1).Trim()) == true) { Close(); return; }
+
+        ulong now = Time.GetTicksMsec();
+        if (now - _lastSubmitMs < FloodIntervalMs)
+        {
+            Info("You are sending messages too quickly.");
+            return;
+        }
+        _lastSubmitMs = now;
 
         var (chan, body, target) = Parse(text);
 

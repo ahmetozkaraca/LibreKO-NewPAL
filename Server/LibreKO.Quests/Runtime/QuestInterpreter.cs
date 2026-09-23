@@ -1,4 +1,4 @@
-using LibreKO.Quests.Binding;
+﻿using LibreKO.Quests.Binding;
 
 namespace LibreKO.Quests.Runtime;
 
@@ -489,7 +489,10 @@ public sealed class QuestInterpreter
                 break;
 
             case QuestActionKind.GiveItem:
-                _host.GiveItem(args.GetInt("item"), args.GetInt("count", 1), RentalHours(args));
+                var item = args.GetInt("item");
+                var count = args.GetInt("count", 1) - (args.Has(QuestVocabulary.TopUpArgument) ? _host.ItemCount(item) : 0);
+                if (count > 0)
+                    _host.GiveItem(item, count, RentalHours(args));
                 break;
 
             case QuestActionKind.GivePremium:

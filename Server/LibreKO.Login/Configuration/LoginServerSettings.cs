@@ -2,9 +2,10 @@
 
 namespace LibreKO.Login.Configuration;
 
-public class LoginServerSettings
+public class LoginServerSettings : IConnectionLimitsOwner
 {
     public const string SectionName = "LoginServer";
+    public const int LoginScreenTimeoutSeconds = 600;
 
     public string BindHost { get; set; } = "*";
     public int BindPort { get; set; } = default!;
@@ -12,7 +13,10 @@ public class LoginServerSettings
     public FtpSettings Ftp { get; set; } = new();
     public AccountSettings Account { get; set; } = new();
 
-    public ConnectionLimitsSettings Connections { get; set; } = new();
+    public ConnectionLimitsSettings Connections { get; set; } = new()
+    {
+        LoginTimeoutSeconds = LoginScreenTimeoutSeconds,
+    };
 }
 
 public class FtpSettings

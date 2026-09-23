@@ -106,6 +106,7 @@ public abstract class GameTestBase
         services.AddSingleton<InstanceRoomRegistry>();
         services.AddSingleton<IInstanceEntryService, InstanceEntryService>();
         services.AddSingleton<INpcLifecycleService, NpcLifecycleService>();
+        services.AddSingleton<SummonQuota>();
         services.AddSingleton<INpcSummonService, NpcSummonService>();
         services.AddSingleton<ISessionTerminationService, SessionTerminationService>();
         services.AddSingleton(CreateServerRepositoryStub());

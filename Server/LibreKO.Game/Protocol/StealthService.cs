@@ -12,7 +12,7 @@ public interface IStealthService
     Task GrantSightAsync(UserSession session, short radius);
     Task ClearSightAsync(UserSession session);
     Task EndAsync(UserSession session, MagicStealthType stealthType);
-    bool CanSee(UserSession viewer, UserSession target);
+    bool CanTarget(UserSession viewer, UserSession target);
 }
 
 public class StealthService(
@@ -108,7 +108,7 @@ public class StealthService(
             .Where(viewer => !StealthSight.Detects(viewer, session))
             .ToList();
 
-    public bool CanSee(UserSession viewer, UserSession target) => StealthSight.CanTarget(viewer, target);
+    public bool CanTarget(UserSession viewer, UserSession target) => StealthSight.CanTarget(viewer, target);
 
     private Task BroadcastVisibilityAsync(UserSession session) =>
         sessionManager.Regions.SendToRegion(

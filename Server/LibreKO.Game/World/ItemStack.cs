@@ -26,4 +26,11 @@ public readonly record struct ItemStack(int ItemId, short Durability, ushort Cou
         slot.Flag = Flag;
         slot.ExpiresAt = ExpiresAt;
     }
+
+    public ItemSlot ToSlot()
+    {
+        var slot = new ItemSlot();
+        WriteTo(slot);
+        return slot;
+    }
 }

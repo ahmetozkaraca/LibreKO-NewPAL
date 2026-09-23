@@ -104,6 +104,7 @@ public sealed class RewardQuestService(
         var now = time.GetUtcNow().UtcDateTime;
         var period = quest.CurrentPeriod(DateOnly.FromDateTime(now));
         var key = default(RewardQuestKey);
+        var repeated = false;
         var refusal = session.WithLock<ViolationKind?>(s =>
         {
             var offered = state.OfferedAccepts.Contains(quest.Id);
@@ -113,7 +114,10 @@ public sealed class RewardQuestService(
             key = new RewardQuestKey(quest.Id, start);
             var progress = state.ProgressOf(key);
             if (progress is { IsAccepted: true } or { IsClaimed: true })
+            {
+                repeated = true;
                 return ViolationKind.InvalidState;
+            }
 
             state.Track(key).AcceptedAt = now;
             state.DirtyQuests.Add(key);
@@ -122,7 +126,8 @@ public sealed class RewardQuestService(
 
         if (refusal is { } violation)
         {
-            violations.Report(session, violation, $"accept of event quest {quest.Id} refused");
+            if (!repeated)
+                violations.Report(session, violation, $"accept of event quest {quest.Id} refused");
             return RewardOutcome.Refused;
         }
 
@@ -150,33 +155,58 @@ public sealed class RewardQuestService(
         var rewards = gameData.RewardQuestRewardsByQuest[quest.Id]
             .Select(reward => new RewardLine(reward.Kind, reward.ItemId, reward.Count))
             .ToList();
+        var attempted = false;
+        var verdict = RewardVerdict.Unavailable;
         var key = default(RewardQuestKey);
         RewardGrant? grant = null;
         RewardQuestProgress? progress = null;
 
-        var verdict = session.WithLock(s =>
-        {
-            var offered = state.OfferedClaimsOn(quest.Board).Contains(quest.Id);
-            var stale = offered ? ViolationKind.InvalidState : ViolationKind.ForgedEvent;
-            if (period is not { } start)
-                return RewardVerdict.Violated(stale);
+        var committed = await states.CommitAsync(session, "quest claim",
+            () =>
+            {
+                attempted = true;
+                verdict = session.WithLock(s =>
+                {
+                    var offered = state.OfferedClaimsOn(quest.Board).Contains(quest.Id);
+                    var stale = offered ? ViolationKind.InvalidState : ViolationKind.ForgedEvent;
+                    if (period is not { } start)
+                        return RewardVerdict.Violated(stale);
 
-            key = new RewardQuestKey(quest.Id, start);
-            progress = state.ProgressOf(key);
-            if (progress?.IsClaimed == true)
-                return RewardVerdict.Violated(ViolationKind.InvalidState);
-            if (!IsEarned(s, quest, progress, HasItems(s, requirements)))
-                return RewardVerdict.Violated(stale);
+                    key = new RewardQuestKey(quest.Id, start);
+                    progress = state.ProgressOf(key);
+                    if (progress?.IsClaimed == true)
+                        return RewardVerdict.Repeated;
+                    if (!IsEarned(s, quest, progress, HasItems(s, requirements)))
+                        return RewardVerdict.Violated(stale);
 
-            grant = grants.Plan(s, requirements, rewards);
-            if (!grant.IsReady)
-                return RewardVerdict.Blocked(grant.Status);
+                    grant = grants.Plan(s, requirements, rewards);
+                    if (!grant.IsReady)
+                        return RewardVerdict.Blocked(grant.Status);
 
-            grants.Apply(s, grant);
-            progress = state.Track(key);
-            progress.ClaimedAt = now;
-            return RewardVerdict.Succeeded;
-        });
+                    grants.Apply(s, grant);
+                    progress = state.Track(key);
+                    progress.ClaimedAt = now;
+                    return RewardVerdict.Succeeded;
+                });
+                return verdict.Outcome == RewardOutcome.Succeeded;
+            },
+            db => db.StageQuestClaimAsync(new CharacterRewardQuest
+            {
+                CharacterId = session.CharacterId,
+                QuestId = quest.Id,
+                PeriodStart = key.PeriodStart,
+                Kills = progress!.Kills,
+                AcceptedAt = progress.AcceptedAt,
+                ClaimedAt = now,
+            }, grant!.EventCoins),
+            () => session.WithLock(s =>
+            {
+                grants.Revert(s, grant!);
+                progress!.ClaimedAt = null;
+            }));
+
+        if (!attempted)
+            return RewardOutcome.Unavailable;
 
         if (verdict.Violation is { } violation)
         {
@@ -191,30 +221,15 @@ public sealed class RewardQuestService(
             return verdict.Outcome;
         }
 
-        var claim = new CharacterRewardQuest
+        if (!committed)
         {
-            CharacterId = session.CharacterId,
-            QuestId = quest.Id,
-            PeriodStart = key.PeriodStart,
-            Kills = progress!.Kills,
-            AcceptedAt = progress.AcceptedAt,
-            ClaimedAt = now,
-        };
-
-        if (!await states.ClaimQuestAsync(claim, grant!.EventCoins))
-        {
-            session.WithLock(s =>
-            {
-                grants.Revert(s, grant);
-                progress.ClaimedAt = null;
-            });
             logger.LogWarning("{Name} could not record the claim of {Board} quest {QuestId}; the reward was withdrawn",
                 session.Name, quest.Board, quest.Id);
             return RewardOutcome.Unavailable;
         }
 
         session.WithLock(_ => state.DirtyQuests.Remove(key));
-        await grants.NotifyAsync(session, grant);
+        await grants.NotifyAsync(session, grant!);
         logger.LogInformation("{Name} claimed {Board} quest {QuestId} for period {Period}",
             session.Name, quest.Board, quest.Id, key.PeriodStart);
         return RewardOutcome.Succeeded;

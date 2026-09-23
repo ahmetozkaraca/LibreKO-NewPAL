@@ -1,4 +1,4 @@
-using LibreKO.Common.Infrastructure.Network;
+﻿using LibreKO.Common.Infrastructure.Network;
 
 namespace LibreKO.Game.Protocol.Writers;
 
@@ -35,7 +35,7 @@ public enum DurationExpiredCode : byte
 
 public static class MagicProcessPacketWriter
 {
-    private const int PayloadSlotCount = 7;
+    public const int PayloadSlotCount = 7;
 
     public static Packet Create(
         MagicProcessOpcode opcode,
@@ -86,9 +86,6 @@ public static class MagicProcessPacketWriter
 
     public static Packet CreateExtendDuration(int skillId) =>
         WithSkill(MagicProcessOpcode.ExtendDuration, skillId);
-
-    public static Packet CreateTransformationList(int skillId) =>
-        WithSkill(MagicProcessOpcode.TransformationList, skillId);
 
     public static Packet CreateTransformationFailed(TransformationFailure reason)
     {

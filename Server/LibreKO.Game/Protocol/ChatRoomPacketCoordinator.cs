@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.World;
@@ -10,6 +10,7 @@ namespace LibreKO.Game.Protocol;
 public interface IChatRoomPacketCoordinator
 {
     Task HandleAsync(IClient client, Packet packet);
+    void Forget(int characterId);
 }
 
 public class ChatRoomPacketCoordinator(
@@ -61,6 +62,12 @@ public class ChatRoomPacketCoordinator(
                 await HandleSayAsync(session, packet);
                 break;
         }
+    }
+
+    public void Forget(int characterId)
+    {
+        lock (chatRoomLock)
+            RemoveFromRoom(characterId);
     }
 
     private async Task SendListAsync(UserSession session)

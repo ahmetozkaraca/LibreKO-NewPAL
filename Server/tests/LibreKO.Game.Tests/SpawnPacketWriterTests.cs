@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol.Writers;
 using Xunit;
@@ -107,8 +107,7 @@ public class SpawnPacketWriterTests
     [Fact]
     public void Attack_AlwaysCarriesTheOptionalCriticalByte()
     {
-        var packet = AttackPacketWriter.Create(
-            AttackPacketWriter.TypeMelee, AttackResult.Succeeded, 70_001, 70_002);
+        var packet = AttackPacketWriter.Create(AttackResult.Succeeded, 70_001, 70_002);
         packet.ResetOffset();
 
         packet.GetOpcode().Should().Be((byte)GameOpcodes.GS_ATTACK);

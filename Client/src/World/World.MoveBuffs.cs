@@ -6,7 +6,7 @@ namespace LibreKO;
 public partial class World
 {
     private double _moveBuffUntil;
-    private float _moveBuffPercent = 100f;
+    private float _moveBuffPercent = BuffKind.NeutralPercent;
 
     private int _castingSkillId;
     private double _castingUntil;
@@ -46,16 +46,16 @@ public partial class World
     {
         if (Now() >= _moveBuffUntil)
         {
-            _moveBuffPercent = 100f;
+            _moveBuffPercent = BuffKind.NeutralPercent;
             return 1f;
         }
-        return _moveBuffPercent / 100f;
+        return _moveBuffPercent / BuffKind.NeutralPercent;
     }
 
     private void ApplyMoveSpeedBuff(SkillData.Skill s, int duration)
     {
         int pct = s.MoveSpeedPercent;
-        if (pct == 100 || duration <= 0) return;
+        if (pct == BuffKind.NeutralPercent || duration <= 0) return;
 
         _moveBuffPercent = pct;
         _moveBuffUntil = Now() + duration;
@@ -63,7 +63,7 @@ public partial class World
 
     private void ClearMoveSpeedBuff()
     {
-        _moveBuffPercent = 100f;
+        _moveBuffPercent = BuffKind.NeutralPercent;
         _moveBuffUntil = 0;
     }
 

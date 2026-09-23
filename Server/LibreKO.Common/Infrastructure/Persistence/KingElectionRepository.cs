@@ -23,9 +23,9 @@ public class KingElectionRepository(AppDbContext context) : IKingElectionReposit
             .ToListAsync();
     }
 
-    public async Task AddCandidateAsync(KingElectionList candidate)
+    public async Task AddNominationAsync(KingElectionList nomination, KingElectionList candidate)
     {
-        context.KingElectionList.Add(candidate);
+        context.KingElectionList.AddRange(nomination, candidate);
         await context.SaveChangesAsync();
     }
 

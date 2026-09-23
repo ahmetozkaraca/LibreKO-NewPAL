@@ -1,10 +1,11 @@
 ﻿using System.ComponentModel.DataAnnotations;
 using LibreKO.Common.Gameplay;
 using LibreKO.Common.Infrastructure.Network;
+using Microsoft.Extensions.Options;
 
 namespace LibreKO.Game.Configuration;
 
-public class GameServerSettings
+public class GameServerSettings : IConnectionLimitsOwner
 {
     public const string SectionName = "GameServer";
 
@@ -21,6 +22,7 @@ public class GameServerSettings
     public string QuestsDirectory { get; set; } = "Quests";
     public string? QuestManifest { get; set; }
     public WelcomeSettings Welcome { get; set; } = new();
+    [ValidateObjectMembers]
     public PlayerSettings Player { get; set; } = new();
     public MonsterSettings Monsters { get; set; } = new();
     public GlobalSettings Global { get; set; } = new();
@@ -32,6 +34,7 @@ public class GameServerSettings
 
     public ConnectionLimitsSettings Connections { get; set; } = new();
 
+    [ValidateObjectMembers]
     public AntiCheatSettings AntiCheat { get; set; } = new();
 }
 
@@ -45,8 +48,10 @@ public class AntiCheatSettings
     [Range(0, int.MaxValue)]
     public int ScoreDecayPerMinute { get; set; } = 30;
 
+    [ValidateObjectMembers]
     public MovementCheckSettings Movement { get; set; } = new();
 
+    [ValidateObjectMembers]
     public TravelCheckSettings Travel { get; set; } = new();
 }
 
@@ -92,6 +97,9 @@ public class MovementCheckSettings
 
     [Range(0, 60)]
     public float RelocationGraceSeconds { get; set; } = 2f;
+
+    [Range(0, 60)]
+    public float SlowdownGraceSeconds { get; set; } = 2f;
 }
 
 public class SeedingSettings
@@ -125,8 +133,9 @@ public class PlayerSettings
     public const int DefaultAutoSaveDelaySeconds = 120;
     public const int DefaultSessionHandoverTimeoutSeconds = 5;
     public const int MaxSessionHandoverTimeoutSeconds = 60;
+    public const string DefaultNamePattern = "[A-Za-z0-9]*";
 
-    public string NamePattern { get; set; } = "[A-Za-z]*";
+    public string NamePattern { get; set; } = DefaultNamePattern;
 
     [Range(1, 83)]
     public int MaxLevel { get; set; } = 83;

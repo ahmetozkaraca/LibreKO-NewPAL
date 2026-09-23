@@ -82,6 +82,7 @@ public interface IGameDataService
     IEnumerable<ItemOpData> GetItemOps(int itemId);
     string? GetServerResource(int resourceId);
     SellingGroupItemData? GetSellingGroupItem(int sellingGroup, byte line, byte index);
+    bool HasSellingGroup(int sellingGroup);
 
     int GetPremiumProperty(byte premiumType, PremiumPropertyType property);
 }

@@ -4,6 +4,7 @@ using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol;
+using LibreKO.Game.Protocol.Writers;
 using LibreKO.Game.World;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
@@ -13,6 +14,8 @@ namespace LibreKO.Game.Tests;
 public class ExchangeEscrowTests : EconomyTestBase
 {
     private const byte ExchangeRequest = 1;
+    private const byte ExchangeAgree = 2;
+    private const byte Accept = 1;
     private const byte ExchangeAdd = 3;
     private const byte ExchangeDecide = 5;
     private const byte ExchangeDone = 7;
@@ -29,6 +32,8 @@ public class ExchangeEscrowTests : EconomyTestBase
     private const int RoomyWeight = 10_000;
     private const byte OfferLimit = 12;
     private const short WornDurability = 55;
+    private const int Anvil = 389999000;
+    private const short AnvilWeight = 2_000;
 
     [Fact]
     public async Task TheSwapAndCancelTrickNoLongerMintsScrolls()
@@ -137,6 +142,7 @@ public class ExchangeEscrowTests : EconomyTestBase
         var other = Player(provider, 6015, out _);
         giver.Trade.ExchangeUser = partner.CharacterId;
         giver.Trade.AskedForExchange = true;
+        giver.Trade.ExchangeStarted = true;
         partner.Trade.ExchangeUser = other.CharacterId;
         other.Trade.ExchangeUser = partner.CharacterId;
         Give(giver, 0, Sword);
@@ -157,6 +163,7 @@ public class ExchangeEscrowTests : EconomyTestBase
         var other = Player(provider, 6018, out _);
         partner.Stats = new DerivedStats { MaxWeight = RoomyWeight };
         giver.Trade.ExchangeUser = partner.CharacterId;
+        giver.Trade.ExchangeStarted = true;
         partner.Trade.ExchangeUser = other.CharacterId;
         partner.Trade.ExchangeOk = true;
         other.Trade.ExchangeUser = partner.CharacterId;
@@ -255,6 +262,68 @@ public class ExchangeEscrowTests : EconomyTestBase
     }
 
     [Fact]
+    public async Task AnUnansweredRequestLeavesTheTargetsBagUsable()
+    {
+        using var provider = Provider();
+        var asker = Player(provider, 6030, out _);
+        var target = Player(provider, 6031, out var targetSent);
+
+        await Exchange(provider, asker, Request(target));
+
+        ItemTransfer.IsInventoryLocked(target).Should().BeFalse();
+
+        var agree = Sub(ExchangeAgree);
+        agree.WriteByte(Accept);
+        await Exchange(provider, target, agree);
+
+        ItemTransfer.IsInventoryLocked(target).Should().BeTrue();
+        targetSent.Should().Contain(packet => packet.GetOpcode() == (byte)GameOpcodes.GS_EXCHANGE
+            && packet.GetData()[0] == ExchangeAgree && packet.GetData()[1] == ExchangePacketWriter.Succeeded);
+    }
+
+    [Fact]
+    public async Task AnOfferBeforeTheRequestIsAcceptedCancelsItAndKeepsTheItem()
+    {
+        using var provider = Provider();
+        var asker = Player(provider, 6032, out var askerSent);
+        var target = Player(provider, 6033, out var targetSent);
+        Give(asker, 0, Sword);
+        await Exchange(provider, asker, Request(target));
+
+        await Exchange(provider, asker, Offer(0, Sword, 1));
+
+        Bag(asker, 0).ItemId.Should().Be(Sword);
+        asker.Trade.IsTrading.Should().BeFalse();
+        target.Trade.IsTrading.Should().BeFalse();
+        askerSent.Should().Contain(packet => IsCancel(packet));
+        targetSent.Should().Contain(packet => IsCancel(packet));
+    }
+
+    [Fact]
+    public async Task AnswersAndOffersWithoutATradeAreToldItIsOver()
+    {
+        using var provider = Provider();
+        var stray = Player(provider, 6034, out var sent);
+
+        var agree = Sub(ExchangeAgree);
+        agree.WriteByte(Accept);
+        await Exchange(provider, stray, agree);
+        await Exchange(provider, stray, Sub(ExchangeDecide));
+
+        sent.Count(IsCancel).Should().Be(2);
+    }
+
+    private static bool IsCancel(Packet packet) =>
+        packet.GetOpcode() == (byte)GameOpcodes.GS_EXCHANGE && packet.GetData()[0] == ExchangeCancel;
+
+    private static Packet Request(UserSession target)
+    {
+        var packet = Sub(ExchangeRequest);
+        packet.WriteInt(target.CharacterId);
+        return packet;
+    }
+
+    [Fact]
     public async Task OnlyOneOfManySimultaneousRequestsPairsWithTheTarget()
     {
         using var provider = Provider();
@@ -290,6 +359,52 @@ public class ExchangeEscrowTests : EconomyTestBase
         }
     }
 
+    [Fact]
+    public async Task ATraderNearTheWeightCapCanSwapForAnEquallyHeavyItem()
+    {
+        using var provider = HeavyProvider();
+        var gameData = provider.GetRequiredService<IGameDataService>();
+        var (giver, taker) = Traders(provider, 6101, 6102);
+        Give(giver, 0, Anvil);
+        Give(taker, 0, Anvil);
+        giver.RecalculateStatsWithBuffs(gameData);
+        taker.RecalculateStatsWithBuffs(gameData);
+        taker.Stats.MaxWeight.Should().BeLessThan(AnvilWeight * 2, "each trader can only carry one anvil");
+
+        await Exchange(provider, giver, Offer(0, Anvil, 1));
+        await Exchange(provider, taker, Offer(0, Anvil, 1));
+        await Exchange(provider, giver, Sub(ExchangeDecide));
+        await Exchange(provider, taker, Sub(ExchangeDecide));
+
+        TotalHeld(giver, Anvil).Should().Be(1);
+        TotalHeld(taker, Anvil).Should().Be(1);
+        giver.Trade.IsTrading.Should().BeFalse();
+        giver.Stats.ItemWeight.Should().Be(AnvilWeight);
+    }
+
+    [Fact]
+    public async Task CancellingAnOfferPutsItsWeightBack()
+    {
+        using var provider = HeavyProvider();
+        var gameData = provider.GetRequiredService<IGameDataService>();
+        var (giver, _) = Traders(provider, 6103, 6104);
+        Give(giver, 0, Anvil);
+        giver.RecalculateStatsWithBuffs(gameData);
+
+        await Exchange(provider, giver, Offer(0, Anvil, 1));
+        giver.Stats.ItemWeight.Should().Be(0);
+
+        await Exchange(provider, giver, Sub(ExchangeCancel));
+        giver.Stats.ItemWeight.Should().Be(AnvilWeight);
+    }
+
+    private ServiceProvider HeavyProvider() => CreateProvider(_ => { }, gameData =>
+    {
+        gameData.GetItem(Anvil).Returns(new ItemData { Num = Anvil, Countable = 0, Weight = AnvilWeight });
+        gameData.GetCoefficient(Arg.Any<short>()).Returns(CreateBasicCoefficient(0));
+        gameData.PremiumItemTable.Returns(new Dictionary<byte, PremiumItemData>());
+    });
+
     private ServiceProvider Provider() => CreateProvider(_ => { }, gameData =>
     {
         gameData.GetItem(Arrow).Returns(new ItemData { Num = Arrow, Countable = 1 });
@@ -312,6 +427,7 @@ public class ExchangeEscrowTests : EconomyTestBase
         giver.Trade.ExchangeUser = taker.CharacterId;
         giver.Trade.AskedForExchange = true;
         taker.Trade.ExchangeUser = giver.CharacterId;
+        giver.Trade.ExchangeStarted = taker.Trade.ExchangeStarted = true;
         return (giver, taker);
     }
 

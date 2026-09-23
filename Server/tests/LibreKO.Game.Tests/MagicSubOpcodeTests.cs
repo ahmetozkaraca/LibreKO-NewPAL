@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Game.Protocol.Writers;
 using Xunit;
@@ -25,16 +25,6 @@ public class MagicSubOpcodeTests
         var packet = MagicProcessPacketWriter.CreateExtendDuration(SkillId);
 
         packet.ReadByte().Should().Be((byte)MagicProcessOpcode.ExtendDuration);
-        packet.ReadInt().Should().Be(SkillId);
-        packet.RemainingBytes.Should().Be(0);
-    }
-
-    [Fact]
-    public void TheTransformationListNamesTheSkill()
-    {
-        var packet = MagicProcessPacketWriter.CreateTransformationList(SkillId);
-
-        packet.ReadByte().Should().Be((byte)MagicProcessOpcode.TransformationList);
         packet.ReadInt().Should().Be(SkillId);
         packet.RemainingBytes.Should().Be(0);
     }

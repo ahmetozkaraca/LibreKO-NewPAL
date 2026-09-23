@@ -30,7 +30,6 @@ public interface IWorldMovementService
     Task HandleWarpListAsync(IClient client, Packet packet);
     Task HandleZoneChangeAsync(IClient client, Packet packet);
     Task HandleStealthAsync(IClient client, Packet packet);
-    Task HandleSpeedHackCheckAsync(IClient client, Packet packet);
     Task OfferWarpListAsync(UserSession session, WarpSource source, IReadOnlyCollection<WarpListEntry> warps);
     Task RefreshRegionAsync(UserSession session);
 }
@@ -65,6 +64,14 @@ public class WorldMovementService(
     private const byte ZoneChangeEvent = 1;
     private const byte DamageEvent = 3;
     private const short DamageZoneHp = 10;
+
+    public const float ZoneGateRetrySeconds = 3f;
+    private const string ZoneGateLevelTooLowNotice = "You are not experienced enough to pass this way.";
+    private const string ZoneGateLevelTooHighNotice = "Your level is too high to pass this way.";
+    private const string ZoneGateNoNationalPointsNotice = "You need national points to pass this way.";
+    private const string ZoneGateFullNotice = "The land beyond is full.";
+    private const string ZoneGateClosedNotice = "This way is closed to you.";
+    private const string TownRecallRefusedNotice = "You cannot return to town right now.";
 
     private const int StateChangeBodySize = 2;
     private const byte StealthCancelRequest = 0;
@@ -188,8 +195,7 @@ public class WorldMovementService(
         switch (gameEvent.Type)
         {
             case ZoneChangeEvent:
-                await zoneTransitionService.EnterZoneAsync(
-                    session, (byte)gameEvent.Exec1, gameEvent.Exec2, gameEvent.Exec3, ZoneTransitionService.NoFee);
+                await PassZoneGateAsync(session, (byte)gameEvent.Exec1, gameEvent.Exec2, gameEvent.Exec3);
                 break;
 
             case DamageEvent:
@@ -202,6 +208,27 @@ public class WorldMovementService(
                     await combatLifecycleService.HandlePlayerDeathAsync(session, killer: null);
                 break;
         }
+    }
+
+    private async Task PassZoneGateAsync(UserSession session, byte zoneId, float x, float z)
+    {
+        var now = time.GetTimestamp();
+        if (now < session.Travel.ZoneGateRetryAt)
+            return;
+
+        var result = await zoneTransitionService.EnterZoneAsync(session, zoneId, x, z, ZoneTransitionService.NoFee);
+        if (result is ZoneEntryResult.Allowed or ZoneEntryResult.Busy)
+            return;
+
+        session.Travel.ZoneGateRetryAt = now + Ticks(ZoneGateRetrySeconds);
+        await session.Client.SendPacket(ChatPacketWriter.SystemNotice((byte)session.Nation, result switch
+        {
+            ZoneEntryResult.LevelTooLow => ZoneGateLevelTooLowNotice,
+            ZoneEntryResult.LevelTooHigh => ZoneGateLevelTooHighNotice,
+            ZoneEntryResult.NoNationalPoints => ZoneGateNoNationalPointsNotice,
+            ZoneEntryResult.ZoneFull => ZoneGateFullNotice,
+            _ => ZoneGateClosedNotice,
+        }));
     }
 
     public async Task RefreshRegionAsync(UserSession session)
@@ -267,10 +294,13 @@ public class WorldMovementService(
         var type = packet.ReadByte();
         var value = packet.RemainingBytes >= sizeof(int) ? packet.ReadInt() : packet.ReadByte();
 
-        if (!IsPlayerStateChange(type, value))
+        switch (ClassifyStateChange(type, value))
         {
-            violations.Report(session, ViolationKind.InvalidRequest, $"sent state change {type} with value {value}");
-            return;
+            case StateChangeOrigin.ServerOwned:
+                violations.Report(session, ViolationKind.InvalidRequest, $"sent server-owned state change {type} with value {value}");
+                return;
+            case StateChangeOrigin.Unsupported:
+                return;
         }
 
         if (session.Hp <= 0)
@@ -285,22 +315,38 @@ public class WorldMovementService(
         await sessionManager.Regions.SendToRegion(session, result, excludeSender: false);
     }
 
-    private static bool IsPlayerStateChange(byte type, int value) => (StateChangeType)type switch
+    private enum StateChangeOrigin : byte
     {
-        StateChangeType.Pose => value is (byte)UserPoseState.Standing or (byte)UserPoseState.Sitting,
-        StateChangeType.CombatStance => value is (byte)CombatStanceState.Relaxed or (byte)CombatStanceState.Ready,
-        _ => false,
+        Player,
+        ServerOwned,
+        Unsupported,
+    }
+
+    private static StateChangeOrigin ClassifyStateChange(byte type, int value) => (StateChangeType)type switch
+    {
+        StateChangeType.Pose => value is (byte)UserPoseState.Standing or (byte)UserPoseState.Sitting
+            ? StateChangeOrigin.Player
+            : StateChangeOrigin.Unsupported,
+        StateChangeType.CombatStance => value is (byte)CombatStanceState.Relaxed or (byte)CombatStanceState.Ready
+            ? StateChangeOrigin.Player
+            : StateChangeOrigin.Unsupported,
+        StateChangeType.Abnormal or StateChangeType.Visibility or StateChangeType.Stealth
+            or StateChangeType.Transformation => StateChangeOrigin.ServerOwned,
+        _ => StateChangeOrigin.Unsupported,
     };
 
     public async Task HandleHomeAsync(IClient client)
     {
         var session = sessionManager.GetByClientId(client.Id);
-        if (session == null || !TryBeginTownRecall(session))
+        if (session == null)
             return;
 
         var startPos = gameDataService.GetStartPosition(session.ZoneId);
-        if (startPos == null)
+        if (startPos == null || !TryBeginTownRecall(session))
+        {
+            await client.SendPacket(ChatPacketWriter.SystemNotice((byte)session.Nation, TownRecallRefusedNotice));
             return;
+        }
 
         var (x, z) = startPos.RandomSpawn(session.Nation);
 
@@ -365,8 +411,6 @@ public class WorldMovementService(
 
     private static ushort ToWire(float coordinate)
         => (ushort)Math.Clamp(coordinate * PositionScale, 0f, ushort.MaxValue);
-
-    public Task HandleSpeedHackCheckAsync(IClient client, Packet packet) => Task.CompletedTask;
 
     public async Task HandleWarpListAsync(IClient client, Packet packet)
     {
@@ -508,7 +552,7 @@ public class WorldMovementService(
     {
         var charged = session.WithLock(s =>
         {
-            if (s.Hp <= 0 || s.IsWarping || !RegionManager.IsInWorld(s))
+            if (s.Hp <= 0 || s.IsWarping || s.Trade.LocksInventory || !RegionManager.IsInWorld(s))
                 return ZoneEntryResult.Busy;
 
             if (s.Money < fee)
@@ -527,16 +571,14 @@ public class WorldMovementService(
     }
 
     private static Task RefuseWarpAsync(UserSession session, ZoneEntryResult result)
-        => result == ZoneEntryResult.Busy
-            ? Task.CompletedTask
-            : session.Client.SendPacket(WarpListPacketWriter.Result(result switch
-            {
-                ZoneEntryResult.LevelTooLow => WarpListPacketWriter.ResultLevelTooLow,
-                ZoneEntryResult.LevelTooHigh => WarpListPacketWriter.ResultLevelRangeOnly,
-                ZoneEntryResult.NoNationalPoints => WarpListPacketWriter.ResultNoNationalPoints,
-                ZoneEntryResult.ZoneFull => WarpListPacketWriter.ResultServerFull,
-                _ => WarpListPacketWriter.ResultNotQualified,
-            }));
+        => session.Client.SendPacket(WarpListPacketWriter.Result(result switch
+        {
+            ZoneEntryResult.LevelTooLow => WarpListPacketWriter.ResultLevelTooLow,
+            ZoneEntryResult.LevelTooHigh => WarpListPacketWriter.ResultLevelRangeOnly,
+            ZoneEntryResult.NoNationalPoints => WarpListPacketWriter.ResultNoNationalPoints,
+            ZoneEntryResult.ZoneFull => WarpListPacketWriter.ResultServerFull,
+            _ => WarpListPacketWriter.ResultNotQualified,
+        }));
 
     private static (float X, float Z) ApplyWarpRadius(float x, float z, float radius)
     {

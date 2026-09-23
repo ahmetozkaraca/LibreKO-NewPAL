@@ -12,6 +12,12 @@ namespace LibreKO.Common.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.CreateIndex(
+                name: "IX_Accounts_Login",
+                table: "Accounts",
+                column: "Login",
+                unique: true);
+
             migrationBuilder.CreateTable(
                 name: "CharacterRewardQuests",
                 columns: table => new
@@ -207,12 +213,6 @@ namespace LibreKO.Common.Migrations
                         onDelete: ReferentialAction.Cascade);
                 })
                 .Annotation("MySql:CharSet", "utf8mb4");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_Accounts_Login",
-                table: "Accounts",
-                column: "Login",
-                unique: true);
 
             migrationBuilder.CreateIndex(
                 name: "IX_RewardPrizes_Pool",

@@ -9,6 +9,7 @@ public partial class World
 {
     private const int PieceResultSlotCount = 3;
     private const double PieceSpinInterval = 0.05;
+    private const ulong PieceExchangeCooldownMs = 1500;
 
     private const int TextPlacePiece = 6710;
     private const int TextPressStart = 6711;
@@ -39,6 +40,8 @@ public partial class World
     private int _pieceItemId;
     private int _piecePosition = -1;
     private double _pieceSpinClock;
+    private ulong _pieceSentAtMs;
+    private bool _pieceStopQueued;
     private IReadOnlyList<int> _pieceRewards = System.Array.Empty<int>();
 
     private void PieceChangeInit()
@@ -245,6 +248,7 @@ public partial class World
             return;
         }
         _pieceSpinning = true;
+        _pieceStopQueued = false;
         _pieceSpinClock = 0;
         SetPieceMessage(ItemData.Text(TextPressStop, "Press Stop."), false);
         RefreshPieceActions();
@@ -260,8 +264,15 @@ public partial class World
             RefreshPieceActions();
             return;
         }
+        if (_pieceSentAtMs != 0 && Time.GetTicksMsec() - _pieceSentAtMs < PieceExchangeCooldownMs)
+        {
+            _pieceStopQueued = true;
+            return;
+        }
+        _pieceStopQueued = false;
         _pieceSpinning = false;
         _pieceBusy = true;
+        _pieceSentAtMs = Time.GetTicksMsec();
         RefreshPieceActions();
         Net.I.SendPieceExchange(_pieceNpcId, _pieceItemId, _piecePosition);
     }
@@ -269,6 +280,8 @@ public partial class World
     private void PieceChangeTick(double delta)
     {
         if (!_pieceShown || !_pieceSpinning || _pieceRewards.Count == 0) return;
+        if (_pieceStopQueued) StopPieceSpin();
+        if (!_pieceSpinning) return;
 
         _pieceSpinClock += delta;
         if (_pieceSpinClock < PieceSpinInterval) return;

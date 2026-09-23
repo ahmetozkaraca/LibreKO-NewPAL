@@ -139,7 +139,7 @@ public class MagicStatusEffectService(
         var cursesAnother = isDebuff && target != null && target.CharacterId != caster.CharacterId;
 
         if (target == null
-            || (cursesAnother && (!PvpRules.CanAttackPlayer(caster, target) || !stealthService.CanSee(caster, target)))
+            || (cursesAnother && (!PvpRules.CanAttackPlayer(caster, target) || !stealthService.CanTarget(caster, target)))
             || (!isDebuff && HoldsBuffOfType(target, buffType))
             || !await charge.TryPayAsync())
         {
@@ -200,7 +200,7 @@ public class MagicStatusEffectService(
 
         var applied = target.WithLock(recipient =>
         {
-            if (!isDebuff && HoldsBuffOfType(recipient, buffType))
+            if (recipient.Hp <= 0 || (!isDebuff && HoldsBuffOfType(recipient, buffType)))
                 return false;
 
             if (isDebuff && buffType != BuffType.None)
@@ -251,13 +251,11 @@ public class MagicStatusEffectService(
 
     private UserSession? ResolveBuffTarget(UserSession caster, MagicData magic, int targetId)
     {
-        if ((SkillMoral)magic.Moral == SkillMoral.Self || targetId == NoTarget || targetId == caster.CharacterId)
+        if ((SkillMoral)magic.Moral == SkillMoral.Self || targetId == MagicTargetingService.AreaTargetId || targetId == caster.CharacterId)
             return caster;
 
         return sessionManager.GetByCharacterId(targetId);
     }
-
-    private const int NoTarget = -1;
 
     private async Task ExecuteSpecialAsync(
         UserSession caster, MagicData magic, int skillId, int targetId, MagicCharge charge)
@@ -348,35 +346,35 @@ public class MagicStatusEffectService(
                 ? type5Data.NeedStone
                 : NoStones;
 
-        if (target.Hp > 0
-            || (stones > NoStones && !magicItemUsageService.CanUseItem(target, magic.UseItem, stones))
-            || !await charge.TryPayAsync()
-            || (stones > NoStones && !await magicItemUsageService.TryConsumeItemAsync(target, magic.UseItem, stones)))
+        if (!target.TryClaimRevival())
         {
             await SendMagicFailAsync(caster, skillId);
             return;
         }
 
-        var lostExperience = target.WithLock(corpse =>
+        (bool Revived, long Lost, IReadOnlyList<int> Stones) revival;
+        try
         {
-            if (corpse.Hp > 0)
-                return (Revived: false, Lost: 0L);
+            revival = target.WithLock(corpse => CanRevive(corpse, magic.UseItem, stones))
+                && await charge.TryPayAsync()
+                    ? target.WithLock(corpse => Revive(corpse, magic.UseItem, stones))
+                    : (false, 0L, []);
+        }
+        finally
+        {
+            target.ReleaseRevival();
+        }
 
-            var lost = corpse.DeathExpLoss;
-            corpse.Hp = corpse.MaxHp;
-            corpse.Mp = 0;
-            corpse.DeathExpLoss = 0;
-            return (Revived: true, Lost: lost);
-        });
-
-        if (!lostExperience.Revived)
+        if (!revival.Revived)
         {
             await SendMagicFailAsync(caster, skillId);
             return;
         }
 
-        var recovered = lostExperience.Lost > 0 && type5Data.ExpRecover > 0
-            ? lostExperience.Lost * type5Data.ExpRecover / MagicCombatHelper.PercentScale
+        await magicItemUsageService.SendItemChangesAsync(target, revival.Stones);
+
+        var recovered = revival.Lost > 0 && type5Data.ExpRecover > 0
+            ? revival.Lost * type5Data.ExpRecover / MagicCombatHelper.PercentScale
             : 0;
         if (recovered > 0)
             await playerProgressionService.ChangeExperienceAsync(target, recovered);
@@ -395,6 +393,22 @@ public class MagicStatusEffectService(
                 [0, 1]),
             excludeSender: false);
     }
+
+    private (bool Revived, long Lost, IReadOnlyList<int> Stones) Revive(UserSession corpse, int stoneItem, int stones)
+    {
+        if (!CanRevive(corpse, stoneItem, stones))
+            return (false, 0L, []);
+
+        var taken = stones > NoStones ? magicItemUsageService.TakeItem(corpse, stoneItem, stones) : [];
+        var lost = corpse.DeathExpLoss;
+        corpse.Hp = corpse.MaxHp;
+        corpse.Mp = 0;
+        corpse.DeathExpLoss = 0;
+        return (true, lost, taken);
+    }
+
+    private bool CanRevive(UserSession corpse, int stoneItem, int stones) =>
+        corpse.Hp <= 0 && (stones <= NoStones || magicItemUsageService.CanUseItem(corpse, stoneItem, stones));
 
     private async Task<bool> ClearDebuffsAsync(UserSession target)
     {

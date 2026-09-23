@@ -38,13 +38,11 @@ public class KnightsManagementPacketService(
     ILoyaltyService loyaltyService,
     ILogger<KnightsManagementPacketService> logger) : IKnightsManagementPacketService
 {
-    private const byte ClanChiefFame = 1;
-    private const byte ViceChiefFame = 2;
     private const int MaxNoticeLength = 255;
 
     public async Task HandleCapeAsync(UserSession session, Packet packet)
     {
-        if (session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
             return;
 
         var subOpcode = packet.ReadByte();
@@ -103,8 +101,8 @@ public class KnightsManagementPacketService(
         if (rank == KnightsSubOpcode.Chief)
         {
             logger.LogInformation("{Name} promoted {TargetName} to clan chief in clan {ClanId}", session.Name, target.Name, session.KnightsId);
-            session.KnightsFame = 5;
-            target.KnightsFame = 1;
+            session.KnightsFame = KnightsManager.TraineeFame;
+            target.KnightsFame = KnightsManager.ChiefFame;
             clan.Chief = target.Name;
         }
         else
@@ -118,9 +116,9 @@ public class KnightsManagementPacketService(
 
             target.KnightsFame = rank switch
             {
-                KnightsSubOpcode.Vicechief => 2,
+                KnightsSubOpcode.Vicechief => KnightsManager.ViceChiefFame,
                 KnightsSubOpcode.Officer => 3,
-                _ => 5
+                _ => KnightsManager.TraineeFame
             };
         }
 
@@ -241,7 +239,7 @@ public class KnightsManagementPacketService(
 
     public async Task HandleUpdateNoticeAsync(UserSession session, Packet packet)
     {
-        if (session.KnightsId <= 0 || session.KnightsFame != ClanChiefFame)
+        if (session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
         {
             await session.Client.SendPacket(
                 KnightsPacketWriter.NoticeRefused(KnightsNoticeResult.NoAuthority));
@@ -350,11 +348,11 @@ public class KnightsManagementPacketService(
         var clan = sessionManager.Knights.GetClan(session.KnightsId);
         if (clan == null) return;
 
-        byte isClanLeader = session.KnightsFame == 1 ? (byte)1 : (byte)2;
+        byte isClanLeader = session.KnightsFame == KnightsManager.ChiefFame ? (byte)1 : (byte)2;
 
         var viceChiefs = sessionManager.GetAll()
             .Where(member => member.KnightsId == session.KnightsId
-                             && member.KnightsFame == ViceChiefFame)
+                             && member.KnightsFame == KnightsManager.ViceChiefFame)
             .Select(member => member.Name)
             .ToList();
 
@@ -364,7 +362,7 @@ public class KnightsManagementPacketService(
 
     public async Task HandleHandoverRequestAsync(UserSession session, Packet packet)
     {
-        if (session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
         {
             var fail = KnightsPacketWriter.Result(KnightsSubOpcode.HandoverReq, 3);
             await session.Client.SendPacket(fail);
@@ -383,7 +381,7 @@ public class KnightsManagementPacketService(
         var target = sessionManager.GetByName(targetName);
         if (target == null
             || target.KnightsId != session.KnightsId
-            || target.KnightsFame != 2) // VICECHIEF
+            || target.KnightsFame != KnightsManager.ViceChiefFame)
         {
             var fail = KnightsPacketWriter.Result(KnightsSubOpcode.HandoverReq, 3);
             await session.Client.SendPacket(fail);
@@ -393,8 +391,8 @@ public class KnightsManagementPacketService(
         // Apply runtime: target becomes chief, current chief drops to trainee.
         var oldChief = clan.Chief;
         clan.Chief = target.Name;
-        session.KnightsFame = 5; // TRAINEE
-        target.KnightsFame = 1;  // CHIEF
+        session.KnightsFame = KnightsManager.TraineeFame;
+        target.KnightsFame = KnightsManager.ChiefFame;
 
         // Persist: clan + both characters.
         using var scope = scopeFactory.CreateScope();
@@ -404,10 +402,10 @@ public class KnightsManagementPacketService(
         await knightsRepo.UpdateAsync(clan);
 
         var oldChiefChar = await characterRepo.GetById(session.CharacterId);
-        if (oldChiefChar != null) { oldChiefChar.Fame = 5; await characterRepo.UpdateAsync(oldChiefChar); }
+        if (oldChiefChar != null) { oldChiefChar.Fame = KnightsManager.TraineeFame; await characterRepo.UpdateAsync(oldChiefChar); }
 
         var newChiefChar = await characterRepo.GetById(target.CharacterId);
-        if (newChiefChar != null) { newChiefChar.Fame = 1; await characterRepo.UpdateAsync(newChiefChar); }
+        if (newChiefChar != null) { newChiefChar.Fame = KnightsManager.ChiefFame; await characterRepo.UpdateAsync(newChiefChar); }
 
         var broadcast = KnightsPacketWriter.HandoverDone(
             KnightsSubOpcode.HandoverReq, oldChief, target.Name);
@@ -442,7 +440,7 @@ public class KnightsManagementPacketService(
         short failCode = 1;
         var clan = sessionManager.Knights.GetClan(session.KnightsId);
 
-        if (session.KnightsId <= 0 || session.KnightsFame != 1 || clan == null || clan.Flag < 3)
+        if (session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame || clan == null || clan.Flag < 3)
             failCode = 11;
         else if (session.ZoneId != (byte)session.Nation)
             failCode = 12;
@@ -465,7 +463,7 @@ public class KnightsManagementPacketService(
         ushort failCode = 1;
         var clan = sessionManager.Knights.GetClan(session.KnightsId);
 
-        if (session.KnightsId <= 0 || session.KnightsFame != 1) failCode = 11;
+        if (session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame) failCode = 11;
         else if (clan == null) failCode = 20;
         else if (clan.Flag < 2) failCode = 11;
         else if (session.ZoneId != (byte)session.Nation) failCode = 12;
@@ -530,7 +528,7 @@ public class KnightsManagementPacketService(
         if (packet.RemainingBytes < 4) return;
         var targetId = packet.ReadInt();
 
-        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
         {
             await SendAllyFailAsync(session, KnightsSubOpcode.AllyCreate);
             return;
@@ -545,7 +543,7 @@ public class KnightsManagementPacketService(
 
         var target = sessionManager.GetByCharacterId(targetId);
         if (target == null || target.Hp <= 0 || target.Nation != session.Nation
-            || target.KnightsId <= 0 || target.KnightsFame != 1)
+            || target.KnightsId <= 0 || target.KnightsFame != KnightsManager.ChiefFame)
         {
             await SendAllyFailAsync(session, KnightsSubOpcode.AllyCreate);
             return;
@@ -580,7 +578,7 @@ public class KnightsManagementPacketService(
         if (packet.RemainingBytes < 1) return;
         var decision = packet.ReadByte();
 
-        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
             return;
 
         var ourClan = sessionManager.Knights.GetClan(session.KnightsId);
@@ -672,7 +670,7 @@ public class KnightsManagementPacketService(
         if (packet.RemainingBytes < 4) return;
         var targetId = packet.ReadInt();
 
-        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
         {
             await SendAllyFailAsync(session, KnightsSubOpcode.AllyInsert);
             return;
@@ -695,7 +693,7 @@ public class KnightsManagementPacketService(
 
         var target = sessionManager.GetByCharacterId(targetId);
         if (target == null || target.Hp <= 0 || target.Nation != session.Nation
-            || target.KnightsId <= 0 || target.KnightsFame != 1)
+            || target.KnightsId <= 0 || target.KnightsFame != KnightsManager.ChiefFame)
         {
             await SendAllyFailAsync(session, KnightsSubOpcode.AllyInsert);
             return;
@@ -725,7 +723,7 @@ public class KnightsManagementPacketService(
         if (packet.RemainingBytes < 2) return;
         var targetClanId = packet.ReadShort();
 
-        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
             return;
 
         var mainClan = sessionManager.Knights.GetClan(session.KnightsId);
@@ -784,7 +782,7 @@ public class KnightsManagementPacketService(
 
     public async Task HandleAllyRemoveAsync(UserSession session)
     {
-        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.Hp <= 0 || session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
         {
             await SendAllyFailAsync(session, KnightsSubOpcode.AllyRemove);
             return;

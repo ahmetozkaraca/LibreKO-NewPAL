@@ -249,8 +249,7 @@ public class NpcAiCombatService(
                 target.Name);
         }
 
-        var attackPacket = AttackPacketWriter.Create(
-            AttackPacketWriter.TypeMelee, attackResult, npc.UniqueId, target.CharacterId);
+        var attackPacket = AttackPacketWriter.Create(attackResult, npc.UniqueId, target.CharacterId);
         await sessionManager.Regions.SendToRegion(target, attackPacket, excludeSender: false);
 
         if (attackResult != AttackResult.TargetDead)

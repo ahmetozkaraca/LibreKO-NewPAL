@@ -422,16 +422,23 @@ public partial class World
         }
 
         Net.I.SendWarpSelect(_warpSourceId, entry.WarpId);
-        Chat.Info(entry.Fee > 0
-            ? $"Travelling to {info.Name} (−{entry.Fee:n0} Noahs)…"
-            : $"Travelling to {info.Name}…");
         CloseWarp();
     }
 
-    private void OnWarpFail()
+    private void OnWarpFail(byte result)
     {
         _openGate = null;
-        if (_warpShown) SetWarpStatus("The gatekeeper won't send you there.", true);
+        string reason = result switch
+        {
+            Net.WarpResultLevelTooLow => "Your level is too low to travel there.",
+            Net.WarpResultLevelRangeOnly => "Your level is too high to travel there.",
+            Net.WarpResultNoNationalPoints => "You need national points to travel there.",
+            Net.WarpResultServerFull => "That destination is full.",
+            Net.WarpResultCastleSiege => "The castle siege bars that way.",
+            _ => "The gatekeeper won't send you there.",
+        };
+        if (_warpShown) SetWarpStatus(reason, true);
+        else Chat.Info(reason);
     }
 
     private void OnWarpGold(int total)

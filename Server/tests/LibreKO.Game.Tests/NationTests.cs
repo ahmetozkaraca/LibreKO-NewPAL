@@ -1,4 +1,5 @@
-using FluentAssertions;
+﻿using FluentAssertions;
+using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
@@ -66,7 +67,14 @@ public class NationTests : GameTestBase
         };
 
         using var provider = CreateProvider(
-            db => db.Add(kingData),
+            db =>
+            {
+                db.Add(kingData);
+                db.KingElectionList.Add(new KingElectionList
+                {
+                    Nation = (byte)AccountNation.Karus, Type = KingPacketConstants.ElectionListSenator, Name = "Leader",
+                });
+            },
             gameData =>
             {
                 gameData.KingSystemTable.Returns(new Dictionary<byte, KingSystemData>
@@ -116,7 +124,7 @@ public class NationTests : GameTestBase
 
         using var scope = provider.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var entry = await db.KingElectionList.SingleAsync();
+        var entry = await db.KingElectionList.SingleAsync(row => row.Type == KingPacketConstants.ElectionListCandidate);
         entry.Nation.Should().Be((byte)AccountNation.Karus);
         entry.Name.Should().Be("Nominee");
         entry.Knights.Should().Be(701);
@@ -310,6 +318,55 @@ public class NationTests : GameTestBase
         targetPacket!.ResetOffset();
         targetPacket.ReadByte().Should().Be(1);
         targetPacket.ReadSByteString().Should().Be("Requester");
+    }
+
+    [Theory]
+    [InlineData(ChallengeAccept)]
+    [InlineData(ChallengeReject)]
+    public async Task ChallengePacketCoordinator_HandleAsync_ADeadTargetsAnswerStillReleasesBothPlayers(byte answer)
+    {
+        using var provider = CreateProvider(_ => { });
+        var sessionManager = provider.GetRequiredService<SessionManager>();
+        var coordinator = new ChallengePacketCoordinator(
+            sessionManager,
+            Substitute.For<IZoneTransitionService>(),
+            Substitute.For<ILogger<ChallengePacketCoordinator>>());
+
+        var requesterSent = new List<Packet>();
+        var requester = ChallengeSession(sessionManager, 133, "Challenger", requesterSent);
+        var target = ChallengeSession(sessionManager, 134, "Fallen", []);
+
+        var request = new Packet(GameOpcodes.GS_CHALLENGE);
+        request.WriteByte(ChallengeRequest);
+        request.WriteSByteString(target.Name);
+        await coordinator.HandleAsync(requester.Client, request);
+
+        target.Hp = 0;
+        var reply = new Packet(GameOpcodes.GS_CHALLENGE);
+        reply.WriteByte(answer);
+        await coordinator.HandleAsync(target.Client, reply);
+
+        requester.Trade.IsRequestingChallenge.Should().BeFalse();
+        target.Trade.IsChallengeRequested.Should().BeFalse();
+        var notice = requesterSent.Last();
+        notice.ResetOffset();
+        notice.ReadByte().Should().Be(ChallengeReject);
+    }
+
+    private const byte ChallengeRequest = 1;
+    private const byte ChallengeAccept = 3;
+    private const byte ChallengeReject = 4;
+
+    private static UserSession ChallengeSession(SessionManager sessionManager, int characterId, string name, List<Packet> sent)
+    {
+        var client = Substitute.For<IClient>();
+        client.Id.Returns(Guid.NewGuid());
+        client.SendPacket(Arg.Do<Packet>(sent.Add), Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
+        var session = sessionManager.CreateSession(client, characterId, characterId + 10);
+        session.Name = name;
+        session.ZoneId = 21;
+        session.Hp = 100;
+        return session;
     }
 
 }

@@ -24,7 +24,6 @@ public class KnightsCapePacketCoordinator(
     private const byte OpcodeTicketPurchase = 1;
     private const int CastellanTicketItem = 914006000;
     private const int PaintCostClanPoints = 36000;
-    private const byte ChiefFame = 1;
     private const byte ClanFlagPromoted = 2;
 
     private static readonly short[] KingCapeIds = [97, 98, 99];
@@ -48,7 +47,7 @@ public class KnightsCapePacketCoordinator(
         }
 
         if (session.Hp <= 0
-            || session.KnightsFame != ChiefFame
+            || session.KnightsFame != KnightsManager.ChiefFame
             || session.KnightsId == 0
             || session.Trade.IsTrading
             || session.Trade.IsMerchanting
@@ -131,7 +130,7 @@ public class KnightsCapePacketCoordinator(
             }
         }
 
-        bool applyingPaint = r != 0 || g != 0 || b != 0;
+        bool applyingPaint = (r != 0 || g != 0 || b != 0) && (r, g, b) != (clan.CapeR, clan.CapeG, clan.CapeB);
         if (capeId < 0 && !applyingPaint)
         {
             await SendFailAsync(client, CapeResult.NotAllowed);
@@ -162,7 +161,7 @@ public class KnightsCapePacketCoordinator(
 
         var paid = opcode == OpcodeTicketPurchase
             ? capeId < 0 || session.WithLock(ConsumeOneTicket)
-            : session.WithLock(chief => TryPayCoins(chief, reqCoins));
+            : Coins.TryDebit(session, reqCoins);
         if (!paid)
         {
             sessionManager.Knights.WithClan(clan.Id, knights => RefundClanPoints(knights, reqClanPoints), false);
@@ -233,15 +232,6 @@ public class KnightsCapePacketCoordinator(
     private static bool RefundClanPoints(KnightsEntity clan, int points)
     {
         clan.ClanPointFund += points;
-        return true;
-    }
-
-    private static bool TryPayCoins(UserSession chief, int coins)
-    {
-        if (chief.Money < coins)
-            return false;
-
-        chief.Money -= coins;
         return true;
     }
 

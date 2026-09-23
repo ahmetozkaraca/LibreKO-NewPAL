@@ -1,6 +1,7 @@
 ﻿using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
+using LibreKO.Game.Protocol.Writers;
 using LibreKO.Game.World;
 
 namespace LibreKO.Game.Protocol;
@@ -33,7 +34,6 @@ public sealed class MagicTargetingService(
 {
     public const int AreaTargetId = -1;
 
-    private const int PayloadSlots = 7;
     private const int CentreXSlot = 0;
     private const int CentreYSlot = 1;
     private const int CentreZSlot = 2;
@@ -51,7 +51,7 @@ public sealed class MagicTargetingService(
         if ((SkillMoral)magic.Moral == SkillMoral.Self || targetId == caster.CharacterId)
             return CheckSelf(caster, magic);
 
-        return caster.IsBlinded ? MagicTargetCheck.Refused : CheckTarget(caster, magic, targetId, NoDrift);
+        return caster.IsBlinded ? MagicTargetCheck.Refused : CheckTarget(caster, magic, targetId, data, NoDrift);
     }
 
     public MagicTargetCheck CheckRelease(UserSession caster, MagicData magic, MagicCastBinding binding, float driftSeconds)
@@ -62,7 +62,7 @@ public sealed class MagicTargetingService(
 
         return binding.TargetId == caster.CharacterId
             ? CheckSelf(caster, magic)
-            : caster.IsBlinded ? MagicTargetCheck.Refused : CheckTarget(caster, magic, binding.TargetId, drift);
+            : caster.IsBlinded ? MagicTargetCheck.Refused : CheckTarget(caster, magic, binding.TargetId, binding.Data, drift);
     }
 
     public float CastRange(UserSession caster, MagicData magic)
@@ -83,57 +83,75 @@ public sealed class MagicTargetingService(
         return CombatReach.DefaultSkillRange;
     }
 
-    private MagicTargetCheck CheckTarget(UserSession caster, MagicData magic, int targetId, float drift)
+    private MagicTargetCheck CheckTarget(UserSession caster, MagicData magic, int targetId, int[] data, float drift)
     {
         var player = sessionManager.GetByCharacterId(targetId);
         if (player != null)
-            return CheckPlayer(caster, magic, player, drift);
+            return CheckPlayer(caster, magic, player, data, drift);
 
         var npc = sessionManager.Regions.GetNpc(targetId);
-        return npc == null ? MagicTargetCheck.Refused : CheckNpc(caster, magic, npc, drift);
+        return npc == null ? MagicTargetCheck.Refused : CheckNpc(caster, magic, npc, data, drift);
     }
 
     private static MagicTargetCheck CheckSelf(UserSession caster, MagicData magic) =>
         (SkillMoral)magic.Moral is SkillMoral.FriendExceptMe or SkillMoral.CorpseFriend || IsHostile(magic)
             ? MagicTargetCheck.Refused
-            : new MagicTargetCheck(MagicTargetVerdict.Valid, new MagicCastBinding(caster.CharacterId, new int[PayloadSlots]), MagicTargetCheck.NoDistance);
+            : new MagicTargetCheck(MagicTargetVerdict.Valid, new MagicCastBinding(caster.CharacterId, EmptyPayload()), MagicTargetCheck.NoDistance);
 
-    private MagicTargetCheck CheckPlayer(UserSession caster, MagicData magic, UserSession target, float drift)
+    private MagicTargetCheck CheckPlayer(UserSession caster, MagicData magic, UserSession target, int[] data, float drift)
     {
         if (target.ZoneId != caster.ZoneId || !Accepts(caster, magic, target))
             return MagicTargetCheck.Refused;
 
         var reach = CastRange(caster, magic) + CombatReach.PlayerBodyRadius + drift;
-        return Measure(caster, target.X, target.Z, reach, new MagicCastBinding(target.CharacterId, new int[PayloadSlots]));
+        return Measure(caster, target.X, target.Z, reach,
+            new MagicCastBinding(target.CharacterId, TargetedPayload(caster, magic, data, drift)));
     }
 
-    private MagicTargetCheck CheckNpc(UserSession caster, MagicData magic, NpcInstance npc, float drift)
+    private MagicTargetCheck CheckNpc(UserSession caster, MagicData magic, NpcInstance npc, int[] data, float drift)
     {
         if (npc.ZoneId != caster.ZoneId || !npc.IsAlive || !IsHostile(magic) || !NpcHostility.IsAttackableBy(npc, caster))
             return MagicTargetCheck.Refused;
 
         var reach = CastRange(caster, magic) + CombatReach.BodyRadius(npc) + drift;
-        return Measure(caster, npc.X, npc.Z, reach, new MagicCastBinding(npc.UniqueId, new int[PayloadSlots]));
+        return Measure(caster, npc.X, npc.Z, reach,
+            new MagicCastBinding(npc.UniqueId, TargetedPayload(caster, magic, data, drift)));
     }
 
     private MagicTargetCheck CheckArea(UserSession caster, MagicData magic, int[] data, float drift)
     {
-        var sanitized = new int[PayloadSlots];
-        var hasCentre = data.Length > CentreZSlot
-            && (data[CentreXSlot] != NoCoordinate || data[CentreZSlot] != NoCoordinate);
-        if (!hasCentre)
-            return new MagicTargetCheck(MagicTargetVerdict.Valid, new MagicCastBinding(AreaTargetId, sanitized), MagicTargetCheck.NoDistance);
+        if (!HasCentre(data))
+            return new MagicTargetCheck(MagicTargetVerdict.Valid, new MagicCastBinding(AreaTargetId, EmptyPayload()), MagicTargetCheck.NoDistance);
 
-        sanitized[CentreXSlot] = data[CentreXSlot];
-        sanitized[CentreYSlot] = data[CentreYSlot];
-        sanitized[CentreZSlot] = data[CentreZSlot];
         return Measure(caster, data[CentreXSlot], data[CentreZSlot], CastRange(caster, magic) + drift,
-            new MagicCastBinding(AreaTargetId, sanitized));
+            new MagicCastBinding(AreaTargetId, CentreOf(data)));
     }
+
+    private int[] TargetedPayload(UserSession caster, MagicData magic, int[] data, float drift) =>
+        HasCentre(data)
+        && Reach.Within(caster.X, caster.Z, data[CentreXSlot], data[CentreZSlot], Allowance(CastRange(caster, magic) + drift))
+            ? CentreOf(data)
+            : EmptyPayload();
+
+    private static bool HasCentre(int[] data) =>
+        data.Length > CentreZSlot && (data[CentreXSlot] != NoCoordinate || data[CentreZSlot] != NoCoordinate);
+
+    private static int[] CentreOf(int[] data)
+    {
+        var centre = EmptyPayload();
+        centre[CentreXSlot] = data[CentreXSlot];
+        centre[CentreYSlot] = data[CentreYSlot];
+        centre[CentreZSlot] = data[CentreZSlot];
+        return centre;
+    }
+
+    private static int[] EmptyPayload() => new int[MagicProcessPacketWriter.PayloadSlotCount];
+
+    private static float Allowance(float reach) => reach + CombatReach.ClientRangeSlack + Reach.LatencyAllowance;
 
     private static MagicTargetCheck Measure(UserSession caster, float x, float z, float reach, MagicCastBinding binding)
     {
-        var allowed = reach + CombatReach.ClientRangeSlack + Reach.LatencyAllowance;
+        var allowed = Allowance(reach);
         var distance = MathF.Sqrt(Reach.DistanceSquared(caster.X, caster.Z, x, z));
         if (distance <= allowed)
             return new MagicTargetCheck(MagicTargetVerdict.Valid, binding, distance);
@@ -154,14 +172,14 @@ public sealed class MagicTargetingService(
             return false;
 
         if (moral == SkillMoral.All)
-            return stealthService.CanSee(caster, target);
+            return stealthService.CanTarget(caster, target);
 
         if (IsHostile(magic))
-            return moral != SkillMoral.Npc && PvpRules.CanAttackPlayer(caster, target) && stealthService.CanSee(caster, target);
+            return moral != SkillMoral.Npc && PvpRules.CanAttackPlayer(caster, target) && stealthService.CanTarget(caster, target);
 
         return moral switch
         {
-            SkillMoral.Party or SkillMoral.PartyAll => caster.IsInParty && caster.PartyIndex == target.PartyIndex,
+            SkillMoral.Party or SkillMoral.PartyAll => PvpRules.SharesPartyWith(caster, target),
             SkillMoral.Clan or SkillMoral.ClanAll => caster.KnightsId > NoClan && caster.KnightsId == target.KnightsId,
             SkillMoral.FriendWithMe or SkillMoral.FriendExceptMe or SkillMoral.AreaFriend or SkillMoral.AreaAll
                 => IsAlly(caster, target),

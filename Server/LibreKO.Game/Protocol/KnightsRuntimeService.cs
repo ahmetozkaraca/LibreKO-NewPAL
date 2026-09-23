@@ -10,6 +10,7 @@ public interface IKnightsRuntimeService
     bool IsClanLeader(UserSession session);
     bool CanAdmitCandidates(UserSession session);
     void ClearClanState(UserSession session);
+    bool TryLeaveClan(UserSession member, short clanId);
     Task<bool> CanPromoteToViceChiefAsync(IKnightsRepository repo, short knightsId, string targetName);
     Task SyncCharacterAsync(IKnightsRepository repo, UserSession session, bool includeMoney = false, bool includeLoyalty = false);
     Task NotifyOnlineClanMembersAsync(short clanId, Packet packet);
@@ -17,12 +18,11 @@ public interface IKnightsRuntimeService
 
 public class KnightsRuntimeService(SessionManager sessionManager) : IKnightsRuntimeService
 {
-    private const byte ViceChiefFame = 2;
     private const int MaxViceChiefs = 3;
 
     public bool IsClanLeader(UserSession session)
     {
-        return session.KnightsId > 0 && session.KnightsFame == 1;
+        return session.KnightsId > 0 && session.KnightsFame == KnightsManager.ChiefFame;
     }
 
     public bool CanAdmitCandidates(UserSession session)
@@ -39,15 +39,25 @@ public class KnightsRuntimeService(SessionManager sessionManager) : IKnightsRunt
         session.Fame = 0;
     }
 
+    public bool TryLeaveClan(UserSession member, short clanId)
+        => member.WithLock(leaver =>
+        {
+            if (clanId <= 0 || leaver.KnightsId != clanId)
+                return false;
+
+            ClearClanState(leaver);
+            return true;
+        });
+
     public async Task<bool> CanPromoteToViceChiefAsync(
         IKnightsRepository repo, short knightsId, string targetName)
     {
         var members = await repo.GetCharactersByClanAsync(knightsId);
-        if (members.Any(m => m.Fame == ViceChiefFame
+        if (members.Any(m => m.Fame == KnightsManager.ViceChiefFame
                              && m.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase)))
             return true;
 
-        return members.Count(m => m.Fame == ViceChiefFame) < MaxViceChiefs;
+        return members.Count(m => m.Fame == KnightsManager.ViceChiefFame) < MaxViceChiefs;
     }
 
     public async Task SyncCharacterAsync(IKnightsRepository repo, UserSession session, bool includeMoney = false, bool includeLoyalty = false)

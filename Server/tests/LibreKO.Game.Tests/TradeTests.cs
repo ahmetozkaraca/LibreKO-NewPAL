@@ -480,6 +480,7 @@ public class TradeTests : GameTestBase
         target.Hp = 100;
         session.Trade.ExchangeUser = target.CharacterId;
         target.Trade.ExchangeUser = session.CharacterId;
+        session.Trade.ExchangeStarted = target.Trade.ExchangeStarted = true;
         session.InitExchange(true);
         target.InitExchange(true);
         session.Inventory[InventoryConstants.SlotMax].ItemId = itemId;
@@ -540,6 +541,7 @@ public class TradeTests : GameTestBase
         receiver.Hp = 100;
         giver.Trade.ExchangeUser = receiver.CharacterId;
         receiver.Trade.ExchangeUser = giver.CharacterId;
+        giver.Trade.ExchangeStarted = receiver.Trade.ExchangeStarted = true;
         giver.InitExchange(true);
         receiver.InitExchange(true);
         giver.Inventory[InventoryConstants.SlotMax].ItemId = itemId;
@@ -947,5 +949,6 @@ public class TradeTests : GameTestBase
     {
         a.Trade.ExchangeUser = b.CharacterId;
         b.Trade.ExchangeUser = a.CharacterId;
+        a.Trade.ExchangeStarted = b.Trade.ExchangeStarted = true;
     }
 }

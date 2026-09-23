@@ -32,6 +32,8 @@ public partial class World
     private readonly List<PusCatalogEntry> _pusCatalog = new();
     private readonly List<ShoppingMallCategory> _pusCategories = new();
     private readonly List<PusBasketEntry> _pusBasket = new();
+    private Queue<PusPurchaseLine> _pusBuyQueue = new();
+    private readonly PendingReply _pusBuyReply = new();
     private byte _pusSelectedCategory;
     private HBoxContainer _pusCategoryTabs = null!;
     private VBoxContainer _pusItemList = null!;
@@ -160,8 +162,8 @@ public partial class World
         root.AddChild(new HSeparator());
 
         root.AddChild(UiTheme.SectionTitle("Send a Letter"));
-        _shoppingmallToEdit = MakeField(root, "To", 16);
-        _shoppingmallSubjectEdit = MakeField(root, "Subject", 31);
+        _shoppingmallToEdit = MakeField(root, "To", Net.ShoppingMallLetterRecipientMax);
+        _shoppingmallSubjectEdit = MakeField(root, "Subject", Net.ShoppingMallLetterSubjectMax);
 
         var msgLbl = UiTheme.Text("Message", 12, UiTheme.TextLo);
         root.AddChild(msgLbl);
@@ -444,6 +446,11 @@ public partial class World
         if (to.Length == 0) { SetShoppingMallStatus("Enter a recipient.", true); return; }
         if (subject.Length == 0) { SetShoppingMallStatus("Enter a subject.", true); return; }
         if (message.Length == 0) { SetShoppingMallStatus("Write a message.", true); return; }
+        if (message.Length > Net.ShoppingMallLetterMessageMax)
+        {
+            SetShoppingMallStatus($"A letter holds at most {Net.ShoppingMallLetterMessageMax} characters.", true);
+            return;
+        }
 
         int sel = _shoppingmallGiftPick.Selected;
         int absSlot = sel > 0 ? (int)_shoppingmallGiftPick.GetItemMetadata(sel) : -1;
@@ -486,10 +493,17 @@ public partial class World
 
     private void OnShoppingMallBuyResult(bool ok, int knightCash)
     {
+        _pusBuyReply.Settle();
         if (ok)
         {
             if (knightCash >= 0)
                 OnShoppingMallBalance(knightCash);
+
+            if (_pusBuyQueue.Count > 0)
+            {
+                SendNextPusPurchase();
+                return;
+            }
 
             _pusBasketStatus.Text = "Purchase complete.";
             _pusBasketStatus.AddThemeColorOverride("font_color", UiTheme.Good);
@@ -497,6 +511,7 @@ public partial class World
             return;
         }
 
+        _pusBuyQueue.Clear();
         _pusBasketStatus.Text = "Purchase failed. Check your KC balance and try again.";
         _pusBasketStatus.AddThemeColorOverride("font_color", UiTheme.Bad);
     }
@@ -719,6 +734,7 @@ public partial class World
 
     private void BuyPusBasket()
     {
+        if (_pusBuyReply.Waiting) return;
         if (_pusBasket.Count == 0)
         {
             _pusBasketStatus.Text = "Basket is empty.";
@@ -732,15 +748,26 @@ public partial class World
             total += entry.Item.Price * entry.Count;
         }
 
-        foreach (var entry in _pusBasket)
-        {
-            Net.I.SendPowerUpStoreBuy(entry.Item.Id, entry.Count);
-        }
+        _pusBuyQueue = PusPurchase.Plan(_pusBasket.Select(entry => new PusPurchaseLine(entry.Item.Id, entry.Count)));
 
-        _pusBasketStatus.Text = $"Purchase request sent for {total:n0} KC. Server validation pending.";
+        _pusBasketStatus.Text = $"Buying for {total:n0} KC…";
         _pusBasketStatus.AddThemeColorOverride("font_color", UiTheme.Good);
-        Chat.Info($"Power-Up Store purchase request sent: {total:n0} KC.");
         _pusBasket.Clear();
         RefreshPusView();
+        SendNextPusPurchase();
+    }
+
+    private void SendNextPusPurchase()
+    {
+        var line = _pusBuyQueue.Dequeue();
+        AwaitReply(_pusBuyReply, OnPusPurchaseTimedOut);
+        Net.I.SendPowerUpStoreBuy(line.CatalogEntryId, line.Count);
+    }
+
+    private void OnPusPurchaseTimedOut()
+    {
+        _pusBuyQueue.Clear();
+        _pusBasketStatus.Text = NoReplyText;
+        _pusBasketStatus.AddThemeColorOverride("font_color", UiTheme.Bad);
     }
 }

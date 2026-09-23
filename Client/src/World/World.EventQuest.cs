@@ -71,7 +71,7 @@ public partial class World
             {
                 int id = q.Id;
                 var btn = new Button { Text = "Claim", FocusMode = Control.FocusModeEnum.None };
-                btn.Pressed += () => Net.I.SendEventQuestClaim(id);
+                btn.Pressed += () => { btn.Disabled = true; Net.I.SendEventQuestClaim(id); };
                 hb.AddChild(btn);
             }
             else if (q.Accepted)
@@ -82,7 +82,7 @@ public partial class World
             {
                 int id = q.Id;
                 var btn = new Button { Text = "Accept", FocusMode = Control.FocusModeEnum.None };
-                btn.Pressed += () => Net.I.SendEventQuestAccept(id);
+                btn.Pressed += () => { btn.Disabled = true; Net.I.SendEventQuestAccept(id); };
                 hb.AddChild(btn);
             }
             _eventQuestList.AddChild(row);
@@ -94,13 +94,7 @@ public partial class World
         }
     }
 
-    private void OnEventQuestAccept(int questId, bool ok)
-    {
-        if (ok) Net.I.SendEventQuestList();
-    }
+    private void OnEventQuestAccept(int questId, bool ok) => Net.I.SendEventQuestList();
 
-    private void OnEventQuestClaim(int questId, bool ok)
-    {
-        if (ok) Net.I.SendEventQuestList();
-    }
+    private void OnEventQuestClaim(int questId, bool ok) => Net.I.SendEventQuestList();
 }

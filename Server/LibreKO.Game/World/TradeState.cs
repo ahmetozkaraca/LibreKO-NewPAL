@@ -11,6 +11,7 @@ public class TradeState
     public bool ExchangeOk { get; set; }
     public bool AskedForExchange { get; set; }
     public List<ExchangeItem> ExchangeItemList { get; } = [];
+    public bool ExchangeStarted { get; set; }
     public bool IsTrading => ExchangeUser != -1;
 
     // Merchant (personal shop)
@@ -21,7 +22,7 @@ public class TradeState
     public bool IsSellingMerchantPreparing { get; set; }
     public bool IsBuyingMerchantPreparing { get; set; }
     public bool IsMerchantPreparing => IsSellingMerchantPreparing || IsBuyingMerchantPreparing;
-    public bool LocksInventory => IsTrading || IsMerchanting || IsMerchantPreparing;
+    public bool LocksInventory => ExchangeStarted || IsMerchanting || IsMerchantPreparing;
     public bool PremiumMerchant { get; set; }
     public string MerchantAdvert { get; set; } = string.Empty;
     public int MerchantTargetUserId { get; set; } = -1;

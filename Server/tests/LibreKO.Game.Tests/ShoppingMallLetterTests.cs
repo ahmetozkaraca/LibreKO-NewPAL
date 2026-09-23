@@ -2,6 +2,7 @@
 using LibreKO.Common.Domain.Entities;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
+using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
 using LibreKO.Common.Infrastructure.Persistence;
 using LibreKO.Game.Protocol;
@@ -36,6 +37,7 @@ public class ShoppingMallLetterTests : GameTestBase
     private const int GiftCoins = 990;
     private const int LetterId = 5001;
     private const byte FarBagSlot = 20;
+    private const byte NextBagSlot = 1;
 
     [Fact]
     public async Task LetterSend_RefusesAnItemItsTableMarksUntradeable()
@@ -157,12 +159,31 @@ public class ShoppingMallLetterTests : GameTestBase
         var (recipient, sent) = Online(provider, RecipientId, RecipientName);
         recipient.Stats.MaxWeight = 100;
         recipient.Trade.ExchangeUser = SenderId;
+        recipient.Trade.ExchangeStarted = true;
 
         await Route(provider, recipient, ClaimLetter());
 
         Result(sent, LetterGetItem).Should().Be(Rejected);
         recipient.Inventory.Should().NotContain(slot => slot.ItemId == GiftId);
         (await LetterStatusAsync(provider)).Should().Be(LetterUnread);
+    }
+
+    [Fact]
+    public async Task LetterGetItem_KeepsTheGiftOutOfABoundStack()
+    {
+        using var provider = Provider(GiftLetter(0));
+        var (recipient, sent) = Online(provider, RecipientId, RecipientName);
+        recipient.Stats.MaxWeight = 100;
+        var bound = Stock(recipient, 0, GiftId);
+        bound.Flag = (byte)ItemFlag.Bound;
+
+        await Route(provider, recipient, ClaimLetter());
+
+        Result(sent, LetterGetItem).Should().Be(Succeeded);
+        bound.Count.Should().Be(1);
+        var gift = recipient.Inventory[InventoryConstants.InventoryStart + NextBagSlot];
+        gift.ItemId.Should().Be(GiftId);
+        gift.State.Should().Be(ItemFlag.Unsealed);
     }
 
     private static MailBox GiftLetter(int coins) => new()

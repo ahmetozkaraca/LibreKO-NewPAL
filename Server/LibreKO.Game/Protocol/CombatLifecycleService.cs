@@ -28,6 +28,7 @@ public class CombatLifecycleService(
     ILoyaltyService loyaltyService,
     ICombatRewardService combatRewardService,
     IExchangePacketCoordinator exchangePacketCoordinator,
+    IMerchantPacketCoordinator merchantPacketCoordinator,
     IMiningPacketCoordinator miningPacketCoordinator,
     IEventSystemsPacketCoordinator eventSystemsPacketCoordinator,
     IWorldVisibilityService worldVisibilityService,
@@ -99,6 +100,21 @@ public class CombatLifecycleService(
             return;
         }
 
+        if (!session.TryClaimRevival())
+            return;
+
+        try
+        {
+            await RespawnAsync(client, session);
+        }
+        finally
+        {
+            session.ReleaseRevival();
+        }
+    }
+
+    private async Task RespawnAsync(IClient client, UserSession session)
+    {
         var inArena = ArenaZones.TryGetExit(session.ArenaId, out var exitX, out var exitZ);
 
         var startPos = gameDataService.GetStartPosition(session.ZoneId);
@@ -236,6 +252,9 @@ public class CombatLifecycleService(
 
         if (victim.Trade.IsTrading)
             await exchangePacketCoordinator.CancelAsync(victim, isOnDeath: true);
+
+        if (victim.Trade.IsMerchanting || victim.Trade.IsMerchantPreparing)
+            await merchantPacketCoordinator.CloseStallAsync(victim);
 
         await miningPacketCoordinator.StopGatheringAsync(victim);
 

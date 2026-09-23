@@ -5,9 +5,11 @@ using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
 using LibreKO.Common.Infrastructure.Network;
+using LibreKO.Game.Configuration;
 using LibreKO.Game.World;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using LibreKO.Game.Protocol.Writers;
 
 namespace LibreKO.Game.Protocol;
@@ -35,6 +37,7 @@ public class MiscPacketCoordinator(
     IWorldPacketCoordinator worldPacketCoordinator,
     IKnightsRuntimeService knightsRuntimeService,
     TimeProvider timeProvider,
+    IOptions<GameServerSettings> settings,
     ILogger<MiscPacketCoordinator> logger) : IMiscPacketCoordinator
 {
     private const byte RentalNpc = 3;
@@ -54,8 +57,6 @@ public class MiscPacketCoordinator(
     private const byte ClanNameNotClan = 4;
     private const byte NameChangeInClan = 4;
     private const byte ClanNameSuccess = 16;
-    private const int ScrollOfIdentity = 379090000;
-    private const int ScrollOfIdentityAlt = 800032000;
     private const int ClanNameScroll = 800086000;
 
     private byte santaOrAngelState;
@@ -126,7 +127,7 @@ public class MiscPacketCoordinator(
         => target.CharacterId == requester.CharacterId
             || (target.Hp <= 0
                 && target.ZoneId == requester.ZoneId
-                && ((requester.IsInParty && requester.PartyIndex == target.PartyIndex)
+                && (PvpRules.SharesPartyWith(requester, target)
                     || (requester.KnightsId > 0 && requester.KnightsId == target.KnightsId)));
 
     public async Task HandleMarketBbsAsync(IClient client, Packet packet)
@@ -278,7 +279,7 @@ public class MiscPacketCoordinator(
             return;
 
         var newName = packet.ReadString();
-        if (string.IsNullOrWhiteSpace(newName) || newName.Length is < 3 or > 20)
+        if (!CharacterRules.IsValidName(newName, CharacterRules.MinRenameLength, settings.Value.Player.NamePattern))
         {
             await SendNameChangeResultAsync(session, NameChangeInvalid);
             return;
@@ -290,8 +291,8 @@ public class MiscPacketCoordinator(
             return;
         }
 
-        var scrollSlot = FindNameChangeScrollSlot(session);
-        if (scrollSlot < 0)
+        var scrollSlot = CharacterRules.FindRenameScroll(session.Inventory);
+        if (scrollSlot == CharacterRules.NoSlot)
         {
             await SendNameChangeResultAsync(session, NameChangeShowDialog);
             return;
@@ -334,14 +335,14 @@ public class MiscPacketCoordinator(
             return;
 
         var newName = packet.ReadString();
-        if (string.IsNullOrWhiteSpace(newName) || newName.Length is < 3 or > 20)
+        if (!CharacterRules.IsValidName(newName, CharacterRules.MinClanNameLength, settings.Value.Player.NamePattern))
         {
             await SendClanNameChangeResultAsync(session, NameChangeInvalid);
             return;
         }
 
         // Must be in a clan and be the chief.
-        if (session.KnightsId <= 0 || session.KnightsFame != 1)
+        if (session.KnightsId <= 0 || session.KnightsFame != KnightsManager.ChiefFame)
         {
             await SendClanNameChangeResultAsync(session, ClanNameNotClan);
             return;
@@ -492,17 +493,6 @@ public class MiscPacketCoordinator(
         (900020000, 3, 50000),     // 3-day premium buff scroll
         (810025000, 30, 700000),   // 30-day mount
     };
-
-    private static int FindNameChangeScrollSlot(UserSession session)
-    {
-        for (var index = InventoryConstants.SlotMax; index < InventoryConstants.SlotMax + InventoryConstants.HaveMax; index++)
-        {
-            if (session.Inventory[index].ItemId == ScrollOfIdentity && session.Inventory[index].Count > 0)
-                return index;
-        }
-
-        return -1;
-    }
 
     private static async Task SendNameChangeResultAsync(UserSession session, byte resultCode) =>
         await session.Client.SendPacket(MiscPacketWriter.NameChangeResult(resultCode));

@@ -224,7 +224,7 @@ public class ScriptCharacterService(
         if (coefficient != null)
         {
             session.RecalculateStats(coefficient, gameData);
-            session.Hp = (short)Math.Min(session.Hp, session.MaxHp);
+            session.ClampHpToMax();
             session.Mp = (short)Math.Min(session.Mp, session.MaxMp);
         }
     }

@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using LibreKO.Common.Domain.Entities.GameData;
 using LibreKO.Common.Domain.Services;
 using LibreKO.Common.Enums;
@@ -79,7 +79,7 @@ public class ExchangeTests : GameTestBase
     public async Task TheOneWhoAskedCannotAnswerTheirOwnRequest()
     {
         using var provider = CreateProvider(_ => { }, StockOneTradableItem);
-        var (asker, partner, askerClient, _) = OpenTrade(provider);
+        var (asker, partner, askerClient, _) = OpenTrade(provider, started: false);
 
         var agree = new Packet(GameOpcodes.GS_EXCHANGE);
         agree.WriteByte(ExchangeAgree);
@@ -88,7 +88,8 @@ public class ExchangeTests : GameTestBase
 
         await provider.GetRequiredService<IExchangePacketCoordinator>().HandleAsync(askerClient, agree);
 
-        asker.Trade.AskedForExchange.Should().BeTrue();
+        asker.Trade.IsTrading.Should().BeFalse();
+        partner.Trade.ExchangeStarted.Should().BeFalse();
         partner.Trade.ExchangeItemList.Should().BeEmpty();
         asker.Trade.ExchangeItemList.Should().BeEmpty();
     }
@@ -108,7 +109,7 @@ public class ExchangeTests : GameTestBase
     }
 
     private static (UserSession Asker, UserSession Partner, IClient AskerClient, IClient PartnerClient)
-        OpenTrade(ServiceProvider provider)
+        OpenTrade(ServiceProvider provider, bool started = true)
     {
         var sessionManager = provider.GetRequiredService<SessionManager>();
         var askerClient = MakeClient(AskerId);
@@ -120,6 +121,8 @@ public class ExchangeTests : GameTestBase
         asker.Trade.ExchangeUser = partner.CharacterId;
         asker.Trade.AskedForExchange = true;
         partner.Trade.ExchangeUser = asker.CharacterId;
+        asker.Trade.ExchangeStarted = started;
+        partner.Trade.ExchangeStarted = started;
 
         return (asker, partner, askerClient, partnerClient);
     }

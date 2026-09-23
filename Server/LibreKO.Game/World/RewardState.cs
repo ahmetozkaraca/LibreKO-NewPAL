@@ -38,6 +38,7 @@ public sealed class RewardState
     public HashSet<int> OfferedAccepts { get; } = [];
     public Dictionary<QuestBoard, HashSet<int>> OfferedClaims { get; } = [];
     public HashSet<PrizePool> OfferedDraws { get; } = [];
+    public HashSet<PrizePool> CollectedDraws { get; } = [];
 
     public RewardQuestProgress? ProgressOf(RewardQuestKey key) => Quests.GetValueOrDefault(key);
 

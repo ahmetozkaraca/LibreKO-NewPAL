@@ -124,33 +124,57 @@ public class PreGameHardeningTests : GameTestBase
     }
 
     [Fact]
-    public async Task AnAccountUnderAttackIsLockedAcrossConnectionsUntilTheWindowPasses()
+    public async Task AnAddressGuessingAnAccountIsLockedAcrossConnectionsUntilTheWindowPasses()
     {
         const int accountLimit = 3;
+        var attackerAddress = IPAddress.Parse("203.0.113.1");
         var clock = new ManualClock();
         using var provider = CreateProvider(
             db => SeedPlayer(db, PasswordHasher.Hash(Password)),
-            configureSettings: settings => settings.Connections.MaxLoginFailuresPerAccount = accountLimit,
+            configureSettings: settings => settings.Connections.MaxLoginFailuresPerAccountAndIp = accountLimit,
             configureServices: UseClock(clock));
         var handler = provider.GetRequiredService<IPacketHandler>();
 
         for (var attempt = 0; attempt < accountLimit; attempt++)
         {
+            var (attacker, _) = CreateClient(attackerAddress);
+            await handler.HandlePacket(attacker, LoginRequest(GameOpcodes.GS_LOGIN, Login, "GUESS" + attempt));
+        }
+
+        var (guess, guessSent) = CreateClient(attackerAddress);
+        await handler.HandlePacket(guess, LoginRequest(GameOpcodes.GS_LOGIN, Login, Password));
+
+        guess.AccountId.Should().Be(0);
+        guessSent.Single().ReadByte().Should().Be(byte.MaxValue);
+
+        clock.Advance(new GameServerSettings().Connections.LoginFailureWindow);
+        var (later, _) = CreateClient(attackerAddress);
+        await handler.HandlePacket(later, LoginRequest(GameOpcodes.GS_LOGIN, Login, Password));
+
+        later.AccountId.Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task FailuresFromOtherAddressesNeverLockTheOwnerOut()
+    {
+        const int attackers = 6;
+        const int accountLimit = 1;
+        using var provider = CreateProvider(
+            db => SeedPlayer(db, PasswordHasher.Hash(Password)),
+            configureSettings: settings => settings.Connections.MaxLoginFailuresPerAccountAndIp = accountLimit,
+            configureServices: UseClock(new ManualClock()));
+        var handler = provider.GetRequiredService<IPacketHandler>();
+
+        for (var attempt = 0; attempt < attackers; attempt++)
+        {
             var (attacker, _) = CreateClient(IPAddress.Parse($"203.0.113.{attempt + 1}"));
             await handler.HandlePacket(attacker, LoginRequest(GameOpcodes.GS_LOGIN, Login, "GUESS" + attempt));
         }
 
-        var (owner, ownerSent) = CreateClient(IPAddress.Parse("198.51.100.7"));
+        var (owner, _) = CreateClient(IPAddress.Parse("198.51.100.7"));
         await handler.HandlePacket(owner, LoginRequest(GameOpcodes.GS_LOGIN, Login, Password));
 
-        owner.AccountId.Should().Be(0);
-        ownerSent.Single().ReadByte().Should().Be(byte.MaxValue);
-
-        clock.Advance(new GameServerSettings().Connections.LoginFailureWindow);
-        var (later, _) = CreateClient(IPAddress.Parse("198.51.100.7"));
-        await handler.HandlePacket(later, LoginRequest(GameOpcodes.GS_LOGIN, Login, Password));
-
-        later.AccountId.Should().BeGreaterThan(0);
+        owner.AccountId.Should().BeGreaterThan(0, "guessing from elsewhere must not keep the owner out of the account");
     }
 
     [Fact]
@@ -239,15 +263,17 @@ public class PreGameHardeningTests : GameTestBase
     }
 
     [Fact]
-    public async Task GameStart_ReadyBeforeLoadIsRefused()
+    public async Task GameStart_ReadyWithoutLoadStillEntersTheWorld()
     {
         using var provider = CreateProvider(db => SeedPlayer(db, Password));
-        var (client, sent) = await CreateSelectedClientAsync(provider);
+        var (client, _) = await CreateSelectedClientAsync(provider);
+        var viewerPackets = AddViewer(provider);
 
         await provider.GetRequiredService<IPacketHandler>().HandlePacket(client, GameStartRequest(GameStartSubOpcode.Ready));
 
-        provider.GetRequiredService<SessionManager>().GetByClientId(client.Id).Should().BeNull();
-        sent.Should().BeEmpty();
+        provider.GetRequiredService<SessionManager>().GetByClientId(client.Id).Should().NotBeNull();
+        viewerPackets.Count(IsRespawn).Should().Be(1);
+        provider.GetRequiredService<IViolationMonitor>().ScoreOf(client.Id).Should().Be(0);
     }
 
     [Fact]
@@ -371,7 +397,7 @@ public class PreGameHardeningTests : GameTestBase
 
     [Theory]
     [InlineData("Bad Name")]
-    [InlineData("Name1")]
+    [InlineData("Bad_Name")]
     [InlineData("Evil\r\nName")]
     public async Task Create_ANameOutsideTheNamePatternIsRefused(string name)
     {
@@ -382,6 +408,18 @@ public class PreGameHardeningTests : GameTestBase
             accountId, 1, name, TuarekRace, WarriorClass, 0, 0, 75, 65, 60, 50, 50);
 
         result.ReadByte().Should().Be((byte)CreateCharacterResult.InvalidName);
+    }
+
+    [Fact]
+    public async Task Create_ANameWithDigitsIsAcceptedByDefault()
+    {
+        using var provider = CreateStarterProvider();
+        var accountId = await GetAccountIdAsync(provider, Login);
+
+        var result = await provider.GetRequiredService<IPreGameService>().CreateCharacterAsync(
+            accountId, 1, "Warrior01", TuarekRace, WarriorClass, 0, 0, 75, 65, 60, 50, 50);
+
+        result.ReadByte().Should().Be((byte)CreateCharacterResult.Success);
     }
 
     [Fact]
@@ -407,7 +445,7 @@ public class PreGameHardeningTests : GameTestBase
 
     [Theory]
     [InlineData("Ab")]
-    [InlineData("Bad1")]
+    [InlineData("Bad_1")]
     [InlineData("Two Words")]
     public async Task Rename_ToAnInvalidNameIsRefused(string newName)
     {
