@@ -182,13 +182,12 @@ public class RewardSeedTests
     }
 
     [Fact]
-    public void Migrations_TheLatestMigrationTargetsTheCurrentModel()
+    public void Migrations_TheModelSnapshotMatchesTheCurrentModel()
     {
         using var context = RelationalContext();
-        var migrations = context.GetService<IMigrationsAssembly>();
-        var latest = migrations.CreateMigration(migrations.Migrations.MaxBy(migration => migration.Key).Value, context.Database.ProviderName!);
+        var snapshot = context.GetService<IMigrationsAssembly>().ModelSnapshot!.Model;
 
-        var target = context.GetService<IModelRuntimeInitializer>().Initialize(latest.TargetModel!);
+        var target = context.GetService<IModelRuntimeInitializer>().Initialize(snapshot);
 
         context.GetService<IMigrationsModelDiffer>().HasDifferences(
             target.GetRelationalModel(),
